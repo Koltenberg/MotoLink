@@ -70,6 +70,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private var responseReceived = false
     private var rejectedResponse = false
     private var logStore: SessionLogStore?
+    var onDiagnosticEvent: ((DiagnosticEvent) -> Void)?
 
     override init() {
         let defaults = UserDefaults.standard
@@ -87,7 +88,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         } catch {
             storageError = error.localizedDescription
         }
-        record("app", "MotoLink 0.3 · iOS \(UIDevice.current.systemVersion)")
+        record("app", "MotoLink 0.4 · iOS \(UIDevice.current.systemVersion)")
         central = CBCentralManager(delegate: self, queue: .main, options: [
             CBCentralManagerOptionRestoreIdentifierKey: "app.motolink.central.v1",
             CBCentralManagerOptionShowPowerAlertKey: true
@@ -422,6 +423,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         events.append(event)
         if events.count > 300 { events.removeFirst(events.count - 300) }
         logStore?.append(event)
+        onDiagnosticEvent?(event)
     }
 }
 

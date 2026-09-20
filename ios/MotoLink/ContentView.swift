@@ -16,6 +16,7 @@ struct ContentView: View {
                     header
                     connectionCard
                     discovery
+                    captureControls
                     RidePanel(rides: rides)
                     MotorcycleMeasurementsView(bluetooth: bluetooth)
                     diagnosticControls
@@ -43,7 +44,7 @@ struct ContentView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("MOTOLINK / 0.3")
+            Text("MOTOLINK / 0.4")
                 .font(.caption.weight(.bold))
                 .tracking(2)
                 .foregroundStyle(accent)
@@ -172,6 +173,42 @@ struct ContentView: View {
                 requestButton("Текущие значения", subtitle: "Напряжение и температуры", icon: "waveform.path", commands: [0x41, 0x45])
             }
         }
+    }
+
+    private var captureControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Одна поездка — один журнал").font(.title3.weight(.semibold))
+            if rides.active == nil {
+                Button {
+                    rides.startCapture()
+                    if rides.active != nil {
+                        // Include connection setup already observed before the button.
+                        for event in bluetooth.events { rides.recordDiagnostic(event) }
+                        bluetooth.setAutoReconnect(true)
+                        bluetooth.runFullDiagnostic()
+                    }
+                } label: {
+                    Label("Собирать всё и начать поездку", systemImage: "record.circle")
+                        .frame(maxWidth: .infinity).padding(.vertical, 8)
+                }.buttonStyle(.borderedProminent).foregroundStyle(.black)
+                    .disabled(!bluetooth.ready || bluetooth.busy || bluetooth.diagnosticRunning)
+                Text("Подключись на месте. Запусти сбор и дождись окончания проверки перед движением. Затем можно заблокировать экран; не смахивай приложение.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Button {
+                    // Capture the disconnect and final transport state before closing the file.
+                    bluetooth.stop()
+                    rides.finishAndExport()
+                } label: {
+                    Label("Завершить и сохранить журнал", systemImage: "square.and.arrow.up")
+                        .frame(maxWidth: .infinity).padding(.vertical, 8)
+                }.buttonStyle(.borderedProminent).foregroundStyle(.black).disabled(rides.exporting)
+                Text("Записываются GPS, исходные пакеты, ошибки и разрывы. После поездки остановись, нажми эту кнопку и выбери «Сохранить в Файлы». Повторный экспорт доступен в истории.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("Остановка двигателя пока не определяется достоверно. В этом режиме потеря GPS или Bluetooth не завершает сеанс. Сохранённое остаётся на iPhone после перезапуска; время, когда iOS не выполняла приложение, восстановить нельзя.")
+                .font(.caption).foregroundStyle(.secondary)
+        }.padding(18).background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
     }
 
     private var logSection: some View {

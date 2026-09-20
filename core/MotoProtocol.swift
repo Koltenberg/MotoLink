@@ -1,5 +1,45 @@
 import Foundation
 
+/// Copies an arbitrarily long ride without loading its raw packets into memory.
+/// A newline isolates a possibly truncated final record after process termination.
+enum CaptureJournalExport {
+    static func forEachLine(in source: URL, _ consume: (Data) throws -> Void) throws {
+        let input = try FileHandle(forReadingFrom: source)
+        defer { try? input.close() }
+        var pending = Data()
+        while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            pending.append(chunk)
+            while let newline = pending.firstIndex(of: 10) {
+                let line = Data(pending[..<newline])
+                pending.removeSubrange(...newline)
+                if !line.isEmpty { try consume(line) }
+            }
+        }
+        if !pending.isEmpty { try consume(pending) }
+    }
+
+    static func write(to destination: URL, header: Data, source: URL, footer: Data) throws {
+        guard FileManager.default.createFile(atPath: destination.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let output = try FileHandle(forWritingTo: destination)
+        defer { try? output.close() }
+        do {
+            let input = try FileHandle(forReadingFrom: source)
+            defer { try? input.close() }
+            try output.write(contentsOf: header + Data([10]))
+            while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty {
+                try output.write(contentsOf: chunk)
+            }
+            try output.write(contentsOf: Data([10]) + footer + Data([10]))
+            try output.synchronize()
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+}
+
 // Protocol mappings adapted from Zen3515/homeassistant-kawasaki-rideology-ble.
 // Apache-2.0. See THIRD_PARTY_NOTICES.md and LICENSES/Apache-2.0.txt.
 // Diagnostics only. A valid GATT link is not proof of a valid telemetry stream.

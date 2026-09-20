@@ -44,6 +44,7 @@ struct RideSummary: Codable, Identifiable {
     var pointCount: Int = 0
     var telemetryCount: Int = 0
     var interruptionCount: Int = 0
+    var rawEventCount: Int? = nil
     var elapsed: TimeInterval { max(0, (endedAt ?? Date()).timeIntervalSince(startedAt)) }
 }
 
@@ -55,6 +56,7 @@ struct RideRecord: Codable {
     var detail: String? = nil
     // Optional to keep JSONL written by versions before GPS-gap support readable.
     var gap: GPSGap? = nil
+    var diagnostic: DiagnosticEvent? = nil
 }
 
 /// Older JSONL has only segment IDs. Derive missing gap descriptions with stable
@@ -127,9 +129,15 @@ final class RideArchive {
     }
 
     func records(_ id: UUID) throws -> [RideRecord] {
-        let data = try Data(contentsOf: url(id, "jsonl"))
-        // A truncated last line after process termination cannot destroy prior points.
-        return data.split(separator: 0x0A).compactMap { try? Self.decoder.decode(RideRecord.self, from: Data($0)) }
+        var records: [RideRecord] = []
+        // Raw diagnostics stay on disk; loading the map must not load hours of packets.
+        try CaptureJournalExport.forEachLine(in: url(id, "jsonl")) { line in
+            if let record = try? Self.decoder.decode(RideRecord.self, from: line),
+               record.kind != "diagnostic", record.kind != "gps_observation" {
+                records.append(record)
+            }
+        }
+        return records
     }
 
     func append(_ records: [RideRecord], summary: RideSummary) {
@@ -144,7 +152,15 @@ final class RideArchive {
                 }
                 let handle = try FileHandle(forWritingTo: log)
                 defer { try? handle.close() }
-                try handle.seekToEnd()
+                let size = try handle.seekToEnd()
+                if size > 0 {
+                    let reader = try FileHandle(forReadingFrom: log)
+                    defer { try? reader.close() }
+                    try reader.seek(toOffset: size - 1)
+                    if try reader.read(upToCount: 1) != Data([10]) {
+                        try handle.write(contentsOf: Data([10]))
+                    }
+                }
                 for record in records {
                     var bytes = try Self.encoder.encode(record)
                     bytes.append(0x0A)
@@ -194,6 +210,34 @@ final class RideArchive {
     }
 
     func export(_ summary: RideSummary, completion: @escaping (Result<[URL], Error>) -> Void) {
+        queue.async { [self] in
+            do {
+                let root = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("MotoLink-capture-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                let output = root.appendingPathComponent("MotoLink-\(summary.id.uuidString).jsonl")
+                let summaryData = try Self.encoder.encode(summary)
+                let header = try JSONSerialization.data(withJSONObject: [
+                    "kind": "capture_manifest", "schema": "motolink.capture/1", "appVersion": "0.4",
+                    "exportedAt": ISO8601DateFormatter().string(from: Date()),
+                    "ride": try JSONSerialization.jsonObject(with: summaryData),
+                    "rawEventsIncluded": summary.rawEventCount ?? 0,
+                    "engineStopDetection": "unavailable; capture requires manual finish"
+                ])
+                let estimateURL = url(summary.id, "route-estimates")
+                let estimates = FileManager.default.fileExists(atPath: estimateURL.path)
+                    ? try Data(contentsOf: estimateURL) : Data("[]".utf8)
+                let footer = try JSONSerialization.data(withJSONObject: [
+                    "kind": "capture_end", "roadEstimatesNotGPS": try JSONSerialization.jsonObject(with: estimates)
+                ])
+                try CaptureJournalExport.write(to: output, header: header,
+                    source: url(summary.id, "jsonl"), footer: footer)
+                DispatchQueue.main.async { completion(.success([output])) }
+            } catch { DispatchQueue.main.async { completion(.failure(error)) } }
+        }
+    }
+
+    func exportGPXDetails(_ summary: RideSummary, completion: @escaping (Result<[URL], Error>) -> Void) {
         queue.async { [self] in
             do {
                 let records = try records(summary.id)
@@ -302,6 +346,15 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         authorization = location.authorizationStatus
         NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in self?.resumeOnForeground() }.store(in: &cancellables)
+        for (notification, label) in [
+            (UIApplication.didEnterBackgroundNotification, "background"),
+            (UIApplication.willEnterForegroundNotification, "foreground"),
+            (UIApplication.didReceiveMemoryWarningNotification, "memory_warning"),
+            (UIApplication.protectedDataWillBecomeUnavailableNotification, "protected_data_unavailable")
+        ] {
+            NotificationCenter.default.publisher(for: notification)
+                .sink { [weak self] _ in self?.recordLifecycle(label) }.store(in: &cancellables)
+        }
     }
 
     func setAutoRecord(_ enabled: Bool) {
@@ -407,6 +460,33 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         append(sampled.map { RideRecord(kind: "motorcycle", timestamp: $0.timestamp, measurement: $0) })
     }
 
+    /// Raw packets are never sampled or pruned from a ride, including malformed
+    /// notifications which may become interpretable after the first road test.
+    func recordDiagnostic(_ event: DiagnosticEvent) {
+        guard active != nil else { return }
+        active?.rawEventCount = (active?.rawEventCount ?? 0) + 1
+        append([RideRecord(kind: "diagnostic", timestamp: Date(), diagnostic: event)])
+    }
+
+    func recordLifecycle(_ detail: String) {
+        guard active != nil else { return }
+        append([RideRecord(kind: "lifecycle", timestamp: Date(), detail: detail)])
+    }
+
+    /// Start the capture even without GPS permission: BLE evidence must survive
+    /// a denied permission, unavailable satellites, or a long GPS outage.
+    func startCapture() {
+        guard active == nil else { resume(); return }
+        begin(trigger: "capture")
+        if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
+    }
+
+    func finishAndExport() {
+        guard active != nil else { return }
+        stop()
+        if let summary = history.first { export(summary) }
+    }
+
     func load(_ summary: RideSummary, completion: @escaping (Result<[RideRecord], Error>) -> Void) {
         guard let archive else { completion(.failure(CocoaError(.fileReadUnknown))); return }
         archive.load(summary.id, completion: completion)
@@ -441,9 +521,12 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         segment = 0; previous = nil; distanceAnchor = nil; speedMS = nil; lastLocationAt = nil; lastTelemetryTimes = [:]
         active = RideSummary(id: UUID(), startedAt: Date(), lastSavedAt: Date(), trigger: trigger)
         append([RideRecord(kind: "started", timestamp: Date(), detail: "GPS и скорость: iPhone. BLE-подключение не доказывает работу двигателя.")])
-        locationRunning = true
-        location.startUpdatingLocation()
-        status = "Запись маршрута · GPS iPhone"
+        recordLifecycle("iOS \(UIDevice.current.systemVersion); locationPermission=\(authorization.rawValue); lowPower=\(ProcessInfo.processInfo.isLowPowerModeEnabled)")
+        if authorization == .authorizedAlways || authorization == .authorizedWhenInUse {
+            locationRunning = true
+            location.startUpdatingLocation()
+        }
+        status = "Сеанс записывается на iPhone · GPS и доступные данные Bluetooth"
     }
 
     private func evaluateAutoStart() {
@@ -511,6 +594,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         guard active != nil, !finishAfterDisconnect() else { return }
         var records: [RideRecord] = []
         for fix in locations.sorted(by: { $0.timestamp < $1.timestamp }) {
+            records.append(RideRecord(kind: "gps_observation", timestamp: fix.timestamp,
+                detail: "lat=\(fix.coordinate.latitude); lon=\(fix.coordinate.longitude); horizontalAccuracy=\(fix.horizontalAccuracy); altitude=\(fix.altitude); verticalAccuracy=\(fix.verticalAccuracy); speed=\(fix.speed); speedAccuracy=\(fix.speedAccuracy); course=\(fix.course); courseAccuracy=\(fix.courseAccuracy)"))
             guard abs(fix.timestamp.timeIntervalSinceNow) < 30,
                   points.last == nil || fix.timestamp > points.last!.timestamp else { continue }
             guard fix.horizontalAccuracy >= 0, fix.horizontalAccuracy <= 50,

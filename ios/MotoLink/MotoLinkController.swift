@@ -11,8 +11,14 @@ final class MotoLinkController: ObservableObject {
 
     private init() {
         bluetooth.onMeasurements = { [weak self] in self?.rides.recordMeasurements($0) }
+        bluetooth.onDiagnosticEvent = { [weak self] in self?.rides.recordDiagnostic($0) }
         bluetooth.$connected.removeDuplicates().sink { [weak self] connected in
             self?.rides.bluetoothChanged(connected)
+        }.store(in: &subscriptions)
+        Timer.publish(every: 15, on: .main, in: .common).autoconnect().sink { [weak self] _ in
+            guard let self, self.rides.active != nil, self.bluetooth.ready,
+                  !self.bluetooth.busy, !self.bluetooth.diagnosticRunning else { return }
+            self.bluetooth.request([0x41, 0x45])
         }.store(in: &subscriptions)
     }
 }
