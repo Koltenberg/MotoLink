@@ -190,7 +190,9 @@ struct RideDetailView: View {
                             .font(.subheadline)
                     }
                 }
-                Button { rides.export(ride) } label: { Label("Экспорт GPX и исходных данных", systemImage: "square.and.arrow.up") }
+                Button { rides.export(ride) } label: { Label("Сохранить единый журнал", systemImage: "square.and.arrow.up") }
+                    .buttonStyle(.bordered).disabled(rides.exporting)
+                Button { rides.exportGPX(ride) } label: { Label("Отдельно: GPX и маршрут", systemImage: "map") }
                     .buttonStyle(.bordered).disabled(rides.exporting)
             }.padding(20)
         }

@@ -515,6 +515,18 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         }
     }
 
+    func exportGPX(_ summary: RideSummary) {
+        guard !exporting, let archive else { return }
+        exporting = true
+        archive.exportGPXDetails(summary) { [weak self] result in
+            self?.exporting = false
+            switch result {
+            case .success(let urls): self?.exportedFiles = SharedFiles(urls: urls)
+            case .failure(let error): self?.error = error.localizedDescription
+            }
+        }
+    }
+
     private func begin(trigger: String) {
         guard archive != nil else { status = "Хранилище недоступно — запись не начата"; return }
         points = []; gaps = []; pendingGPSGapReason = nil
