@@ -1,32 +1,66 @@
-name: Diagnose Apple installation connectivity
+name: Temporary Apple installation transport
 on:
   push:
     branches: [diagnose-apple-install]
     paths: [.github/workflows/apple-connectivity.yml]
-permissions: {}
+permissions:
+  statuses: write
 jobs:
-  lookup:
+  transport:
     runs-on: macos-15
-    timeout-minutes: 3
+    timeout-minutes: 22
     steps:
-      - name: Check public Apple lookup without account credentials
+      - name: Prepare transport with public verification key only
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           scratch="$(mktemp -d)"
-          trap 'rm -rf "$scratch"' EXIT
-          curl --fail --silent --show-error --max-time 20 \
-            https://raw.githubusercontent.com/nab138/isideload/f6a4d5d/isideload/src/assets/apple_root.cer \
-            -o "$scratch/apple.cer"
-          openssl x509 -inform DER -in "$scratch/apple.cer" -out "$scratch/apple.pem"
-          curl --silent --show-error --max-time 20 --cacert "$scratch/apple.pem" \
-            -H 'Accept: text/x-xml-plist' -H 'Content-Type: text/x-xml-plist' \
-            -H 'X-Mme-Client-Info: <Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>' \
-            -H 'X-Xcode-Version: 27.0 (27A5218g)' \
-            -H 'X-Apple-App-Info: com.apple.gs.xcode.auth' \
-            -A 'akd/1.0 CFNetwork/808.1.4' \
-            -D "$scratch/headers" -o "$scratch/body" \
-            -w 'HTTP status: %{http_code}; remote IP: %{remote_ip}\n' \
-            https://gsa.apple.com/grandslam/GsService2/lookup
-          head -c 2000 "$scratch/headers"
-          python3 -c 'import plistlib,sys,json; print(json.dumps(plistlib.load(open(sys.argv[1],"rb")).get("urls",{}),indent=2))' "$scratch/body"
+          cleanup() {
+            if [ -n "${relay_pid:-}" ]; then kill "$relay_pid" 2>/dev/null || true; fi
+            if [ -n "${tunnel_pid:-}" ]; then kill "$tunnel_pid" 2>/dev/null || true; fi
+            rm -rf "$scratch"
+          }
+          trap cleanup EXIT
+          cd "$scratch"
+          curl --fail --silent --show-error --max-time 30 \
+            https://raw.githubusercontent.com/Koltenberg/MotoLink/f3feb3ea376bd3ad71d030251458463990fe498f/scripts/install-transport.cjs -o server.cjs
+          cat > public.pem <<'KEY'
+          -----BEGIN PUBLIC KEY-----
+          MCowBQYDK2VwAyEA+3VrGsvRXm3qc1CcXjir6yJlX2QOeUr9I5Z/0kgNTuA=
+          -----END PUBLIC KEY-----
+          KEY
+          npm install --ignore-scripts --no-audit --no-fund ws@8.18.3 > npm.log
+          case "$(uname -m)" in
+            arm64) asset=cloudflared-darwin-arm64.tgz; expected=9a0b19f67dc7a3011bc6b972c7ce06a5fcea8784ac6bd599ffa382ea4aeb5a6e ;;
+            x86_64) asset=cloudflared-darwin-amd64.tgz; expected=1ea07ae775b03236bd6be18ca1848d6bdc4af2f4f3bce398823b5a36e5761b75 ;;
+            *) exit 1 ;;
+          esac
+          curl --fail --silent --show-error --max-time 60 \
+            "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/$asset" -o cloudflared.tgz
+          test "$(shasum -a 256 cloudflared.tgz | cut -d ' ' -f 1)" = "$expected"
+          tar xzf cloudflared.tgz
+          node server.cjs public.pem > server.log 2>&1 &
+          relay_pid=$!
+          ./cloudflared tunnel --no-autoupdate --url http://127.0.0.1:18742 > tunnel.log 2>&1 &
+          tunnel_pid=$!
+          for attempt in $(seq 1 45); do
+            endpoint="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -n 1 || true)"
+            if [ -n "$endpoint" ]; then break; fi
+            sleep 1
+          done
+          test -n "$endpoint"
+          export TRANSPORT_ENDPOINT="$endpoint"
+          node -e 'require("fs").writeFileSync("status.json",JSON.stringify({state:"pending",context:"apple-install-transport",description:"Authenticated Apple TLS transport; automatically expires in 20 minutes",target_url:process.env.TRANSPORT_ENDPOINT}))'
+          curl --fail --silent --show-error -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            --data-binary @status.json > /dev/null
+          echo "Transport ready. Apple Account credentials are never collected by this job."
+          wait "$relay_pid"
+          node -e 'require("fs").writeFileSync("status.json",JSON.stringify({state:"success",context:"apple-install-transport",description:"Temporary transport stopped",target_url:"https://github.com/"+process.env.GITHUB_REPOSITORY}))'
+          curl --fail --silent --show-error -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            --data-binary @status.json > /dev/null
