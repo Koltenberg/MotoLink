@@ -26,7 +26,7 @@ jobs:
             -H 'X-Apple-App-Info: com.apple.gs.xcode.auth' \
             -A 'akd/1.0 CFNetwork/808.1.4' \
             -D "$scratch/headers" -o "$scratch/body" \
-            -w 'HTTP status: %{http_code}\n' \
+            -w 'HTTP status: %{http_code}; remote IP: %{remote_ip}\n' \
             https://gsa.apple.com/grandslam/GsService2/lookup
           head -c 2000 "$scratch/headers"
-          head -c 2000 "$scratch/body"
+          python3 -c 'import plistlib,sys,json; print(json.dumps(plistlib.load(open(sys.argv[1],"rb")).get("urls",{}),indent=2))' "$scratch/body"
