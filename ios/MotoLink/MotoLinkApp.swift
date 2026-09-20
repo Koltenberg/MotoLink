@@ -8,7 +8,7 @@ struct MotoLinkApp: App {
         WindowGroup {
             ContentView(bluetooth: delegate.controller.bluetooth, rides: delegate.controller.rides)
                 .preferredColorScheme(.dark)
-                .tint(Color(red: 0.56, green: 0.93, blue: 0.37))
+                .tint(Color(red: 0.94, green: 0.20, blue: 0.25))
         }
     }
 }

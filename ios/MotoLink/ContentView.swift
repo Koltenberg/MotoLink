@@ -6,7 +6,7 @@ struct ContentView: View {
     @ObservedObject var rides: RideRecorder
     @State private var showHelp = false
 
-    private let accent = Color(red: 0.56, green: 0.93, blue: 0.37)
+    private let accent = Color(red: 0.94, green: 0.20, blue: 0.25)
     private var occupied: Bool { bluetooth.connecting || bluetooth.connected }
 
     var body: some View {
@@ -15,17 +15,29 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     header
                     connectionCard
-                    discovery
+                    if !occupied { discovery }
                     captureControls
-                    RidePanel(rides: rides)
-                    MotorcycleMeasurementsView(bluetooth: bluetooth)
-                    diagnosticControls
-                    logSection
+                    rideStatus
+                    NavigationLink { RideHistoryView(rides: rides) } label: {
+                        Label("Поездки и журналы", systemImage: "clock.arrow.circlepath")
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(18)
+                            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 20))
+                    }.buttonStyle(.plain)
+                    DisclosureGroup("Показатели мотоцикла") {
+                        MotorcycleMeasurementsView(bluetooth: bluetooth)
+                    }
+                    DisclosureGroup("Диагностика") {
+                        VStack(alignment: .leading, spacing: 20) {
+                            diagnosticControls
+                            logSection
+                        }.padding(.top, 12)
+                    }
                 }
                 .padding(20)
             }
-            .background(Color(red: 0.055, green: 0.065, blue: 0.055))
-            .navigationTitle("MotoLink")
+            .background(Color(red: 0.045, green: 0.047, blue: 0.055))
+            .navigationTitle("Moto Link")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button { showHelp = true } label: {
@@ -43,81 +55,84 @@ struct ContentView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("MOTOLINK / 0.4")
-                .font(.caption.weight(.bold))
-                .tracking(2)
-                .foregroundStyle(accent)
-            Text("Твой байк. Твои поездки.")
-                .font(.system(.largeTitle, design: .rounded).weight(.semibold))
-            Text("Маршруты на iPhone, связь с Kawasaki и единая проверка доступных данных.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("MOTO LINK").font(.caption.weight(.heavy)).tracking(3).foregroundStyle(accent)
+                Spacer()
+                Text("0.4.1").font(.caption.monospaced()).foregroundStyle(.secondary)
+            }
+            Text(rides.active == nil ? "Твой маршрут.\nТвой ритм." : "Поездка записывается.")
+                .font(.system(.largeTitle, design: .rounded).weight(.bold))
+            Label("На iPhone · запись без интернета", systemImage: "iphone")
+                .font(.subheadline).foregroundStyle(.secondary)
         }
     }
 
     private var connectionCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
-                Image(systemName: "antenna.radiowaves.left.and.right")
-                    .font(.title2)
-                    .foregroundStyle(bluetooth.connected ? accent : Color.secondary)
+                Image(systemName: bluetooth.connected ? "link" : "antenna.radiowaves.left.and.right")
+                    .font(.title2).foregroundStyle(accent)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(bluetooth.selectedName).font(.headline)
-                    Text(bluetooth.status).font(.subheadline).foregroundStyle(.secondary)
+                    Text(bluetooth.ready ? "Bluetooth подключён" : bluetooth.connecting ? "Подключаемся…" : bluetooth.connected ? "Готовим соединение…" : "Bluetooth не подключён")
+                        .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
                 if bluetooth.connecting { ProgressView() }
             }
-
-            Divider()
-            HStack(alignment: .top, spacing: 12) {
-                metric("СОЕДИНЕНИЕ", value: bluetooth.connected ? "Есть" : "Нет")
-                Spacer()
-                metric("ВХОДЯЩИЕ ПАКЕТЫ", value: String(bluetooth.packetCount))
+            if rides.active != nil && !bluetooth.connected {
+                Text("Связь с байком прервалась. Журнал остаётся на телефоне, запись GPS продолжается при доступном сигнале.")
+                    .font(.caption).foregroundStyle(.orange)
             }
-            if let last = bluetooth.lastPacketAt {
-                HStack {
-                    Text("Последний пакет")
-                    Spacer()
-                    Text(last, style: .time).monospacedDigit()
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            } else {
-                Text("Подключение по Bluetooth ещё не означает, что получена телеметрия.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Toggle("Подключаться автоматически", isOn: Binding(
-                get: { bluetooth.autoReconnect },
-                set: { bluetooth.setAutoReconnect($0) }
-            ))
-            .font(.subheadline)
-            .disabled(!bluetooth.hasRememberedDevice)
-
-            Text("После первой полной проверки приложение повторяет профиль телеметрии при автоподключении. Bluetooth-связь не подтверждает запуск двигателя.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            if occupied || bluetooth.scanning {
-                Button(role: .destructive) { bluetooth.stop() } label: {
-                    Label("Остановить", systemImage: "stop.fill").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-            } else if bluetooth.hasRememberedDevice {
+            if !occupied && bluetooth.hasRememberedDevice {
                 Button { bluetooth.connectRemembered() } label: {
-                    Label("Подключить сохранённый", systemImage: "link")
-                        .frame(maxWidth: .infinity)
+                    Label("Подключить мотоцикл", systemImage: "link").frame(maxWidth: .infinity).padding(.vertical, 7)
+                }.buttonStyle(.bordered).disabled(!bluetooth.bluetoothPowered)
+            }
+            if occupied && rides.active == nil {
+                Button("Отменить подключение") { bluetooth.stop() }.font(.caption)
+            }
+            if !bluetooth.bluetoothPowered {
+                Text("Включи Bluetooth и разреши доступ для Moto Link в настройках iPhone.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+        }.padding(18).background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
+    }
+
+    private var rideStatus: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let ride = rides.active {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    HStack(alignment: .top) {
+                        metric("В ПУТИ", value: duration(context.date.timeIntervalSince(ride.startedAt)))
+                        Spacer()
+                        metric("ПО GPS", value: String(format: "%.1f км", ride.distanceMeters / 1000))
+                    }
+                    if let message = rides.gpsStatus(at: context.date) {
+                        Text(message).font(.caption).foregroundStyle(.orange)
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .foregroundStyle(.black)
-                .disabled(!bluetooth.bluetoothPowered)
+                Text("Событий Bluetooth: \(ride.rawEventCount ?? 0)")
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                if let last = bluetooth.lastPacketAt {
+                    HStack {
+                        Text("Последние данные байка")
+                        Text(last, style: .time)
+                    }.font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Ожидаем данные байка. Само подключение ещё не подтверждает телеметрию.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let error = rides.error {
+                Label("Ошибка сохранения: \(error)", systemImage: "exclamationmark.triangle")
+                    .font(.subheadline).foregroundStyle(.orange)
+            }
+            if let error = bluetooth.storageError {
+                Text("Ошибка журнала Bluetooth: \(error)").font(.caption).foregroundStyle(.orange)
             }
         }
-        .padding(18)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
     }
 
     private var discovery: some View {
@@ -155,17 +170,17 @@ struct ContentView: View {
 
     private var diagnosticControls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Одна полная проверка").font(.title3.weight(.semibold))
+            Text("Проверка каналов").font(.title3.weight(.semibold))
             Text("Соберём сведения, возможности, напряжение, температуры и попробуем запустить поток. Если поток не появится, автоматически применим один резервный профиль совместимости. Он передаёт мотоциклу имя телефона MotoLink.")
                 .font(.subheadline).foregroundStyle(.secondary)
             Button { bluetooth.runFullDiagnostic() } label: {
                 Label("Проверить всё", systemImage: "bolt.shield").frame(maxWidth: .infinity).padding(.vertical, 8)
-            }.buttonStyle(.borderedProminent).foregroundStyle(.black)
+            }.buttonStyle(.borderedProminent).foregroundStyle(.white)
                 .disabled(!bluetooth.ready || bluetooth.busy || bluetooth.diagnosticRunning)
             if bluetooth.diagnosticRunning {
                 HStack { ProgressView(); Text(bluetooth.diagnosticStatus).font(.caption) }
             } else { Text(bluetooth.diagnosticStatus).font(.caption).foregroundStyle(.secondary) }
-            Text("Остановка потока — кнопкой «Остановить» в блоке соединения. Значения 4A и температуры помечаются экспериментальными до проверки формата EX500G. Все пакеты сохраняются даже без расшифровки.")
+            Text("Значения 4A и температуры помечаются экспериментальными до проверки формата EX500G. Все пакеты сохраняются даже без расшифровки.")
                 .font(.caption).foregroundStyle(.secondary)
             DisclosureGroup("Отдельные запросы") {
                 requestButton("Модель и версия", subtitle: "Информация из ответа", icon: "bolt.circle", commands: [0x03])
@@ -176,41 +191,43 @@ struct ContentView: View {
     }
 
     private var captureControls: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Одна поездка — один журнал").font(.title3.weight(.semibold))
+        VStack(alignment: .leading, spacing: 14) {
             if rides.active == nil {
                 Button {
+                    rides.setAutoRecord(false)
                     rides.startCapture()
                     if rides.active != nil {
-                        // Include connection setup already observed before the button.
                         for event in bluetooth.events { rides.recordDiagnostic(event) }
                         bluetooth.setAutoReconnect(true)
                         bluetooth.runFullDiagnostic()
                     }
                 } label: {
-                    Label("Собирать всё и начать поездку", systemImage: "record.circle")
-                        .frame(maxWidth: .infinity).padding(.vertical, 8)
-                }.buttonStyle(.borderedProminent).foregroundStyle(.black)
+                    Label("Начать запись", systemImage: "record.circle")
+                        .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 12)
+                }.buttonStyle(.borderedProminent).foregroundStyle(.white)
                     .disabled(!bluetooth.ready || bluetooth.busy || bluetooth.diagnosticRunning)
-                Text("Подключись на месте. Запусти сбор и дождись окончания проверки перед движением. Затем можно заблокировать экран; не смахивай приложение.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text(bluetooth.ready ? "Запишем GPS, доступные данные байка и ошибки в один журнал." : "Включи мотоцикл и подключись перед движением.")
+                    .font(.subheadline).foregroundStyle(.secondary)
             } else {
-                Text("Событий Bluetooth в поездке: \(rides.active?.rawEventCount ?? 0)")
-                    .font(.caption.monospacedDigit())
+                if bluetooth.diagnosticRunning {
+                    HStack { ProgressView(); Text("Проверяем данные байка…").font(.subheadline) }
+                    Text("Дождись окончания проверки перед движением. Запись уже идёт.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Label("Запись идёт · без ограничения времени", systemImage: "record.circle.fill")
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(accent)
+                }
                 Button {
-                    // Capture the disconnect and final transport state before closing the file.
                     bluetooth.stop()
                     rides.finishAndExport()
                 } label: {
-                    Label("Завершить и сохранить журнал", systemImage: "square.and.arrow.up")
-                        .frame(maxWidth: .infinity).padding(.vertical, 8)
-                }.buttonStyle(.borderedProminent).foregroundStyle(.black).disabled(rides.exporting)
-                Text("Записываются GPS, исходные пакеты, ошибки и разрывы. После поездки остановись, нажми эту кнопку и выбери «Сохранить в Файлы». Повторный экспорт доступен в истории.")
+                    Label(rides.exporting ? "Сохраняем…" : "Закончить и сохранить", systemImage: "square.and.arrow.up")
+                        .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 12)
+                }.buttonStyle(.borderedProminent).foregroundStyle(.white).disabled(rides.exporting)
+                Text("После остановки сохрани журнал в «Файлы». Остановка двигателя сама запись не завершает.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text("Остановка двигателя пока не определяется достоверно. В этом режиме потеря GPS или Bluetooth не завершает сеанс. Сохранённое остаётся на iPhone после перезапуска; время, когда iOS не выполняла приложение, восстановить нельзя.")
-                .font(.caption).foregroundStyle(.secondary)
-        }.padding(18).background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
+        }.padding(18).background(accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 22))
     }
 
     private var logSection: some View {
@@ -286,32 +303,28 @@ struct ContentView: View {
     private var help: some View {
         NavigationStack {
             List {
-                Section("Первый запуск") {
-                    Text("Включи зажигание стоящего мотоцикла. Для этой проверки запускать двигатель не нужно.")
-                    Text("Заверши соединение с мотоциклом в nRF Connect и RIDEOLOGY. Разреши Bluetooth для MotoLink.")
-                    Text("Нажми «Найти мотоцикл» и выбери Kawasaki-EX500G. Если iOS запросит код сопряжения, используй код своей приборки.")
-                    Text("Дождись сообщения «Каналы готовы». Нажми «Проверить всё» один раз. Дождись результата и экспортируй журнал даже при ошибках.")
+                Section("Перед поездкой") {
+                    Text("Включи мотоцикл. Закрой Bluefy, RIDEOLOGY и другие приложения, использующие его Bluetooth.")
+                    Text("Нажми «Найти мотоцикл», выбери свой байк и дождись подключения. Затем нажми «Начать запись» и дождись окончания проверки.")
+                    Text("Разреши Bluetooth и геопозицию «Всегда». Не закрывай Moto Link смахиванием. Работу под блокировкой сначала проверь в короткой поездке.")
                 }
-                Section("Автоподключение") {
-                    Text("Выбранный мотоцикл запоминается. Включённый переключатель позволяет iOS ждать его появления и восстанавливать связь в фоне.")
-                    Text("После принудительного закрытия смахиванием открой MotoLink снова. Отключённый Bluetooth, отозванное разрешение и ограничения iOS мешают переподключению.")
-                    Text("Кнопка «Остановить» отключает автоподключение и поток. GPS-поездку заверши отдельной кнопкой. После первой полной проверки профиль телеметрии повторяется при автоподключении.")
+                Section("В дороге") {
+                    Text("Записываем полученные пакеты, GPS и ошибки на iPhone. Интернет для записи не нужен. Восстановление Bluetooth включается вместе с записью, но мотоцикл может не принять повторное соединение.")
+                    Text("Потеря GPS или Bluetooth не завершает сеанс. Пропущенные данные не выдумываются; при остановке приложения системой возможны пробелы.")
                 }
-                Section("Поездки и геопозиция") {
-                    Text("GPS, скорость и расстояние берутся с iPhone. Мотоциклетные значения подписаны отдельно. Ручная поездка работает без Bluetooth.")
-                    Text("Для автозаписи нужны оба переключателя: автоподключение и запись при подключении. Разреши геопозицию «Всегда». Уже начатая вручную запись допускает «При использовании» и продолжается под блокировкой, пока iOS разрешает выполнение.")
-                    Text("После прекращения процесса возможны разрывы маршрута. Экспорт сохраняет сегменты GPX, исходные точки и измерения. Карта может требовать интернет для подложки; сама запись локальная.")
+                Section("После поездки") {
+                    Text("Остановись и нажми «Закончить и сохранить» → «Сохранить в Файлы» → «На iPhone». Повторно выгрузить журнал можно в разделе «Поездки и журналы».")
+                    Text("Журнал содержит маршрут. Передавай его лично, не публикуй в открытом репозитории.")
                 }
-                Section("Что мы проверяем") {
-                    Text("На твоём EX500G подтверждены модель, восемь поддерживаемых полей и пакет напряжения. Поток 4A и температурный формат ещё требуют проверки на байке.")
-                    Text("BLE-связь и входящий пакет сами по себе не доказывают работу двигателя или движение. Данные температуры, скорости и оборотов здесь не подменяются предположениями.")
-                    Text("Полная проверка использует опубликованные запросы и профиль сессии Z500; резервный путь передаёт имя MotoLink. Прошивка и сброс сервиса не затрагиваются.")
+                Section("Показатели") {
+                    Text("Доступность и расшифровка показателей зависят от мотоцикла. Все полученные пакеты сохраняются даже без расшифровки. Скорость и расстояние GPS поступают с телефона.")
+                    Text("Карта и оценка пути по дорогам могут требовать интернет. Это не мешает локальной записи.")
                 }
-            }
-            .navigationTitle("Подключение")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showHelp = false } } }
+            }.navigationTitle("Как записать поездку")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showHelp = false } } }
         }
     }
+
 }
 
 struct ShareSheet: UIViewControllerRepresentable {

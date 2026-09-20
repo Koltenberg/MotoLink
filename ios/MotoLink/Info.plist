@@ -3,14 +3,14 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key><string>ru</string>
-    <key>CFBundleDisplayName</key><string>MotoLink</string>
+    <key>CFBundleDisplayName</key><string>Moto Link</string>
     <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.4</string>
-    <key>CFBundleVersion</key><string>4</string>
+    <key>CFBundleShortVersionString</key><string>0.4.1</string>
+    <key>CFBundleVersion</key><string>5</string>
     <key>LSRequiresIPhoneOS</key><true/>
     <key>NSBluetoothAlwaysUsageDescription</key><string>MotoLink подключается к вашему мотоциклу, чтобы проверить доступные данные и сохранить диагностический журнал.</string>
     <key>NSLocationWhenInUseUsageDescription</key><string>MotoLink записывает маршрут, расстояние и скорость поездки с GPS вашего iPhone. Данные хранятся на устройстве.</string>
