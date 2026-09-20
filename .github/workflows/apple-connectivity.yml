@@ -1,0 +1,32 @@
+name: Diagnose Apple installation connectivity
+on:
+  push:
+    branches: [diagnose-apple-install]
+    paths: [.github/workflows/apple-connectivity.yml]
+permissions: {}
+jobs:
+  lookup:
+    runs-on: macos-15
+    timeout-minutes: 3
+    steps:
+      - name: Check public Apple lookup without account credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          curl --fail --silent --show-error --max-time 20 \
+            https://raw.githubusercontent.com/nab138/isideload/f6a4d5d/isideload/src/assets/apple_root.cer \
+            -o "$scratch/apple.cer"
+          openssl x509 -inform DER -in "$scratch/apple.cer" -out "$scratch/apple.pem"
+          curl --silent --show-error --max-time 20 --cacert "$scratch/apple.pem" \
+            -H 'Accept: text/x-xml-plist' -H 'Content-Type: text/x-xml-plist' \
+            -H 'X-Mme-Client-Info: <Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>' \
+            -H 'X-Xcode-Version: 27.0 (27A5218g)' \
+            -H 'X-Apple-App-Info: com.apple.gs.xcode.auth' \
+            -A 'akd/1.0 CFNetwork/808.1.4' \
+            -D "$scratch/headers" -o "$scratch/body" \
+            -w 'HTTP status: %{http_code}\n' \
+            https://gsa.apple.com/grandslam/GsService2/lookup
+          head -c 2000 "$scratch/headers"
+          head -c 2000 "$scratch/body"
