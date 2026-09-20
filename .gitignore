@@ -1,0 +1,27 @@
+# Generated files
+.DS_Store
+__pycache__/
+*.py[cod]
+.build/
+.swiftpm/
+DerivedData/
+build/
+build-artifacts/
+xcuserdata/
+*.xcuserstate
+
+# Personal signing material and local configuration
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.mobileprovision
+*.ipa
+*.dSYM/
+
+# Raw ride/Bluetooth logs contain location and vehicle identifiers
+*.jsonl
+*.gpx
+/uploads/
+/logs/

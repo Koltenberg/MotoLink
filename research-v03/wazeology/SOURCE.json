@@ -1,0 +1,15 @@
+{
+  "url": "https://github.com/agstrc/wazeology",
+  "commit": "a8726cf562541738592b555bb0dbe4569f7003f4",
+  "purpose": "Unmodified source excerpts for protocol research and independent frame-builder comparison; not integrated app code",
+  "license": "Apache-2.0",
+  "files": {
+    "BleClient.java": "4f840b05ac3d1277f1a06d55df990020fd212ca2d017132521268bde2c9f0a30",
+    "ClusterBridge.java": "093052e152f2354adf8b40b0db942078352193bc9f043ee3bdc0e4e1744253c7",
+    "Command.java": "edc0b892f5db675fee8dfa817774c787946e3a68f9c0ef8dcd0506b29e03da5a",
+    "FrameType.java": "3f9386cb003dc4173fd58724e485ebec0ed12dc6ec9b6c835101915cbad55034",
+    "Frames.java": "5d59b12d0a57a794e0699f7c11f7b166650cab434202f3bd4c436e4b478e9409",
+    "Kawasaki.java": "7988711c6e42f76bd80fc33d529552cf99028ed91363c0f229a1c51dee9b277a",
+    "LICENSE": "329a0025fdef4dc61727c1ee89ea1bbb7c8fb69ded76ac1bb61ba3b35f5b9fe2"
+  }
+}

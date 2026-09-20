@@ -1,0 +1,388 @@
+{
+  "source_commit": "06a0f61681e119f5e5dd9a793d8a61c891a020f8",
+  "observed_fixture_count": 49,
+  "length_checks": {
+    "03": {
+      "actual": 35,
+      "declared_plus_3": 35,
+      "match": true
+    },
+    "08": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "0B": {
+      "actual": 35,
+      "declared_plus_3": 35,
+      "match": true
+    },
+    "1A": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "1B": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "1D": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "1E": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "20_a": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "20_b": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "20_c": {
+      "actual": 35,
+      "declared_plus_3": 35,
+      "match": true
+    },
+    "20_d": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "20_e": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "20_f": {
+      "actual": 5,
+      "declared_plus_3": 5,
+      "match": true
+    },
+    "20_g": {
+      "actual": 5,
+      "declared_plus_3": 5,
+      "match": true
+    },
+    "20_h": {
+      "actual": 5,
+      "declared_plus_3": 5,
+      "match": true
+    },
+    "20_i": {
+      "actual": 5,
+      "declared_plus_3": 5,
+      "match": true
+    },
+    "20_j": {
+      "actual": 5,
+      "declared_plus_3": 5,
+      "match": true
+    },
+    "20_k": {
+      "actual": 5,
+      "declared_plus_3": 5,
+      "match": true
+    },
+    "20_l": {
+      "actual": 5,
+      "declared_plus_3": 5,
+      "match": true
+    },
+    "20_m": {
+      "actual": 5,
+      "declared_plus_3": 5,
+      "match": true
+    },
+    "30_a": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "30_b": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "30_c": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "30_d": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "30_e": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "30_f": {
+      "actual": 35,
+      "declared_plus_3": 35,
+      "match": true
+    },
+    "40": {
+      "actual": 35,
+      "declared_plus_3": 35,
+      "match": true
+    },
+    "41": {
+      "actual": 85,
+      "declared_plus_3": 85,
+      "match": true
+    },
+    "42": {
+      "actual": 3,
+      "declared_plus_3": 3,
+      "match": true
+    },
+    "42_b": {
+      "actual": 15,
+      "declared_plus_3": 15,
+      "match": true
+    },
+    "45_a": {
+      "actual": 55,
+      "declared_plus_3": 55,
+      "match": true
+    },
+    "45_b": {
+      "actual": 55,
+      "declared_plus_3": 55,
+      "match": true
+    },
+    "45_c": {
+      "actual": 55,
+      "declared_plus_3": 55,
+      "match": true
+    },
+    "45_d": {
+      "actual": 55,
+      "declared_plus_3": 55,
+      "match": true
+    },
+    "45_e": {
+      "actual": 55,
+      "declared_plus_3": 55,
+      "match": true
+    },
+    "47": {
+      "actual": 25,
+      "declared_plus_3": 25,
+      "match": true
+    },
+    "48": {
+      "actual": 25,
+      "declared_plus_3": 25,
+      "match": true
+    },
+    "4B_1": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "4B_2": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "4B_3": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "4B_4": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "4B_5": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "4B_6": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "4B_7": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "4B_8": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "4B_9": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "4B_10": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "4B_11": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    },
+    "4B_12": {
+      "actual": 45,
+      "declared_plus_3": 45,
+      "match": true
+    }
+  },
+  "commands": {
+    "model": "030000",
+    "info_config": "400000",
+    "mc_info": "410000",
+    "riding_log_ext": "450000"
+  },
+  "capabilities_fixture_hex": "40207c40000511fc77d417ffffffffffffffffffffffffffffffffffffffffffffffff",
+  "config": {
+    "frame": "0x40",
+    "payload_len": 32,
+    "sequence": 124,
+    "related_command": 64,
+    "total_distance_traveled": 3,
+    "total_distance_traveled_supported": false,
+    "total_fuel_consumed": 3,
+    "total_fuel_consumed_supported": false,
+    "engine_fuel_rate": 3,
+    "engine_fuel_rate_supported": false,
+    "ecu_battery12V": 0,
+    "ecu_battery12V_supported": true,
+    "engine_water_temperature": 1,
+    "engine_water_temperature_supported": true,
+    "engine_oil_temperature": 3,
+    "engine_oil_temperature_supported": false,
+    "inlet_air_temperature": 1,
+    "inlet_air_temperature_supported": true,
+    "boost_temperature": 3,
+    "boost_temperature_supported": false,
+    "boost_pressure": 3,
+    "boost_pressure_supported": false,
+    "fuel_injection": 1,
+    "fuel_injection_supported": true,
+    "wheel_speed": 1,
+    "wheel_speed_supported": true,
+    "engine_speed": 0,
+    "engine_speed_supported": true,
+    "gear_position": 1,
+    "gear_position_supported": true,
+    "throttle_position": 1,
+    "throttle_position_supported": true,
+    "acceleration": 3,
+    "acceleration_supported": false,
+    "lean_angle": 3,
+    "lean_angle_supported": false,
+    "wheelie_flag": 3,
+    "wheelie_flag_supported": false,
+    "wheelie_angle": 3,
+    "wheelie_angle_supported": false,
+    "tcs_level_hb": 3,
+    "tcs_level_hb_supported": false,
+    "tcs_level_lb": 3,
+    "tcs_level_lb_supported": false,
+    "rider_torque_request": 3,
+    "rider_torque_request_supported": false,
+    "engine_torque_request": 3,
+    "engine_torque_request_supported": false,
+    "engine_torque_actual": 3,
+    "engine_torque_actual_supported": false,
+    "odometer": 3,
+    "odometer_supported": false,
+    "fuel_gauge": 3,
+    "fuel_gauge_supported": false,
+    "average_fuel_mileage": 3,
+    "average_fuel_mileage_supported": false,
+    "meter_battery12V": 3,
+    "meter_battery12V_supported": false,
+    "tripA": 3,
+    "tripA_supported": false,
+    "tripB": 3,
+    "tripB_supported": false,
+    "average_speed": 3,
+    "average_speed_supported": false,
+    "outer_air_temperature": 3,
+    "outer_air_temperature_supported": false,
+    "range_symbol": 3,
+    "range_symbol_supported": false,
+    "range": 3,
+    "range_supported": false,
+    "fuel_consumption": 3,
+    "fuel_consumption_supported": false,
+    "total_time": 3,
+    "total_time_supported": false,
+    "instant_fuel_consumption": 3,
+    "instant_fuel_consumption_supported": false,
+    "config_retry_required": false,
+    "config_valid": true,
+    "supported_count": 8,
+    "unsupported_count": 28,
+    "supported_fields": "ecu_battery12V,engine_water_temperature,inlet_air_temperature,fuel_injection,wheel_speed,engine_speed,gear_position,throttle_position",
+    "unsupported_fields": "total_distance_traveled,total_fuel_consumed,engine_fuel_rate,engine_oil_temperature,boost_temperature,boost_pressure,acceleration,lean_angle,wheelie_flag,wheelie_angle,tcs_level_hb,tcs_level_lb,rider_torque_request,engine_torque_request,engine_torque_actual,odometer,fuel_gauge,average_fuel_mileage,meter_battery12V,tripA,tripB,average_speed,outer_air_temperature,range_symbol,range,fuel_consumption,total_time,instant_fuel_consumption"
+  },
+  "snapshot_41": {
+    "frame": "0x41",
+    "total_fuel_consumed": null,
+    "ecu_battery12V": 12.34375,
+    "odometer": null,
+    "fuel_gauge": null,
+    "average_fuel_mileage": null,
+    "meter_battery12V": null,
+    "tripA": null,
+    "tripB": null,
+    "average_speed": null,
+    "outer_air_temperature": null,
+    "range_symbol": null,
+    "range": null,
+    "fuel_consumption": null,
+    "total_time": null
+  },
+  "sample_extended_45": {
+    "frame": "0x45",
+    "total_distance_traveled": null,
+    "engine_fuel_rate": null,
+    "water_temperature": 40,
+    "oil_temperature": null,
+    "inlet_air_temperature": 36,
+    "instant_fuel_consumption": null,
+    "tire_pressure_fr": null,
+    "tire_pressure_rr": null,
+    "air_pressure_drop_fr": null,
+    "air_pressure_drop_rr": null,
+    "low_battery_voltage_fr": null,
+    "low_battery_voltage_rr": null,
+    "odometer": null
+  },
+  "synthetic_mid_4a_hex": "4a3401ffffffffffff002a0dac0380ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "synthetic_expected": {
+    "rpm": 3500,
+    "wheel_kph": 42,
+    "gear": 3,
+    "throttle": 50.1960784256
+  },
+  "limitations": [
+    "No physical EX500G test.",
+    "No upstream observed 0x4A fixture.",
+    "Capability absence must not enable opportunistic decode.",
+    "Byte1 length rule only verified for included fixtures; navigation TX is an exception."
+  ]
+}

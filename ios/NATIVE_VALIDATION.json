@@ -1,0 +1,87 @@
+{
+  "date": "2026-09-20",
+  "version": "0.3",
+  "swift_source_grammar": [
+    {
+      "file": "core/MotoProtocol.swift",
+      "parsed_without_syntax_error": true,
+      "sha256": "7d5642f62e77c6d6fb11d26dfe9cd0d14947aeaa792b66be6505c223aa0f3d31"
+    },
+    {
+      "file": "core/Package.swift",
+      "parsed_without_syntax_error": true,
+      "sha256": "f48481d6f153336c4d100872f9cd7db1177d0a19bb7a5ba47aab221c128ba2c5"
+    },
+    {
+      "file": "core/Tests/MotoProtocolTests.swift",
+      "parsed_without_syntax_error": true,
+      "sha256": "0e55c5adf625d2df0d597a8d6d6027bf06528758143818e6fd4e908f9c4f64ba"
+    },
+    {
+      "file": "ios/MotoLink/ContentView.swift",
+      "parsed_without_syntax_error": true,
+      "sha256": "ef85975d207f4ae361ee8ac12f7de897e899619a5f3b4e764bb5959d1345a141"
+    },
+    {
+      "file": "ios/MotoLink/MotoLinkApp.swift",
+      "parsed_without_syntax_error": true,
+      "sha256": "aa70c0f2ec027f7572b5af33985a43b4a8a6c94113b1b9abce6d022f06b9061a"
+    },
+    {
+      "file": "ios/MotoLink/MotoLinkController.swift",
+      "parsed_without_syntax_error": true,
+      "sha256": "ae30c9f6d2c8217b90b83c778a2d5aaecd0cd4585a9fbd9d1c1ff964c728d6ca"
+    },
+    {
+      "file": "ios/MotoLink/MotorcycleBluetooth.swift",
+      "parsed_without_syntax_error": true,
+      "sha256": "c5dad7dfbe7abc260a461c6b892695b16e98c6520b2ed9fa62928df6b3e08b9d"
+    },
+    {
+      "file": "ios/MotoLink/RideRecorder.swift",
+      "parsed_without_syntax_error": true,
+      "sha256": "06899eb54893449e7c8b3e2844eb4fc1aaa88953e4e9bacb88b49284fe786ae7"
+    },
+    {
+      "file": "ios/MotoLink/RideViews.swift",
+      "parsed_without_syntax_error": true,
+      "sha256": "c1bbc9cc9d3f0c25fa0c4375e22fe655fe6db7e003d66c42535019553ccb0286"
+    },
+    {
+      "file": "ios/MotoLink/SessionLogStore.swift",
+      "parsed_without_syntax_error": true,
+      "sha256": "fd5e70d99650eae1906b327cac24660b8548ca306a271662d27179a29f6f85d4"
+    }
+  ],
+  "source_derived_command_arrays_match": [
+    "0B",
+    "1B",
+    "48",
+    "1E",
+    "08"
+  ],
+  "plist_and_scheme_xml": "passed",
+  "project_new_file_references": "passed",
+  "swift_tests_defined": 7,
+  "swift_tests_executed": false,
+  "xcodebuild_executed": false,
+  "signed_ipa_created": false,
+  "ios_device_tested": false,
+  "note": "Syntax parsing and source checks do not establish Swift type correctness or iOS runtime behavior.",
+  "setup_metadata": "Separate atomic JSON <=1MiB, last identity/capabilities plus bounded400 events, included in export; inspected source only.",
+  "independent_review": {
+    "status": "completed",
+    "compile_api_blockers_found": false,
+    "fixed": [
+      "GPS accuracy threshold undercount: separate distance anchor",
+      "Duplicate ride export sheet presenters: single root presenter",
+      "False route gaps on ordinary foreground: locationRunning guard"
+    ],
+    "scope": "static only; no Swift compiler or iOS runtime available"
+  },
+  "runtime_limits": [
+    "Background start/restoration and GPS not device-tested",
+    "No signed or unsigned IPA built in this environment",
+    "4A sample is synthetic; experimental decoding not EX500G verified"
+  ]
+}

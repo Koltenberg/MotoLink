@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>ru</string>
+    <key>CFBundleDisplayName</key><string>MotoLink</string>
+    <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.3</string>
+    <key>CFBundleVersion</key><string>3</string>
+    <key>LSRequiresIPhoneOS</key><true/>
+    <key>NSBluetoothAlwaysUsageDescription</key><string>MotoLink подключается к вашему мотоциклу, чтобы проверить доступные данные и сохранить диагностический журнал.</string>
+    <key>NSLocationWhenInUseUsageDescription</key><string>MotoLink записывает маршрут, расстояние и скорость поездки с GPS вашего iPhone. Данные хранятся на устройстве.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key><string>Разрешение «Всегда» нужно для автоматического начала записи маршрута при подключении к вашему мотоциклу, в том числе с заблокированным экраном.</string>
+    <key>UIBackgroundModes</key><array><string>bluetooth-central</string><string>location</string></array>
+    <key>UIApplicationSceneManifest</key>
+    <dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
+    <key>UILaunchScreen</key><dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array><string>UIInterfaceOrientationPortrait</string></array>
+</dict>
+</plist>
