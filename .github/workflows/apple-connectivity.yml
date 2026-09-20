@@ -33,13 +33,15 @@ jobs:
           KEY
           npm install --ignore-scripts --no-audit --no-fund ws@8.18.3 > npm.log
           case "$(uname -m)" in
-            arm64) asset=cloudflared-darwin-arm64.tgz; expected=9a0b19f67dc7a3011bc6b972c7ce06a5fcea8784ac6bd599ffa382ea4aeb5a6e ;;
-            x86_64) asset=cloudflared-darwin-amd64.tgz; expected=1ea07ae775b03236bd6be18ca1848d6bdc4af2f4f3bce398823b5a36e5761b75 ;;
+            arm64) asset=cloudflared-darwin-arm64.tgz; expected=c27ab8fd0aa489449e3d201eb02f957ef460a13b613662928b1b23394bf1bcfe ;;
+            x86_64) asset=cloudflared-darwin-amd64.tgz; expected=ff0d3b51d5ff70eceef89d6b32145fee985018a2174596a5dbe405e2766e2ac4 ;;
             *) exit 1 ;;
           esac
           curl --fail --silent --show-error --max-time 60 \
             "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/$asset" -o cloudflared.tgz
-          test "$(shasum -a 256 cloudflared.tgz | cut -d ' ' -f 1)" = "$expected"
+          actual="$(shasum -a 256 cloudflared.tgz | cut -d ' ' -f 1)"
+          echo "Downloaded $asset SHA-256: $actual"
+          test "$actual" = "$expected"
           tar xzf cloudflared.tgz
           node server.cjs public.pem > server.log 2>&1 &
           relay_pid=$!
