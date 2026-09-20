@@ -434,7 +434,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             autoStopWork?.cancel(); autoStopWork = nil
             disconnectedAt = nil
             evaluateAutoStart()
-            if active?.trigger == "bluetooth" { resume() }
+            if active != nil { resume() }
         } else if changed {
             disconnectedAt = Date()
             autoSuppressedForConnection = false

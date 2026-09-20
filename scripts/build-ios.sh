@@ -47,7 +47,7 @@ xcodebuild -version >"$run_dir/xcode-version.log"
 xcrun --sdk iphoneos --show-sdk-version >"$run_dir/iphoneos-sdk.log"
 printf 'Build output: %s\n' "$run_dir"
 
-python3 -m unittest discover -s "$project_root/tests" -p test_ipa_validation.py -v \
+python3 -m unittest discover -s "$project_root/tests" -p 'test_*.py' -v \
   2>&1 | tee "$run_dir/package-validator-tests.log"
 python3 "$project_root/research-v03/test_protocol_profile.py" \
   2>&1 | tee "$run_dir/protocol-profile-tests.log"

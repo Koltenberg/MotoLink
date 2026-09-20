@@ -195,6 +195,8 @@ struct ContentView: View {
                 Text("Подключись на месте. Запусти сбор и дождись окончания проверки перед движением. Затем можно заблокировать экран; не смахивай приложение.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
+                Text("Событий Bluetooth в поездке: \(rides.active?.rawEventCount ?? 0)")
+                    .font(.caption.monospacedDigit())
                 Button {
                     // Capture the disconnect and final transport state before closing the file.
                     bluetooth.stop()
