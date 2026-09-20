@@ -274,6 +274,11 @@ struct ContentView: View {
         .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 22))
     }
 
+    private func duration(_ elapsed: TimeInterval) -> String {
+        let seconds = max(0, Int(elapsed))
+        return String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+    }
+
     private func metric(_ label: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label).font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
