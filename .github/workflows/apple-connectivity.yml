@@ -24,7 +24,7 @@ jobs:
           }
           trap cleanup EXIT
           cd "$scratch"
-          curl --fail --silent --show-error --max-time 30 \
+          curl --location --fail --silent --show-error --max-time 30 \
             https://raw.githubusercontent.com/Koltenberg/MotoLink/f3feb3ea376bd3ad71d030251458463990fe498f/scripts/install-transport.cjs -o server.cjs
           cat > public.pem <<'KEY'
           -----BEGIN PUBLIC KEY-----
@@ -37,7 +37,7 @@ jobs:
             x86_64) asset=cloudflared-darwin-amd64.tgz; expected=ff0d3b51d5ff70eceef89d6b32145fee985018a2174596a5dbe405e2766e2ac4 ;;
             *) exit 1 ;;
           esac
-          curl --fail --silent --show-error --max-time 60 \
+          curl --location --fail --silent --show-error --max-time 60 \
             "https://github.com/cloudflare/cloudflared/releases/download/2026.9.1/$asset" -o cloudflared.tgz
           actual="$(shasum -a 256 cloudflared.tgz | cut -d ' ' -f 1)"
           echo "Downloaded $asset SHA-256: $actual"
