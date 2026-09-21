@@ -58,14 +58,14 @@ jobs:
           test -n "$endpoint"
           export TRANSPORT_ENDPOINT="$endpoint"
           node -e 'require("fs").writeFileSync("status.json",JSON.stringify({state:"pending",context:"apple-install-transport",description:"Authenticated Apple TLS transport; automatically expires in 20 minutes",target_url:process.env.TRANSPORT_ENDPOINT}))'
-          curl --fail --silent --show-error -X POST \
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 --max-time 15 -X POST \
             -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
             --data-binary @status.json > /dev/null
           echo "Transport ready. Apple Account credentials are never collected by this job."
           wait "$relay_pid"
           node -e 'require("fs").writeFileSync("status.json",JSON.stringify({state:"success",context:"apple-install-transport",description:"Temporary transport stopped",target_url:"https://github.com/"+process.env.GITHUB_REPOSITORY}))'
-          curl --fail --silent --show-error -X POST \
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 --max-time 15 -X POST \
             -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
             --data-binary @status.json > /dev/null
