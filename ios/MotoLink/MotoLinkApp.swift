@@ -9,6 +9,7 @@ struct MotoLinkApp: App {
             ContentView(bluetooth: delegate.controller.bluetooth, rides: delegate.controller.rides)
                 .preferredColorScheme(.dark)
                 .tint(MotoTheme.accent)
+                .font(MotoTheme.font(.body))
         }
     }
 }
@@ -19,17 +20,31 @@ enum AppBuild {
 }
 
 
-/// Pixel accents use geometry, not a tiny bitmap font. Body text keeps Dynamic Type.
+/// Bundled Cyrillic pixel type, with Dynamic Type and no network font dependency.
 enum MotoTheme {
     static let background = Color(red: 0.045, green: 0.047, blue: 0.055)
     static let panel = Color(red: 0.095, green: 0.098, blue: 0.11)
     static let accent = Color(red: 0.98, green: 0.29, blue: 0.33)
     static let button = Color(red: 0.76, green: 0.10, blue: 0.16)
+    static func font(_ style: Font.TextStyle) -> Font {
+        let size: CGFloat
+        switch style {
+        case .largeTitle: size = 34
+        case .title: size = 30
+        case .title2: size = 26
+        case .title3: size = 23
+        case .headline: size = 21
+        case .subheadline: size = 19
+        case .caption, .caption2, .footnote: size = 16
+        default: size = 20
+        }
+        return .custom("PixelifySans-Regular", size: size, relativeTo: style)
+    }
 }
 
 struct PixelFrame: Shape {
     func path(in rect: CGRect) -> Path {
-        let s = min(4.0, min(rect.width, rect.height) / 6)
+        let s = min(5.0, min(rect.width, rect.height) / 6)
         let l = rect.minX, r = rect.maxX, t = rect.minY, b = rect.maxY
         let points: [CGPoint] = [
             .init(x: l + 2*s, y: t), .init(x: r - 2*s, y: t),
@@ -53,7 +68,13 @@ struct PixelFrame: Shape {
 extension View {
     func pixelPanel(_ fill: Color = MotoTheme.panel, accent: Bool = false) -> some View {
         background(fill, in: PixelFrame())
-            .overlay(PixelFrame().stroke(accent ? MotoTheme.accent.opacity(0.32) : Color.white.opacity(0.10), lineWidth: 1))
+            .overlay(PixelFrame().stroke(accent ? MotoTheme.accent.opacity(0.5) : Color.white.opacity(0.16), lineWidth: 1))
+            .overlay(alignment: .topLeading) {
+                HStack(spacing: 3) {
+                    Rectangle().fill(MotoTheme.accent).frame(width: 12, height: 3)
+                    Rectangle().fill(MotoTheme.accent.opacity(0.4)).frame(width: 4, height: 3)
+                }.padding(.leading, 14).allowsHitTesting(false).accessibilityHidden(true)
+            }
     }
 }
 
@@ -62,6 +83,7 @@ struct PixelButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .font(MotoTheme.font(.headline))
             .padding(.horizontal, 12).padding(.vertical, 8)
             .frame(minHeight: 44)
             .foregroundStyle(prominent ? Color.white : MotoTheme.accent)

@@ -71,6 +71,11 @@ if ((check_simulator)); then
     -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath "$build_root/simulator" build \
     2>&1 | tee "$run_dir/simulator-build.log"
+  if [[ "${MOTOLINK_SCREENSHOT:-0}" == 1 ]]; then
+    python3 "$project_root/scripts/capture-simulator.py" \
+      "$build_root/simulator/Build/Products/Release-iphonesimulator/MotoLink.app" "$run_dir" \
+      2>&1 | tee "$run_dir/simulator-capture.log"
+  fi
 fi
 
 xcodebuild "${common[@]}" \

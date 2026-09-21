@@ -61,15 +61,15 @@ struct ContentView: View {
                 HStack(spacing: 5) {
                     Rectangle().fill(accent).frame(width: 7, height: 7)
                     Rectangle().fill(accent.opacity(0.4)).frame(width: 7, height: 7)
-                    Text("MOTO LINK").font(.system(.caption, design: .monospaced).weight(.bold)).tracking(2)
+                    Text("MOTO LINK").font(MotoTheme.font(.headline)).tracking(2)
                 }.foregroundStyle(accent)
                 Spacer()
                 Text(AppBuild.version).font(.caption.monospaced()).foregroundStyle(.secondary)
             }
-            Text(rides.active == nil ? "Твой маршрут.\nТвой ритм." : "Поездка записывается.")
-                .font(.system(.largeTitle, design: .default).weight(.bold))
+            Text(rides.active == nil ? "Подключись.\nИ поехали." : "Записываем\nтвою поездку.")
+                .font(MotoTheme.font(MotoTheme.font(.largeTitle)))
             Label("На iPhone · запись без интернета", systemImage: "iphone")
-                .font(.subheadline).foregroundStyle(.secondary)
+                .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
         }
     }
 
@@ -77,11 +77,11 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
                 Image(systemName: bluetooth.connected ? "link" : "antenna.radiowaves.left.and.right")
-                    .font(.title2).foregroundStyle(accent)
+                    .font(MotoTheme.font(.title2)).foregroundStyle(accent)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(bluetooth.selectedName).font(.headline)
+                    Text(bluetooth.selectedName).font(MotoTheme.font(.headline))
                     Text(bluetooth.ready ? "Bluetooth подключён" : bluetooth.connecting ? (bluetooth.reconnectAttempt > 0 ? "Восстанавливаем связь…" : "Подключаемся…") : bluetooth.connected ? "Готовим соединение…" : "Bluetooth не подключён")
-                        .font(.subheadline).foregroundStyle(.secondary)
+                        .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
                 if bluetooth.connecting { ProgressView() }
@@ -94,7 +94,7 @@ struct ContentView: View {
                     Text(state == .receiving ? "Данные байка поступают" : state == .disconnected
                          ? "Данные байка не поступают" : state == .stale
                          ? "Поток данных байка прервался" : "Ждём поток данных байка")
-                        .font(.headline).foregroundStyle(state == .receiving ? Color.green : Color.orange)
+                        .font(MotoTheme.font(.headline)).foregroundStyle(state == .receiving ? Color.green : Color.orange)
                     if bluetooth.connecting, let requested = bluetooth.connectionRequestedAt {
                         Text("Ожидание связи: \(duration(context.date.timeIntervalSince(requested))). Переподключение пока не подтверждено.")
                             .font(.caption).foregroundStyle(.orange)
@@ -150,7 +150,7 @@ struct ContentView: View {
             }
             if let error = rides.error {
                 Label("Ошибка сохранения: \(error)", systemImage: "exclamationmark.triangle")
-                    .font(.subheadline).foregroundStyle(.orange)
+                    .font(MotoTheme.font(.subheadline)).foregroundStyle(.orange)
             }
             if let error = bluetooth.storageError {
                 Text("Ошибка журнала Bluetooth: \(error)").font(.caption).foregroundStyle(.orange)
@@ -174,7 +174,7 @@ struct ContentView: View {
                 Button { bluetooth.connect(to: device.id) } label: {
                     HStack {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text(device.name).font(.headline)
+                            Text(device.name).font(MotoTheme.font(.headline))
                             Text(device.id.uuidString.suffix(8))
                                 .font(.caption.monospaced()).foregroundStyle(.secondary)
                         }
@@ -193,9 +193,9 @@ struct ContentView: View {
 
     private var diagnosticControls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Проверка каналов").font(.title3.weight(.semibold))
+            Text("Проверка каналов").font(MotoTheme.font(.title3).weight(.semibold))
             Text("Соберём сведения, возможности, напряжение, температуры и попробуем запустить поток. Если поток не появится, автоматически применим один резервный профиль совместимости. Он передаёт мотоциклу имя телефона MotoLink.")
-                .font(.subheadline).foregroundStyle(.secondary)
+                .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
             Button { bluetooth.runFullDiagnostic() } label: {
                 Label("Проверить всё", systemImage: "bolt.shield").frame(maxWidth: .infinity).padding(.vertical, 8)
             }.buttonStyle(PixelButtonStyle(prominent: true)).foregroundStyle(.white)
@@ -226,26 +226,26 @@ struct ContentView: View {
                     }
                 } label: {
                     Label("Начать запись", systemImage: "record.circle")
-                        .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 12)
+                        .font(MotoTheme.font(.headline)).frame(maxWidth: .infinity).padding(.vertical, 12)
                 }.buttonStyle(PixelButtonStyle(prominent: true)).foregroundStyle(.white)
                     .disabled(!bluetooth.ready || bluetooth.busy || bluetooth.diagnosticRunning)
                 Text(bluetooth.ready ? "Запишем GPS, доступные данные байка и ошибки в один журнал." : "Включи мотоцикл и подключись перед движением.")
-                    .font(.subheadline).foregroundStyle(.secondary)
+                    .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
             } else {
                 if bluetooth.diagnosticRunning {
-                    HStack { ProgressView(); Text("Проверяем данные байка…").font(.subheadline) }
+                    HStack { ProgressView(); Text("Проверяем данные байка…").font(MotoTheme.font(.subheadline)) }
                     Text("Дождись окончания проверки перед движением. Запись уже идёт.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     Label("Запись идёт · без ограничения времени", systemImage: "record.circle.fill")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(accent)
+                        .font(MotoTheme.font(.subheadline).weight(.semibold)).foregroundStyle(accent)
                 }
                 Button {
                     bluetooth.stop()
                     rides.finishAndExport()
                 } label: {
                     Label(rides.exporting ? "Сохраняем…" : "Закончить и сохранить", systemImage: "square.and.arrow.up")
-                        .font(.headline).frame(maxWidth: .infinity).padding(.vertical, 12)
+                        .font(MotoTheme.font(.headline)).frame(maxWidth: .infinity).padding(.vertical, 12)
                 }.buttonStyle(PixelButtonStyle(prominent: true)).foregroundStyle(.white).disabled(rides.exporting)
                 Text("После остановки сохрани журнал в «Файлы». Остановка двигателя сама запись не завершает.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -256,7 +256,7 @@ struct ContentView: View {
     private var logSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Журнал").font(.title3.weight(.semibold))
+                Text("Журнал").font(MotoTheme.font(.title3).weight(.semibold))
                 Spacer()
                 Button { bluetooth.export() } label: {
                     if bluetooth.exportBusy { ProgressView() }
@@ -314,7 +314,7 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 Image(systemName: icon).frame(width: 24)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(title).font(.subheadline.weight(.semibold))
+                    Text(title).font(MotoTheme.font(.subheadline).weight(.semibold))
                     Text(subtitle).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
@@ -386,10 +386,18 @@ private struct BikeActivityView: View, Equatable {
             TimelineView(.animation(minimumInterval: 0.5, paused: !animating)) { context in
                 let phase = animating ? Int(context.date.timeIntervalSince1970 * 2) % 4 : 0
                 ZStack {
+                    Canvas { canvas, size in
+                        // Static pixel ground: no scrolling background or 60 Hz loop.
+                        for index in 0..<14 {
+                            let x = CGFloat(index) * size.width / 14
+                            let rect = CGRect(x: x, y: size.height * 0.97, width: size.width / 20, height: 2)
+                            canvas.fill(Path(rect), with: .color(Color.white.opacity(0.08)))
+                        }
+                    }
                     Image("BikeSpriteDetail")
                         .resizable().interpolation(.none).scaledToFit()
                         .saturation(snapshot.live ? 1 : 0.15)
-                        .opacity(snapshot.live ? 1 : 0.48)
+                        .opacity(snapshot.live ? 1 : 0.70)
                         .offset(y: animating && snapshot.running && phase % 2 == 1 ? 0.7 : 0)
                     Canvas { canvas, size in
                         drawEffects(context: canvas, size: size, phase: phase)
@@ -399,7 +407,7 @@ private struct BikeActivityView: View, Equatable {
             .frame(maxWidth: 360)
             .accessibilityHidden(true)
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(snapshot.label).font(.subheadline.weight(.semibold))
+                Text(snapshot.label).font(MotoTheme.font(.subheadline).weight(.semibold))
                 Spacer(minLength: 2)
                 Text(snapshot.temperature.map { "\($0) °C" } ?? "— °C")
                     .font(.system(.headline, design: .monospaced).monospacedDigit())
@@ -407,8 +415,19 @@ private struct BikeActivityView: View, Equatable {
                     .accessibilityLabel(snapshot.temperature.map { "Охлаждающая жидкость: \($0) градусов" }
                         ?? "Нет свежей температуры охлаждающей жидкости")
             }
-            Text("Тепло — условная анимация по температуре ОЖ")
-                .font(.system(size: 10)).foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                ForEach(0..<4) { index in
+                    Rectangle().fill(snapshot.live && index < (snapshot.engineLevel ?? 0)
+                        ? MotoTheme.accent : Color.white.opacity(0.12))
+                        .frame(width: 12, height: CGFloat(4 + index * 3))
+                }
+                Text(snapshot.live ? "Живые данные" : "Ожидаем данные")
+                    .font(MotoTheme.font(.caption)).foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(snapshot.live ? "Свежие данные мотоцикла" : "Нет свежих данных мотоцикла")
+            Text("Свет и выхлоп — оформление. Тепло — по температуре ОЖ.")
+                .font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { sample() }
@@ -430,6 +449,20 @@ private struct BikeActivityView: View, Equatable {
             let rect = CGRect(x: (x * 160).rounded() * unit, y: (y * 80).rounded() * unit,
                               width: w * unit, height: h * unit)
             context.fill(Path(rect), with: .color(color))
+        }
+        if snapshot.running {
+            // Cosmetic head/tail lights, not decoded switches or beam state.
+            pixel(0.817, 0.345, 3, 2, Color(red: 1, green: 0.93, blue: 0.77).opacity(0.8))
+            pixel(0.838, 0.364, 6, 2, Color(red: 1, green: 0.93, blue: 0.77).opacity(0.10))
+            pixel(0.865, 0.380, 8, 3, Color(red: 1, green: 0.93, blue: 0.77).opacity(0.05))
+            pixel(0.126, 0.196, 3, 1, MotoTheme.accent.opacity(0.65))
+            // Exhaust exists at cold idle too. Density follows RPM, not a smoke sensor.
+            for index in 0..<(2 + (snapshot.engineLevel ?? 0)) {
+                let travel = Double((index + phase) % 7) / 7
+                let heat = Double(snapshot.thermalLevel ?? 0) / 8
+                pixel(0.165 - travel * 0.13, 0.49 - travel * (0.10 + heat * 0.14),
+                      2 + travel * 3, 1 + travel * 2, Color.gray.opacity(0.20 * (1 - travel)))
+            }
         }
         if snapshot.moving {
             // Moving highlights on the rims; body and brake calipers stay fixed.

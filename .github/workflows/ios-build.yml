@@ -23,7 +23,17 @@ jobs:
           persist-credentials: false
       - name: Test protocol, compile simulator, and package physical-device build
         shell: bash
+        env:
+          MOTOLINK_SCREENSHOT: '1'
         run: bash scripts/build-ios.sh
+      - name: Upload simulator visual checks
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: MotoLink-visual-checks-${{ github.run_number }}
+          path: build-artifacts/ios/**/*.png
+          if-no-files-found: warn
+          retention-days: 3
       - name: Upload unsigned IPA and package report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

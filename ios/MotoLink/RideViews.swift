@@ -7,13 +7,13 @@ struct RidePanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Поездки").font(.title2.bold())
+                Text("Поездки").font(MotoTheme.font(.title2).bold())
                 Spacer()
                 NavigationLink { RideHistoryView(rides: rides) } label: {
                     Label("История", systemImage: "clock.arrow.circlepath")
                 }
             }
-            Text(rides.status).font(.subheadline).foregroundStyle(.secondary)
+            Text(rides.status).font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
             if let ride = rides.active {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     VStack(alignment: .leading, spacing: 10) {
@@ -51,12 +51,12 @@ struct RidePanel: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Toggle("Записывать при подключении", isOn: Binding(get: { rides.autoRecord }, set: rides.setAutoRecord))
-                .font(.subheadline)
+                .font(MotoTheme.font(.subheadline))
             Text("Для автозаписи включи также автоподключение к байку. Начало — появление BLE-связи; это не датчик зажигания. Завершение — через 2 минуты без связи, когда приложение выполняется. После смахивания приложения открой его снова.")
                 .font(.caption).foregroundStyle(.secondary)
             if rides.autoRecord && rides.authorization != .authorizedAlways {
                 Button("Разрешить геопозицию для автозаписи") { rides.requestBackgroundPermission() }
-                    .font(.subheadline)
+                    .font(MotoTheme.font(.subheadline))
                 Text("В системных настройках нужен доступ «Всегда». Уже начатую вручную поездку можно записывать с доступом «При использовании».")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -75,7 +75,7 @@ struct RidePanel: View {
     private func value(_ label: String, _ text: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label).font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
-            Text(text).font(.headline.monospacedDigit())
+            Text(text).font(MotoTheme.font(.headline).monospacedDigit())
         }
     }
 }
@@ -84,10 +84,10 @@ struct MotorcycleMeasurementsView: View {
     @ObservedObject var bluetooth: MotorcycleBluetooth
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Данные мотоцикла").font(.title2.bold())
+            Text("Данные мотоцикла").font(MotoTheme.font(.title2).bold())
             if bluetooth.measurements.isEmpty {
                 Text("Значения появятся после ответа байка. Наличие показателя в списке возможностей не означает, что его значение уже получено.")
-                    .font(.subheadline).foregroundStyle(.secondary)
+                    .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
             }
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 VStack(alignment: .leading, spacing: 12) {
@@ -97,7 +97,7 @@ struct MotorcycleMeasurementsView: View {
                                 Text(measurement.label)
                                 Spacer()
                                 Text(String(format: measurement.unit == "В" ? "%.2f %@" : "%.0f %@",
-                                            measurement.value, measurement.unit)).font(.title3.monospacedDigit())
+                                            measurement.value, measurement.unit)).font(MotoTheme.font(.title3).monospacedDigit())
                             }
                             HStack {
                                 Text(context.date.timeIntervalSince(measurement.timestamp) > 15 ? "Последний замер" : "Получено")
@@ -126,7 +126,7 @@ struct RideHistoryView: View {
             ForEach(rides.history) { ride in
                 NavigationLink { RideDetailView(rides: rides, ride: ride) } label: {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(ride.startedAt, format: .dateTime.day().month().year().hour().minute()).font(.headline)
+                        Text(ride.startedAt, format: .dateTime.day().month().year().hour().minute()).font(MotoTheme.font(.headline))
                         Text(String(format: "%.2f км · %@ · максимум GPS %.0f км/ч", ride.distanceMeters / 1000,
                                     duration(ride.elapsed), ride.maxSpeedMS * 3.6))
                             .font(.caption).foregroundStyle(.secondary)
@@ -164,15 +164,15 @@ struct RideDetailView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Text(ride.startedAt, format: .dateTime.day().month().year().hour().minute()).font(.title2.bold())
-                Text(String(format: "%.2f км · %@", ride.distanceMeters / 1000, duration(ride.elapsed))).font(.title3)
+                Text(ride.startedAt, format: .dateTime.day().month().year().hour().minute()).font(MotoTheme.font(.title2).bold())
+                Text(String(format: "%.2f км · %@", ride.distanceMeters / 1000, duration(ride.elapsed))).font(MotoTheme.font(.title3))
                 Text(String(format: "Максимальная скорость GPS: %.0f км/ч", ride.maxSpeedMS * 3.6))
                 Text("Точек маршрута: \(points.count). Измерений байка: \(ride.telemetryCount). Разрывов процесса: \(ride.interruptionCount).")
-                    .font(.subheadline).foregroundStyle(.secondary)
+                    .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
                 Text("Маршрут, расстояние и скорость — по GPS iPhone. Разрывы GPS показаны разными отрезками и не включены в расстояние. Автостарт означает BLE-связь, а не запуск двигателя.")
                     .font(.caption).foregroundStyle(.secondary)
                 if !gaps.isEmpty {
-                    Text("Пропуски GPS").font(.title3.bold())
+                    Text("Пропуски GPS").font(MotoTheme.font(.title3).bold())
                     Text("Дорожные варианты запрашиваются только по кнопке. Начальная и конечная координаты пропуска передаются Apple Maps; нужен интернет. Сохранённый вариант доступен без сети, но подложка карты может не загрузиться.")
                         .font(.caption).foregroundStyle(.secondary)
                     ForEach(gaps) { gap in
@@ -192,7 +192,7 @@ struct RideDetailView: View {
                     if let first = measurements.first(where: { $0.id == id }) {
                         let values = measurements.filter { $0.id == id }.map(\.value)
                         Text(String(format: "%@: %.2f–%.2f %@", first.label, values.min() ?? 0, values.max() ?? 0, first.unit))
-                            .font(.subheadline)
+                            .font(MotoTheme.font(.subheadline))
                     }
                 }
                 Button { rides.export(ride) } label: { Label("Сохранить единый журнал", systemImage: "square.and.arrow.up") }
@@ -229,7 +229,7 @@ private struct GPSGapCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Без подтверждённого GPS: \(duration(gap.duration))").font(.headline)
+            Text("Без подтверждённого GPS: \(duration(gap.duration))").font(MotoTheme.font(.headline))
             Text("\(gap.startedAt.formatted(date: .abbreviated, time: .standard)) — \(gap.endedAt.formatted(date: .abbreviated, time: .standard))")
                 .font(.caption).foregroundStyle(.secondary)
             Text(gap.reason).font(.caption)
@@ -239,7 +239,7 @@ private struct GPSGapCard: View {
                 .font(.caption).foregroundStyle(.orange)
             if let estimate {
                 Text(String(format: "Дорожный вариант: %.2f км (не входит в расстояние GPS)", estimate.distanceMeters / 1000))
-                    .font(.subheadline)
+                    .font(MotoTheme.font(.subheadline))
                 Text("Рассчитан \(estimate.calculatedAt.formatted(date: .abbreviated, time: .shortened)). Дороги и ограничения могут отличаться от времени поездки.")
                     .font(.caption).foregroundStyle(.secondary)
             }

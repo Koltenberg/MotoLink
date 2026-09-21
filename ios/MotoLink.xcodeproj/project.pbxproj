@@ -16,6 +16,7 @@
 		100000000000000000000008 /* RideViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000A; };
 		100000000000000000000009 /* MotoLinkController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B; };
 		10000000000000000000000A = {isa = PBXBuildFile; fileRef = 20000000000000000000000C; };
+		10000000000000000000000B /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -31,6 +32,7 @@
 		20000000000000000000000A /* RideViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RideViews.swift; sourceTree = "<group>"; };
 		20000000000000000000000B /* MotoLinkController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotoLinkController.swift; sourceTree = "<group>"; };
 		20000000000000000000000C = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		20000000000000000000000D /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fonts; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -45,7 +47,7 @@
 		};
 		400000000000000000000002 /* MotoLink */ = {
 			isa = PBXGroup;
-			children = (200000000000000000000001, 200000000000000000000002, 200000000000000000000003, 200000000000000000000004, 200000000000000000000006, 200000000000000000000009, 200000000000000000000007, 20000000000000000000000A, 20000000000000000000000B, 20000000000000000000000C);
+			children = (200000000000000000000001, 200000000000000000000002, 200000000000000000000003, 200000000000000000000004, 200000000000000000000006, 200000000000000000000009, 200000000000000000000007, 20000000000000000000000A, 20000000000000000000000B, 20000000000000000000000C, 20000000000000000000000D);
 			path = MotoLink;
 			sourceTree = "<group>";
 		};
@@ -95,7 +97,7 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		300000000000000000000003 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000006, 10000000000000000000000A); runOnlyForDeploymentPostprocessing = 0; };
+		300000000000000000000003 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000006, 10000000000000000000000A, 10000000000000000000000B); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -154,7 +156,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MotoLink/Info.plist;
@@ -173,7 +175,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MotoLink/Info.plist;
