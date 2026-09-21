@@ -67,7 +67,7 @@ struct ContentView: View {
                 Text(AppBuild.version).font(.caption.monospaced()).foregroundStyle(.secondary)
             }
             Text(rides.active == nil ? "Подключись.\nИ поехали." : "Записываем\nтвою поездку.")
-                .font(MotoTheme.font(MotoTheme.font(.largeTitle)))
+                .font(MotoTheme.font(.largeTitle))
             Label("На iPhone · запись без интернета", systemImage: "iphone")
                 .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
         }
@@ -503,3 +503,4 @@ private struct BikeActivityView: View, Equatable {
         }
     }
 }
+
