@@ -334,7 +334,7 @@ struct BikeActivitySnapshot: Equatable {
         state.running = (rpm ?? 0) > 0
         state.engineLevel = rpm.map { min(4, max(0, Int(ceil($0 / 2000)))) }
         state.temperature = water.map { Int($0.rounded()) }
-        state.thermalLevel = water.map { min(8, max(0, Int((($0 + 20) / 20).rounded()))) }
+        state.thermalLevel = water.map { min(8, max(0, Int((($0 - 40) / 65 * 8).rounded()))) }
         state.label = !state.live ? "Ждём свежие данные" : state.moving
             ? "Данные движения поступают" : state.running ? "Двигатель работает"
             : rpm == 0 ? "Двигатель остановлен" : "Мотоцикл стоит"
@@ -381,4 +381,29 @@ struct BLEReconnectPolicy {
     }
 
     mutating func reset() { self = Self() }
+}
+
+
+/// Unsolicited 45 temperature packets already arrive about once a second on
+/// EX500G. Poll slow status conservatively, and request temperature only when
+/// supported data are stale. This is not a BLE heartbeat or reconnection clock.
+enum SlowTelemetryPolling {
+    static func commands(now: Date, voltageSupported: Bool, temperatureSupported: Bool,
+                         lastVoltageAt: Date?, lastTemperatureAt: Date?,
+                         lastStatusRequestAt: Date?, lastTemperatureRequestAt: Date?) -> [UInt8] {
+        func old(_ date: Date?, seconds: TimeInterval) -> Bool {
+            guard let date else { return true }
+            let age = now.timeIntervalSince(date)
+            return age < 0 || age >= seconds
+        }
+        var commands: [UInt8] = []
+        if voltageSupported && old(lastVoltageAt, seconds: 60) && old(lastStatusRequestAt, seconds: 60) {
+            commands.append(0x41)
+        }
+        if temperatureSupported && old(lastTemperatureAt, seconds: 15)
+            && old(lastTemperatureRequestAt, seconds: 30) {
+            commands.append(0x45)
+        }
+        return commands
+    }
 }

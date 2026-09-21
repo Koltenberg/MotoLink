@@ -34,19 +34,19 @@ struct RidePanel: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if !rides.points.isEmpty {
-                    RouteMap(points: rides.points).frame(height: 200).clipShape(RoundedRectangle(cornerRadius: 16))
+                    RouteMap(points: rides.points).frame(height: 200).clipShape(PixelFrame())
                 } else {
                     Text("Ожидаем точную геопозицию. Маршрут и скорость поступают с iPhone.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 HStack {
-                    Button("Завершить поездку", role: .destructive) { rides.stop() }.buttonStyle(.bordered)
-                    Button("Экспорт") { rides.export(ride) }.buttonStyle(.bordered).disabled(rides.exporting)
+                    Button("Завершить поездку", role: .destructive) { rides.stop() }.buttonStyle(PixelButtonStyle())
+                    Button("Экспорт") { rides.export(ride) }.buttonStyle(PixelButtonStyle()).disabled(rides.exporting)
                 }
             } else {
                 Button { rides.start() } label: {
                     Label("Начать поездку", systemImage: "record.circle").frame(maxWidth: .infinity)
-                }.buttonStyle(.borderedProminent).foregroundStyle(.black)
+                }.buttonStyle(PixelButtonStyle(prominent: true))
                 Text("Ручная запись GPS работает и без связи с байком.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -65,7 +65,7 @@ struct RidePanel: View {
             }
         }
         .padding(18)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
+        .pixelPanel()
     }
     private func freshSpeed(at date: Date) -> String {
         guard let time = rides.lastLocationAt, date.timeIntervalSince(time) < GPSContinuity.staleInterval,
@@ -114,7 +114,7 @@ struct MotorcycleMeasurementsView: View {
             }
         }
         .padding(18)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 22))
+        .pixelPanel()
     }
 }
 
@@ -132,8 +132,13 @@ struct RideHistoryView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                .listRowBackground(MotoTheme.background)
+                .listRowSeparator(.hidden)
+                .padding(.vertical, 4)
+                .pixelPanel()
             }
-        }.navigationTitle("Мои поездки")
+        }.scrollContentBackground(.hidden).background(MotoTheme.background)
+            .navigationTitle("Мои поездки")
     }
 }
 
@@ -153,7 +158,7 @@ struct RideDetailView: View {
                 if let error { Text(error).foregroundStyle(.orange) }
                 if !points.isEmpty {
                     RouteMap(points: points, estimates: roadEstimates.estimates)
-                        .frame(height: 320).clipShape(RoundedRectangle(cornerRadius: 18))
+                        .frame(height: 320).clipShape(PixelFrame())
                     if !roadEstimates.estimates.isEmpty {
                         Text("Зелёный — записанный GPS. Оранжевый пунктир — возможный дорожный путь; он не подтверждает, где вы ехали.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -191,11 +196,12 @@ struct RideDetailView: View {
                     }
                 }
                 Button { rides.export(ride) } label: { Label("Сохранить единый журнал", systemImage: "square.and.arrow.up") }
-                    .buttonStyle(.bordered).disabled(rides.exporting)
+                    .buttonStyle(PixelButtonStyle()).disabled(rides.exporting)
                 Button { rides.exportGPX(ride) } label: { Label("Отдельно: GPX и маршрут", systemImage: "map") }
-                    .buttonStyle(.bordered).disabled(rides.exporting)
+                    .buttonStyle(PixelButtonStyle()).disabled(rides.exporting)
             }.padding(20)
         }
+        .background(MotoTheme.background)
         .navigationTitle("Поездка")
         .task {
             roadEstimates.load(ride, using: rides)
@@ -239,7 +245,7 @@ private struct GPSGapCard: View {
             }
             if gap.from != nil && gap.to != nil {
                 Button(estimate == nil ? "Запросить дорожный вариант у Apple" : "Повторить запрос к Apple") { calculate() }
-                    .buttonStyle(.bordered).disabled(anyBusy)
+                    .buttonStyle(PixelButtonStyle()).disabled(anyBusy)
                 if busy { ProgressView("Запрос маршрута…") }
             } else {
                 Text("Нет двух надёжных границ пропуска. Дорожный вариант построить нельзя.")
@@ -248,7 +254,7 @@ private struct GPSGapCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+        .pixelPanel(Color.orange.opacity(0.08))
     }
 }
 

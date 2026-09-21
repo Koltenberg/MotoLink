@@ -50,7 +50,7 @@ final class RideHealthTests: XCTestCase {
         XCTAssertTrue(state.live && state.moving && state.running)
         XCTAssertEqual(state.engineLevel, 3)
         XCTAssertEqual(state.temperature, 75)
-        XCTAssertEqual(state.thermalLevel, 5)
+        XCTAssertEqual(state.thermalLevel, 4)
     }
 
     func testActivityDoesNotPretendLostDataMeansStoppedEngine() {

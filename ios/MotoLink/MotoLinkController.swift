@@ -21,9 +21,7 @@ final class MotoLinkController: ObservableObject {
             guard let self, self.rides.active != nil else { return }
             self.bluetooth.recordHealthSnapshot()
             self.rides.recordPhoneHealth()
-            guard self.bluetooth.ready, !self.bluetooth.busy,
-                  !self.bluetooth.diagnosticRunning else { return }
-            self.bluetooth.request([0x41, 0x45])
+            self.bluetooth.refreshSlowMeasurements()
         }.store(in: &subscriptions)
     }
 }

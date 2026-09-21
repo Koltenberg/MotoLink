@@ -73,6 +73,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private var writeTimeout: DispatchWorkItem?
     private var responseTimeout: DispatchWorkItem?
     private var pendingWrites: [(command: UInt8, frame: Data)] = []
+    private var lastSlowQueryAt: [UInt8: Date] = [:]
     private var activeWrite: (command: UInt8, frame: Data)?
     private var writeConfirmed = false
     private var responseReceived = false
@@ -213,6 +214,18 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         pendingWrites = frames
         busy = true
         sendNext()
+    }
+
+    func refreshSlowMeasurements() {
+        guard ready, !busy, !diagnosticRunning else { return }
+        let temperatureIDs: Set<String> = ["engine_water_temperature", "inlet_air_temperature"]
+        let commands = SlowTelemetryPolling.commands(now: Date(),
+            voltageSupported: capabilities.contains { $0.id == "ecu_battery12V" && $0.supported },
+            temperatureSupported: capabilities.contains { temperatureIDs.contains($0.id) && $0.supported },
+            lastVoltageAt: measurements.first { $0.id == "ecu_battery12V" }?.timestamp,
+            lastTemperatureAt: measurements.filter { temperatureIDs.contains($0.id) }.map(\.timestamp).max(),
+            lastStatusRequestAt: lastSlowQueryAt[0x41], lastTemperatureRequestAt: lastSlowQueryAt[0x45])
+        if !commands.isEmpty { request(commands) }
     }
 
     func runFullDiagnostic() {
@@ -395,6 +408,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         capabilities = []
         measurements = []
         pendingWrites.removeAll()
+        lastSlowQueryAt.removeAll()
         activeWrite = nil
         writeConfirmed = false
         responseReceived = false
@@ -440,6 +454,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             return
         }
         activeWrite = write
+        if write.command == 0x41 || write.command == 0x45 { lastSlowQueryAt[write.command] = Date() }
         // Register response state before writeValue: a notification can reach
         // us before didWriteValueFor confirms the ATT transaction.
         writeConfirmed = false
