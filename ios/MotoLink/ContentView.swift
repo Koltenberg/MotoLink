@@ -76,7 +76,7 @@ struct ContentView: View {
                     .font(.title2).foregroundStyle(accent)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(bluetooth.selectedName).font(.headline)
-                    Text(bluetooth.ready ? "Bluetooth подключён" : bluetooth.connecting ? "Подключаемся…" : bluetooth.connected ? "Готовим соединение…" : "Bluetooth не подключён")
+                    Text(bluetooth.ready ? "Bluetooth подключён" : bluetooth.connecting ? (bluetooth.reconnectAttempt > 0 ? "Восстанавливаем связь…" : "Подключаемся…") : bluetooth.connected ? "Готовим соединение…" : "Bluetooth не подключён")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
@@ -102,6 +102,9 @@ struct ContentView: View {
             if rides.active != nil && !bluetooth.connected {
                 Text("Связь с байком прервалась. Журнал остаётся на телефоне, запись GPS продолжается при доступном сигнале.")
                     .font(.caption).foregroundStyle(.orange)
+            }
+            if let reason = bluetooth.reconnectBlockedReason {
+                Text(reason).font(.caption).foregroundStyle(.orange)
             }
             if !occupied && bluetooth.hasRememberedDevice {
                 Button { bluetooth.connectRemembered() } label: {

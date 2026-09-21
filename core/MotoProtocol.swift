@@ -341,3 +341,44 @@ struct BikeActivitySnapshot: Equatable {
         return state
     }
 }
+
+
+/// Delay only after a completed failure. A pending CoreBluetooth request has no
+/// deadline. Rapid connect/disconnect callbacks do not prove usable telemetry.
+struct BLEReconnectPolicy {
+    private(set) var failureCount = 0
+    private(set) var pairingRequired = false
+    private var firstTelemetryAt: Date?
+    private var lastTelemetryAt: Date?
+    private static let delays: [TimeInterval] = [0, 2, 5, 15, 30, 60]
+
+    mutating func nextDelay(allowed: Bool, requiresPairing: Bool = false) -> TimeInterval? {
+        if requiresPairing { pairingRequired = true }
+        guard allowed, !pairingRequired else { return nil }
+        let delay = Self.delays[min(failureCount, Self.delays.count - 1)]
+        failureCount = min(failureCount + 1, Self.delays.count)
+        firstTelemetryAt = nil
+        lastTelemetryAt = nil
+        return delay
+    }
+
+    mutating func connectionStarted() {
+        firstTelemetryAt = nil
+        lastTelemetryAt = nil
+    }
+
+    mutating func receivedTelemetry(at now: Date) {
+        // A long silence or backwards clock must not reset a failure streak.
+        if let previous = lastTelemetryAt,
+           now < previous || now.timeIntervalSince(previous) > 3 {
+            firstTelemetryAt = nil
+        }
+        if firstTelemetryAt == nil { firstTelemetryAt = now }
+        lastTelemetryAt = now
+        if let firstTelemetryAt, now.timeIntervalSince(firstTelemetryAt) >= 15 {
+            failureCount = 0
+        }
+    }
+
+    mutating func reset() { self = Self() }
+}
