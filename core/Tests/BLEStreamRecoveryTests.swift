@@ -139,6 +139,34 @@ final class BLEStreamRecoveryTests: XCTestCase {
         XCTAssertFalse(BLEStreamRecoveryPolicy.isPacket(Data()))
     }
 
+    func testOptionalWriteDeadlineDefersOnlyWhileOtherPacketsAreFresh() {
+        var policy = BLEStreamRecoveryPolicy()
+        XCTAssertFalse(policy.hasRecentPacket(at: 0))
+        policy.receivedStream(at: 0)
+        XCTAssertEqual(policy.nextAction(at: 45, eligible: true), .rearmStream)
+        // ATT write has no callback, but 45/4B continues for two hours. The
+        // transport can defer each 60s deadline without advancing that write.
+        for time in stride(from: 105.0, through: 7305, by: 60) {
+            policy.receivedPacket(at: time - 1)
+            XCTAssertTrue(policy.hasRecentPacket(at: time))
+        }
+        XCTAssertTrue(policy.hasRecentPacket(at: 7333.99))
+        XCTAssertFalse(policy.hasRecentPacket(at: 7334))
+        policy.reset()
+        XCTAssertFalse(policy.hasRecentPacket(at: 7334))
+    }
+
+    func testWriteDeadlineFreshnessRejectsInvalidOrReversedClock() {
+        var policy = BLEStreamRecoveryPolicy()
+        policy.receivedPacket(at: 100)
+        XCTAssertTrue(policy.hasRecentPacket(at: 100))
+        XCTAssertTrue(policy.hasRecentPacket(at: 129.99))
+        XCTAssertFalse(policy.hasRecentPacket(at: 130))
+        XCTAssertFalse(policy.hasRecentPacket(at: 99))
+        XCTAssertFalse(policy.hasRecentPacket(at: .nan))
+        XCTAssertFalse(policy.hasRecentPacket(at: .infinity))
+    }
+
     func testMalformedAndTruncatedFramesCannotArmWatchdog() {
         for data in [Data(), Data([0x4A]), Data([0x4A, 0, 0]),
                      Data([0x4A, 12, 0]), Data([UInt8](repeating: 0x4A, count: 15))] {

@@ -45,6 +45,13 @@ struct BLEStreamRecoveryPolicy {
         lastPacketAt = now
     }
 
+    /// An optional recovery write may wait for its ATT callback while a working
+    /// notification stream continues. Never advance its queue on this evidence.
+    func hasRecentPacket(at now: TimeInterval) -> Bool {
+        guard now.isFinite, let lastPacketAt, now >= lastPacketAt else { return false }
+        return now - lastPacketAt < Self.rearmGraceInterval
+    }
+
     mutating func nextAction(at now: TimeInterval, eligible: Bool) -> Action? {
         guard now.isFinite, now >= 0 else { return nil }
         if let previous = lastObservedAt, now < previous {
