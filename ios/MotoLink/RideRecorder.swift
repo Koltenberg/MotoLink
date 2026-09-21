@@ -218,7 +218,7 @@ final class RideArchive {
                 let output = root.appendingPathComponent("MotoLink-\(summary.id.uuidString).jsonl")
                 let summaryData = try Self.encoder.encode(summary)
                 let header = try JSONSerialization.data(withJSONObject: [
-                    "kind": "capture_manifest", "schema": "motolink.capture/1", "appVersion": "0.4",
+                    "kind": "capture_manifest", "schema": "motolink.capture/1", "appVersion": AppBuild.version, "appBuild": AppBuild.number,
                     "exportedAt": ISO8601DateFormatter().string(from: Date()),
                     "ride": try JSONSerialization.jsonObject(with: summaryData),
                     "rawEventsIncluded": summary.rawEventCount ?? 0,
@@ -603,13 +603,13 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard active != nil, !finishAfterDisconnect() else { return }
+        guard let startedAt = active?.startedAt, !finishAfterDisconnect() else { return }
         var records: [RideRecord] = []
         for fix in locations.sorted(by: { $0.timestamp < $1.timestamp }) {
             records.append(RideRecord(kind: "gps_observation", timestamp: fix.timestamp,
                 detail: "lat=\(fix.coordinate.latitude); lon=\(fix.coordinate.longitude); horizontalAccuracy=\(fix.horizontalAccuracy); altitude=\(fix.altitude); verticalAccuracy=\(fix.verticalAccuracy); speed=\(fix.speed); speedAccuracy=\(fix.speedAccuracy); course=\(fix.course); courseAccuracy=\(fix.courseAccuracy)"))
-            guard abs(fix.timestamp.timeIntervalSinceNow) < 30,
-                  points.last == nil || fix.timestamp > points.last!.timestamp else { continue }
+            guard GPSContinuity.acceptsTimestamp(fix.timestamp, startedAt: startedAt,
+                previous: points.last?.timestamp, now: Date()) else { continue }
             guard fix.horizontalAccuracy >= 0, fix.horizontalAccuracy <= 50,
                   CLLocationCoordinate2DIsValid(fix.coordinate) else {
                 markGPSGap("Нет точной геопозиции; ненадёжная точка отклонена")

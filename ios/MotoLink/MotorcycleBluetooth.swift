@@ -26,6 +26,11 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     @Published private(set) var hasRememberedDevice: Bool
     @Published private(set) var packetCount = 0
     @Published private(set) var lastPacketAt: Date?
+    @Published private(set) var lastStreamAt: Date?
+    @Published private(set) var connectionRequestedAt: Date?
+    private var lastPacketPeripheralID: UUID?
+    private var lastRSSIRequestAt: Date?
+    private var rssiPending = false
     @Published private(set) var storageError: String?
     @Published private(set) var exportBusy = false
     @Published var exportedFiles: SharedFiles?
@@ -88,7 +93,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         } catch {
             storageError = error.localizedDescription
         }
-        record("app", "MotoLink 0.4 · iOS \(UIDevice.current.systemVersion)")
+        record("app", "MotoLink \(AppBuild.version) (\(AppBuild.number)) · iOS \(UIDevice.current.systemVersion)")
         central = CBCentralManager(delegate: self, queue: .main, options: [
             CBCentralManagerOptionRestoreIdentifierKey: "app.motolink.central.v1",
             CBCentralManagerOptionShowPowerAlertKey: true
@@ -259,6 +264,29 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         }
     }
 
+    /// Called by the existing low-frequency capture timer; this is diagnostic
+    /// observation, not a background keepalive or a reconnect deadline.
+    func recordHealthSnapshot() {
+        let now = Date()
+        let packetAge = lastPacketAt.map { Int(max(0, now.timeIntervalSince($0))) } ?? -1
+        let streamAge = lastStreamAt.map { Int(max(0, now.timeIntervalSince($0))) } ?? -1
+        let waiting = connecting ? connectionRequestedAt.map { Int(max(0, now.timeIntervalSince($0))) } ?? -1 : 0
+        record("ble_health", "connected=\(connected); ready=\(ready); connecting=\(connecting); waitSeconds=\(waiting); packetAgeSeconds=\(packetAge); streamAgeSeconds=\(streamAge); peripheralState=\(current?.state.rawValue ?? -1); appState=\(UIApplication.shared.applicationState.rawValue)")
+        // One local RSSI read per minute, only while visible and between commands.
+        if UIApplication.shared.applicationState == .active, ready, !busy,
+           !diagnosticRunning, !rssiPending, let current, isCurrent(current),
+           lastRSSIRequestAt == nil || now.timeIntervalSince(lastRSSIRequestAt!) >= 60 {
+            lastRSSIRequestAt = now
+            rssiPending = true
+            current.readRSSI()
+        }
+    }
+
+    private static func errorDetails(_ error: Error?) -> String {
+        guard let error = error as NSError? else { return "error=none" }
+        return "domain=\(error.domain); code=\(error.code); message=\(error.localizedDescription)"
+    }
+
     @objc private func enteredBackground() {
         if scanning {
             stopScan()
@@ -276,7 +304,13 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         connecting = true
         connected = false
         packetCount = 0
-        lastPacketAt = nil
+        // Preserve the last receive time across reconnection to the same bike.
+        if lastPacketPeripheralID != peripheral.identifier {
+            lastPacketAt = nil
+            lastPacketPeripheralID = peripheral.identifier
+        }
+        lastStreamAt = nil
+        connectionRequestedAt = Date()
         status = "Ожидание \(selectedName)…"
         record("connection", "Запрошено подключение к \(selectedName); id=\(peripheral.identifier.uuidString)")
         // CoreBluetooth keeps this request pending when the motorcycle is off.
@@ -288,6 +322,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         clearTransport()
         connected = true
         connecting = false
+        connectionRequestedAt = nil
         status = "Bluetooth подключён. Проверка каналов…"
         peripheral.delegate = self
         peripheral.discoverServices([CBUUID(string: MotoProtocol.service)])
@@ -302,6 +337,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     private func clearTransport() {
         session = UUID()
+        lastStreamAt = nil
+        rssiPending = false
+        lastRSSIRequestAt = nil
         setupTimeout?.cancel()
         setupTimeout = nil
         writeTimeout?.cancel()
@@ -506,25 +544,34 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
         connected = false
         connectionWanted = false
         status = terminalStatus ?? "Подключение не удалось: \(error?.localizedDescription ?? "причина не указана")"
-        record("error", status)
+        record("error", "\(status); \(Self.errorDetails(error))")
+        recordHealthSnapshot()
         // Do not spin on authentication failures or replay diagnostic writes.
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard current === peripheral, peripheral.state == .disconnected else { return }
         let shouldReconnect = connectionWanted && autoReconnect && bluetoothPowered
+        recordHealthSnapshot()
         clearTransport()
         current = nil
         connecting = false
         connected = false
         connectionWanted = false
         status = terminalStatus ?? "Связь прервана"
-        record("connection", "Отключено\(error.map { ": \($0.localizedDescription)" } ?? "")")
+        record("connection", "Отключено; \(Self.errorDetails(error)); reconnect=\(shouldReconnect)")
         if shouldReconnect { beginConnection(peripheral) }
     }
 }
 
 extension MotorcycleBluetooth: CBPeripheralDelegate {
+    func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
+        guard isCurrent(peripheral) else { return }
+        rssiPending = false
+        if let error { record("rssi_error", Self.errorDetails(error)) }
+        else { record("rssi", "dBm=\(RSSI.intValue)") }
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard isCurrent(peripheral) else { return }
         if let error { failSetup("Ошибка поиска сервиса: \(error.localizedDescription)"); return }
@@ -626,7 +673,10 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             measurements.append(value)
         }
         if !decoded.isEmpty {
-            if bytes.first == 0x4A { decodedStreamFrames += 1 }
+            if bytes.first == 0x4A {
+                decodedStreamFrames += 1
+                lastStreamAt = lastPacketAt
+            }
             onMeasurements?(decoded)
         }
         if bytes.count == 5, bytes[0] == 0x20, bytes[1] == 2,

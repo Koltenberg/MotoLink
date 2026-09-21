@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import UIKit
 
 struct ContentView: View {
@@ -59,7 +60,7 @@ struct ContentView: View {
             HStack {
                 Text("MOTO LINK").font(.caption.weight(.heavy)).tracking(3).foregroundStyle(accent)
                 Spacer()
-                Text("0.4.1").font(.caption.monospaced()).foregroundStyle(.secondary)
+                Text(AppBuild.version).font(.caption.monospaced()).foregroundStyle(.secondary)
             }
             Text(rides.active == nil ? "Твой маршрут.\nТвой ритм." : "Поездка записывается.")
                 .font(.system(.largeTitle, design: .rounded).weight(.bold))
@@ -80,6 +81,23 @@ struct ContentView: View {
                 }
                 Spacer(minLength: 0)
                 if bluetooth.connecting { ProgressView() }
+            }
+            if rides.active != nil || bluetooth.connected {
+                BikeActivityView(bluetooth: bluetooth).equatable()
+            }
+            if rides.active != nil {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let state = TelemetryFreshness.state(connected: bluetooth.connected,
+                        ready: bluetooth.ready, lastStreamAt: bluetooth.lastStreamAt, now: context.date)
+                    Text(state == .receiving ? "Данные байка поступают" : state == .disconnected
+                         ? "Данные байка не поступают" : state == .stale
+                         ? "Поток данных байка прервался" : "Ждём поток данных байка")
+                        .font(.headline).foregroundStyle(state == .receiving ? Color.green : Color.orange)
+                    if bluetooth.connecting, let requested = bluetooth.connectionRequestedAt {
+                        Text("Ожидание связи: \(duration(context.date.timeIntervalSince(requested))). Переподключение пока не подтверждено.")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
             }
             if rides.active != nil && !bluetooth.connected {
                 Text("Связь с байком прервалась. Журнал остаётся на телефоне, запись GPS продолжается при доступном сигнале.")
@@ -117,7 +135,7 @@ struct ContentView: View {
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 if let last = bluetooth.lastPacketAt {
                     HStack {
-                        Text("Последние данные байка")
+                        Text("Последний пакет Bluetooth")
                         Text(last, style: .time)
                     }.font(.caption).foregroundStyle(.secondary)
                 } else {
@@ -338,4 +356,133 @@ struct ShareSheet: UIViewControllerRepresentable {
         UIActivityViewController(activityItems: items, applicationActivities: nil)
     }
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+/// Samples displayed values once a second; packet-rate changes in the parent do
+/// not redraw this equatable child. Animation has only two frames per second.
+private struct BikeActivityView: View, Equatable {
+    let bluetooth: MotorcycleBluetooth
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var snapshot = Snapshot()
+    @State private var lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth }
+
+    private struct Snapshot: Equatable {
+        var live = false
+        var speed: Int?
+        var rpm: Int?
+        var gear: Int?
+        var temperature: Int?
+        var moving: Bool { live && (speed ?? 0) > 1 }
+        var running: Bool { live && (rpm ?? 0) > 0 }
+    }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            TimelineView(.animation(minimumInterval: 0.5,
+                paused: scenePhase != .active || reduceMotion || lowPower || !snapshot.live
+                    || (!snapshot.moving && !snapshot.running))) { context in
+                let animate = scenePhase == .active && !reduceMotion && !lowPower && snapshot.live
+                let phase = animate ? Int(context.date.timeIntervalSince1970 * 2) % 2 : 0
+                Canvas { context, size in
+                    drawBike(context: context, size: size, phase: phase)
+                }
+            }
+            .frame(width: 132, height: 66)
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(snapshot.speed.map { "\($0) км/ч" } ?? "— км/ч")
+                    .font(.title3.monospacedDigit().weight(.semibold))
+                Text("Передача: \(snapshot.gear.map(String.init) ?? "—")")
+                    .font(.caption.monospacedDigit())
+                Text("\(snapshot.rpm.map(String.init) ?? "—") об/мин · \(snapshot.temperature.map(String.init) ?? "—") °C")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottomLeading) {
+            Text("Данные байка · экспериментально")
+                .font(.system(size: 9)).foregroundStyle(.secondary).offset(y: 13)
+        }
+        .padding(.bottom, 13)
+        .onAppear { sample() }
+        .onReceive(ticker) { _ in if scenePhase == .active { sample() } }
+        .onChange(of: scenePhase) { phase in if phase == .active { sample() } }
+    }
+
+    private func sample() {
+        let now = Date()
+        let live = TelemetryFreshness.state(connected: bluetooth.connected, ready: bluetooth.ready,
+            lastStreamAt: bluetooth.lastStreamAt, now: now) == .receiving
+        func value(_ id: String) -> Int? {
+            guard live, let measurement = bluetooth.measurements.first(where: { $0.id == id }),
+                  measurement.value.isFinite,
+                  now.timeIntervalSince(measurement.timestamp) >= 0,
+                  now.timeIntervalSince(measurement.timestamp) <= 15 else { return nil }
+            return Int(measurement.value.rounded())
+        }
+        snapshot = Snapshot(live: live, speed: value("wheel_speed"), rpm: value("engine_speed"),
+            gear: value("gear_position"), temperature: value("engine_water_temperature"))
+        lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+    }
+
+    private func drawBike(context: GraphicsContext, size: CGSize, phase: Int) {
+        let unit = min(size.width / 44, size.height / 22)
+        let red = snapshot.live ? Color(red: 0.94, green: 0.20, blue: 0.25) : Color.gray
+        let metal = Color(red: 0.50, green: 0.53, blue: 0.58)
+        let dark = Color(red: 0.12, green: 0.13, blue: 0.16)
+        func block(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ color: Color) {
+            context.fill(Path(CGRect(x: CGFloat(x) * unit, y: CGFloat(y) * unit,
+                width: CGFloat(w) * unit, height: CGFloat(h) * unit)), with: .color(color))
+        }
+        // Pixel tyres, with alternating spokes only when measured speed is nonzero.
+        for x in [6, 30] {
+            block(x + 2, 11, 5, 1, metal)
+            block(x + 1, 12, 7, 1, metal)
+            block(x, 13, 9, 5, metal)
+            block(x + 1, 18, 7, 1, metal)
+            block(x + 2, 19, 5, 1, metal)
+            block(x + 2, 13, 5, 5, dark)
+            block(x + 1, 14, 7, 3, dark)
+            if snapshot.moving && phase == 1 {
+                for offset in 0..<5 {
+                    block(x + 2 + offset, 13 + offset, 1, 1, metal)
+                    block(x + 6 - offset, 13 + offset, 1, 1, metal)
+                }
+            } else {
+                block(x + 4, 13, 1, 5, metal)
+                block(x + 2, 15, 5, 1, metal)
+            }
+        }
+        // Graphite frame, stepped fairing, red tank and tail. No bitmap assets.
+        block(10, 15, 14, 1, metal)
+        block(17, 11, 8, 5, dark)
+        block(19, 12, 5, 3, metal)
+        block(25, 13, 3, 3, red)
+        block(26, 10, 3, 4, red)
+        block(29, 9, 2, 3, metal)
+        block(31, 11, 2, 3, metal)
+        block(33, 13, 2, 3, metal)
+        block(7, 7, 9, 2, red)
+        block(9, 9, 5, 1, red)
+        block(5, 7, 2, 1, Color(red: 0.65, green: 0.12, blue: 0.16))
+        block(14, 7, 7, 1, metal)
+        block(16, 8, 6, 2, dark)
+        block(21, 6, 6, 1, red)
+        block(20, 7, 10, 3, red)
+        block(23, 10, 7, 1, red)
+        block(28, 5, 3, 2, metal)
+        block(30, 6, 2, 3, metal)
+        block(31, 8, 3, 2, red)
+        block(33, 8, 2, 1, Color.white.opacity(0.75))
+        block(24, 4, 6, 1, metal)
+        block(26, 3, 2, 1, metal)
+        block(12, 17, 12, 1, metal)
+        if snapshot.running {
+            block(20, 13, 2, 1, phase == 1 ? red.opacity(0.55) : red)
+        }
+    }
 }

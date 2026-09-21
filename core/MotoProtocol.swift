@@ -266,9 +266,29 @@ enum GPSContinuity {
     static let gapInterval: TimeInterval = 60
     static let staleInterval: TimeInterval = 15
 
+    /// Retain cached observations in the raw log, but exclude pre-ride fixes
+    /// from the measured route, distance, and gap boundaries.
+    static func acceptsTimestamp(_ timestamp: Date, startedAt: Date,
+                                 previous: Date?, now: Date) -> Bool {
+        timestamp >= startedAt && abs(timestamp.timeIntervalSince(now)) < 30
+            && (previous == nil || timestamp > previous!)
+    }
+
     static func decision(elapsed: TimeInterval, distance: Double, interrupted: Bool) -> Decision {
         guard elapsed > 0, elapsed.isFinite, distance.isFinite, distance >= 0,
               distance / elapsed <= 100 else { return .reject }
         return interrupted || elapsed > gapInterval ? .newSegment : .continuous
+    }
+}
+
+/// A connected peripheral or ACK packet alone does not prove a live data stream.
+enum TelemetryFreshness {
+    enum State: Equatable { case disconnected, waiting, receiving, stale }
+
+    static func state(connected: Bool, ready: Bool, lastStreamAt: Date?, now: Date) -> State {
+        guard connected else { return .disconnected }
+        guard ready, let lastStreamAt else { return .waiting }
+        let age = now.timeIntervalSince(lastStreamAt)
+        return age >= 0 && age <= 15 ? .receiving : .stale
     }
 }

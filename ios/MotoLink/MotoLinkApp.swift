@@ -12,3 +12,8 @@ struct MotoLinkApp: App {
         }
     }
 }
+
+enum AppBuild {
+    static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+    static let number = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+}
