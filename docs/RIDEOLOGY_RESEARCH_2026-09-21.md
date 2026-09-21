@@ -2,6 +2,10 @@
 
 ## Что удалось получить
 
+Дополнение после повторного разбора: восстановлены также BluetoothControlService, `services.a`, `oh.e`, все классы `ne`, очереди `h2.a` и `com.bumptech.glide.manager.n`. В `oh.e(default)` обнаружена проверка автопереподключения раз в **4000 мс**, когда байк не подключён и нет текущей попытки. Соседняя задача с 60000 мс сжимает Realm; задача с 1000 мс проверяет предельное время записи (24 часа), `services.a` — движение по свежей скорости. Это не периодические BLE heartbeat. В просмотренной цепочке BLE5 такого heartbeat не обнаружено. Поле 120 в 08 по-прежнему не получило доказанной расшифровки.
+
+Повторно получен XAPK через [APKPure](https://apkpure.net/rideology-the-app-motorcycle/jp.co.khi.mce.rideologytheappV2/download): SHA-256 `a4e26fe5a9da01f936bc629a06914f5983e6872a21a98eced30757a346ed47e4`. Комплект split APK отличается от Uptodown, но основной APK совпадает побайтно с указанным ниже SHA-256; manifest указывает 2.11.12 / 149. JADX с `--comments-level debug --no-res` сообщил 44 ошибки; вывод о таймерах опирается на успешно восстановленный `oh.e.run`, не на ошибочные методы. Приложение не запускалось. Компактный частный архив исследования сохраняется локально, в GitHub не загружается.
+
 Открытый официальный исходный код Kawasaki RIDEOLOGY в проверенных источниках не найден. Это не утверждение, что его нигде нет. Найдены независимые реализации BLE5 и скачан Android-пакет RIDEOLOGY для локального статического анализа. Приложение не устанавливалось, не запускалось и не подключалось к мотоциклу.
 
 Пакет: `jp.co.khi.mce.rideologytheappV2`, `versionName=2.11.12`, `versionCode=149` из AndroidManifest.xml. Источник загрузки: [Uptodown, конкретный вариант](https://rideology.en.uptodown.com/android/download/1217694980-x). Идентификатор приложения сверялся с [официальной страницей Kawasaki в Google Play](https://play.google.com/store/apps/details?id=jp.co.khi.mce.rideologytheappV2).

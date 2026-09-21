@@ -87,4 +87,71 @@ final class BLEReconnectPolicyTests: XCTestCase {
         policy.receivedTelemetry(at: start.addingTimeInterval(15))
         XCTAssertEqual(policy.failureCount, 1)
     }
+
+    func testGATTFailureSurvivesCancellationAndEncryptionFailure() {
+        var policy = BLEReconnectPolicy()
+        policy.requestTransportRestart()
+        XCTAssertTrue(policy.transportRestartPending)
+        // iOS confirms our cancel after a discovery/write/notification failure.
+        XCTAssertEqual(policy.nextDelay(allowed: true, cancelled: true), 0)
+        XCTAssertFalse(policy.transportRestartPending)
+        policy.connectionStarted()
+        // The next encryption timeout must not permanently abandon the ride.
+        XCTAssertEqual(policy.nextDelay(allowed: true), 2)
+        policy.connectionStarted()
+        policy.requestTransportRestart()
+        XCTAssertEqual(policy.nextDelay(allowed: true, cancelled: true), 5)
+    }
+
+    func testUserStopWhileTransportIsClosingWinsOverScheduledRecovery() {
+        var policy = BLEReconnectPolicy()
+        policy.requestTransportRestart()
+        policy.reset() // Stop button or disabling automatic reconnection.
+        XCTAssertNil(policy.nextDelay(allowed: false, cancelled: true))
+        XCTAssertFalse(policy.transportRestartPending)
+        XCTAssertEqual(policy.failureCount, 0)
+    }
+
+    func testUnexpectedCancellationCannotBorrowAnEarlierRestart() {
+        var policy = BLEReconnectPolicy()
+        policy.requestTransportRestart()
+        XCTAssertEqual(policy.nextDelay(allowed: true, cancelled: true), 0)
+        policy.connectionStarted()
+        XCTAssertNil(policy.nextDelay(allowed: true, cancelled: true))
+        XCTAssertEqual(policy.failureCount, 1)
+    }
+
+    func testPairingErrorStillBlocksLocallyRequestedRestart() {
+        var policy = BLEReconnectPolicy()
+        policy.requestTransportRestart()
+        XCTAssertNil(policy.nextDelay(allowed: true, requiresPairing: true, cancelled: true))
+        XCTAssertTrue(policy.pairingRequired)
+        policy.requestTransportRestart()
+        XCTAssertNil(policy.nextDelay(allowed: true, cancelled: true))
+    }
+
+    func testPowerLossCannotUsePendingRestartWithoutPermission() {
+        var policy = BLEReconnectPolicy()
+        policy.requestTransportRestart()
+        XCTAssertNil(policy.nextDelay(allowed: false, cancelled: true))
+        XCTAssertFalse(policy.transportRestartPending)
+        XCTAssertEqual(policy.failureCount, 0)
+    }
+
+    func testRepeatedGATTFailuresStayBoundedThenFortyMinuteStreamRecovers() {
+        var policy = BLEReconnectPolicy()
+        for _ in 0..<100 {
+            policy.requestTransportRestart()
+            let delay = policy.nextDelay(allowed: true, cancelled: true)
+            XCTAssertNotNil(delay)
+            XCTAssertLessThanOrEqual(delay!, 60)
+            policy.connectionStarted()
+        }
+        for packet in 0...12000 { // 40 minutes at the observed 5 Hz.
+            policy.receivedTelemetry(at: start.addingTimeInterval(Double(packet) / 5))
+        }
+        XCTAssertEqual(policy.failureCount, 0)
+        XCTAssertFalse(policy.transportRestartPending)
+        XCTAssertEqual(policy.nextDelay(allowed: true), 0)
+    }
 }

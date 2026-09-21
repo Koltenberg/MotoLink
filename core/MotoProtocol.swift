@@ -348,13 +348,23 @@ struct BikeActivitySnapshot: Equatable {
 struct BLEReconnectPolicy {
     private(set) var failureCount = 0
     private(set) var pairingRequired = false
+    private(set) var transportRestartPending = false
     private var firstTelemetryAt: Date?
     private var lastTelemetryAt: Date?
     private static let delays: [TimeInterval] = [0, 2, 5, 15, 30, 60]
 
-    mutating func nextDelay(allowed: Bool, requiresPairing: Bool = false) -> TimeInterval? {
+    /// A failed GATT setup/write must close before a new connection can start.
+    /// Its cancellation callback is recovery, unlike a user's Stop action.
+    mutating func requestTransportRestart() {
+        transportRestartPending = true
+    }
+
+    mutating func nextDelay(allowed: Bool, requiresPairing: Bool = false,
+                            cancelled: Bool = false) -> TimeInterval? {
+        let recoveringTransport = transportRestartPending
+        transportRestartPending = false
         if requiresPairing { pairingRequired = true }
-        guard allowed, !pairingRequired else { return nil }
+        guard allowed, !pairingRequired, !cancelled || recoveringTransport else { return nil }
         let delay = Self.delays[min(failureCount, Self.delays.count - 1)]
         failureCount = min(failureCount + 1, Self.delays.count)
         firstTelemetryAt = nil
@@ -363,6 +373,7 @@ struct BLEReconnectPolicy {
     }
 
     mutating func connectionStarted() {
+        transportRestartPending = false
         firstTelemetryAt = nil
         lastTelemetryAt = nil
     }

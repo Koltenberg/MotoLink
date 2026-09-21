@@ -31,6 +31,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     @Published private(set) var reconnectAttempt = 0
     @Published private(set) var reconnectBlockedReason: String?
     private var reconnectPolicy = BLEReconnectPolicy()
+    private var transportRecoveryError: Error?
     private var lastPacketPeripheralID: UUID?
     private var lastRSSIRequestAt: Date?
     private var rssiPending = false
@@ -316,6 +317,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     private func resetRecovery() {
         reconnectPolicy.reset()
+        transportRecoveryError = nil
         reconnectAttempt = 0
         reconnectBlockedReason = nil
     }
@@ -330,7 +332,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             && nsError?.code == CBError.Code.tooManyLEPairedDevices.rawValue
         let cancelled = nsError?.domain == CBErrorDomain
             && nsError?.code == CBError.Code.operationCancelled.rawValue
-        let allowed = wanted && autoReconnect && bluetoothPowered && !cancelled
+        let allowed = wanted && autoReconnect && bluetoothPowered
         if allowed && (removedPairing || pairingLimit) {
             reconnectBlockedReason = removedPairing
                 ? "iOS сообщает, что сопряжение удалено. На остановке проверь сопряжение в настройках Bluetooth и подключись снова."
@@ -339,7 +341,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             record("reconnect_blocked", "\(status); \(Self.errorDetails(error))")
         }
         guard let delay = reconnectPolicy.nextDelay(allowed: allowed,
-            requiresPairing: removedPairing || pairingLimit) else { return }
+            requiresPairing: removedPairing || pairingLimit, cancelled: cancelled) else { return }
         reconnectAttempt = reconnectPolicy.failureCount
         record("reconnect", "attempt=\(reconnectAttempt); systemDelaySeconds=\(Int(delay)); \(Self.errorDetails(error))")
         beginConnection(peripheral, delay: delay)
@@ -348,6 +350,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private func beginConnection(_ peripheral: CBPeripheral, delay: TimeInterval = 0) {
         stopScan()
         clearTransport()
+        transportRecoveryError = nil
         terminalStatus = nil
         current = peripheral
         peripheral.delegate = self
@@ -384,7 +387,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         let expectedSession = session
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, self.session == expectedSession, !self.ready else { return }
-            self.failSetup("Мотоцикл не подтвердил каналы за 60 секунд")
+            self.failSetup("Мотоцикл не подтвердил каналы за 60 секунд", retry: true)
         }
         setupTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: timeout)
@@ -421,17 +424,27 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         reenableNotifications.removeAll()
     }
 
-    private func failSetup(_ message: String) {
-        record("error", message)
+    private func failSetup(_ message: String, error: Error? = nil, retry: Bool = false) {
+        guard !reconnectPolicy.transportRestartPending else { return }
+        record("error", "\(message); \(Self.errorDetails(error))")
         terminalStatus = message
-        connectionWanted = false
+        let recover = retry && connectionWanted && autoReconnect && bluetoothPowered
+        if recover {
+            reconnectPolicy.requestTransportRestart()
+            transportRecoveryError = error
+            record("transport_restart", "Закрываем неисправный канал; повторное подключение после подтверждения iOS. \(message)")
+        } else {
+            connectionWanted = false
+        }
         clearTransport()
-        status = message
+        status = recover ? "Канал прервался. Восстанавливаем связь…" : message
+        // Keep this peripheral until didDisconnect. Never overlap connect and
+        // cancel, and ignore late GATT callbacks from the closing session.
         if let current { central.cancelPeripheralConnection(current) }
     }
 
     private func isCurrent(_ peripheral: CBPeripheral) -> Bool {
-        current === peripheral && connectionWanted
+        current === peripheral && connectionWanted && !reconnectPolicy.transportRestartPending
             && peripheral.state == .connected
     }
 
@@ -465,7 +478,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         let expectedSession = session
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, self.session == expectedSession, self.activeWrite != nil else { return }
-            self.failSetup("Нет подтверждения BLE-записи. Запросы остановлены; повторите подключение.")
+            self.failSetup("Нет подтверждения BLE-записи за 60 секунд", retry: true)
         }
         writeTimeout = timeout
         // A first write can show the system pairing/PIN dialog.
@@ -596,6 +609,8 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         guard current === peripheral, peripheral.state == .disconnected else { return }
         let wanted = connectionWanted
+        let recoveryError = transportRecoveryError ?? error
+        transportRecoveryError = nil
         clearTransport()
         current = nil
         connecting = false
@@ -605,12 +620,14 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
         record("error", "\(status); \(Self.errorDetails(error))")
         recordHealthSnapshot()
         // An encryption timeout is not evidence that the bond was removed.
-        recoverConnection(peripheral, error: error, wanted: wanted)
+        recoverConnection(peripheral, error: recoveryError, wanted: wanted)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard current === peripheral, peripheral.state == .disconnected else { return }
         let shouldReconnect = connectionWanted && autoReconnect && bluetoothPowered
+        let recoveryError = transportRecoveryError ?? error
+        transportRecoveryError = nil
         recordHealthSnapshot()
         clearTransport()
         current = nil
@@ -619,11 +636,18 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
         connectionWanted = false
         status = terminalStatus ?? "Связь прервана"
         record("connection", "Отключено; \(Self.errorDetails(error)); reconnect=\(shouldReconnect)")
-        recoverConnection(peripheral, error: error, wanted: shouldReconnect)
+        recoverConnection(peripheral, error: recoveryError, wanted: shouldReconnect)
     }
 }
 
 extension MotorcycleBluetooth: CBPeripheralDelegate {
+    func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
+        guard isCurrent(peripheral), invalidatedServices.contains(where: {
+            $0.uuid == CBUUID(string: MotoProtocol.service)
+        }) else { return }
+        failSetup("iOS сообщила об изменении сервиса Kawasaki", retry: true)
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
         guard isCurrent(peripheral) else { return }
         rssiPending = false
@@ -633,7 +657,7 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard isCurrent(peripheral) else { return }
-        if let error { failSetup("Ошибка поиска сервиса: \(error.localizedDescription)"); return }
+        if let error { failSetup("Ошибка поиска сервиса", error: error, retry: true); return }
         guard let service = peripheral.services?.first(where: { $0.uuid == CBUUID(string: MotoProtocol.service) }) else {
             failSetup("Ожидаемый сервис Kawasaki отсутствует. Эта модель пока не подтверждена.")
             return
@@ -645,7 +669,7 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard isCurrent(peripheral), service.uuid == CBUUID(string: MotoProtocol.service) else { return }
-        if let error { failSetup("Ошибка поиска каналов: \(error.localizedDescription)"); return }
+        if let error { failSetup("Ошибка поиска каналов", error: error, retry: true); return }
         let characteristics = service.characteristics ?? []
         guard let write = characteristics.first(where: { $0.uuid == CBUUID(string: MotoProtocol.control) }),
               write.properties.contains(.write) else {
@@ -661,7 +685,7 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             }
             notifications[identifier.uppercased()] = characteristic
         }
-        record("setup", "Каналы найдены; включение трёх уведомлений")
+        record("setup", "Каналы найдены; включение трёх уведомлений; maxWriteWithResponse=\(peripheral.maximumWriteValueLength(for: .withResponse))")
         subscribed.removeAll()
         reenableNotifications.removeAll()
         for characteristic in notifications.values {
@@ -680,13 +704,13 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         guard isCurrent(peripheral), characteristic.service?.uuid == CBUUID(string: MotoProtocol.service),
               notifications[characteristic.uuid.uuidString.uppercased()] === characteristic else { return }
-        if let error { failSetup("Не удалось включить уведомления: \(error.localizedDescription)"); return }
+        if let error { failSetup("Не удалось включить уведомления", error: error, retry: true); return }
         if !characteristic.isNotifying,
            reenableNotifications.remove(characteristic.uuid.uuidString.uppercased()) != nil {
             peripheral.setNotifyValue(true, for: characteristic)
             return
         }
-        guard characteristic.isNotifying else { failSetup("Мотоцикл отключил уведомления"); return }
+        guard characteristic.isNotifying else { failSetup("Мотоцикл отключил уведомления", retry: true); return }
         subscribed.insert(characteristic.uuid.uuidString.uppercased())
         record("notify", "Уведомления подтверждены", characteristic: characteristic.uuid.uuidString)
         if subscribed.count == MotoProtocol.notify.count {
@@ -705,7 +729,7 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
         guard isCurrent(peripheral), characteristic.service?.uuid == CBUUID(string: MotoProtocol.service),
               notifications[characteristic.uuid.uuidString.uppercased()] === characteristic else { return }
         if let error {
-            record("rx_error", error.localizedDescription, characteristic: characteristic.uuid.uuidString)
+            record("rx_error", Self.errorDetails(error), characteristic: characteristic.uuid.uuidString)
             return
         }
         guard let data = characteristic.value else { return }
@@ -764,7 +788,7 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
         guard isCurrent(peripheral), control === characteristic, let activeWrite else { return }
         writeTimeout?.cancel()
         writeTimeout = nil
-        if let error { failSetup("Ошибка передачи запроса: \(error.localizedDescription)"); return }
+        if let error { failSetup("Ошибка передачи запроса", error: error, retry: true); return }
         writeConfirmed = true
         record("tx_confirmed", String(format: "BLE принял 0x%02X; это не подтверждение данных", activeWrite.command))
         if rejectedResponse {
