@@ -31,6 +31,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     @Published private(set) var reconnectAttempt = 0
     @Published private(set) var reconnectBlockedReason: String?
     private var reconnectPolicy = BLEReconnectPolicy()
+    private var streamRecovery = BLEStreamRecoveryPolicy()
     private var transportRecoveryError: Error?
     private var lastPacketPeripheralID: UUID?
     private var lastRSSIRequestAt: Date?
@@ -55,6 +56,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         static let identifier = "MotoLink.peripheralIdentifier"
         static let name = "MotoLink.peripheralName"
         static let reconnect = "MotoLink.autoReconnect"
+        static let verifiedDevices = "MotoLink.verifiedBLE5Devices"
     }
 
     private var central: CBCentralManager!
@@ -67,7 +69,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private var control: CBCharacteristic?
     private var notifications: [String: CBCharacteristic] = [:]
     private var subscribed: Set<String> = []
-    private var reenableNotifications: Set<String> = []
+    private var pendingNotification: String?
     private var session = UUID()
     private var scanTimeout: DispatchWorkItem?
     private var setupTimeout: DispatchWorkItem?
@@ -106,6 +108,10 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         NotificationCenter.default.addObserver(self,
                                                selector: #selector(enteredBackground),
                                                name: UIApplication.didEnterBackgroundNotification,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(becameActive),
+                                               name: UIApplication.didBecomeActiveNotification,
                                                object: nil)
     }
 
@@ -293,6 +299,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         let streamAge = lastStreamAt.map { Int(max(0, now.timeIntervalSince($0))) } ?? -1
         let waiting = connecting ? connectionRequestedAt.map { Int(max(0, now.timeIntervalSince($0))) } ?? -1 : 0
         record("ble_health", "connected=\(connected); ready=\(ready); connecting=\(connecting); waitSeconds=\(waiting); packetAgeSeconds=\(packetAge); streamAgeSeconds=\(streamAge); peripheralState=\(current?.state.rawValue ?? -1); reconnectAttempt=\(reconnectAttempt); appState=\(UIApplication.shared.applicationState.rawValue)")
+        checkStreamRecovery()
         // One local RSSI read per minute, only while visible and between commands.
         if UIApplication.shared.applicationState == .active, ready, !busy,
            !diagnosticRunning, !rssiPending, let current, isCurrent(current),
@@ -320,6 +327,39 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         transportRecoveryError = nil
         reconnectAttempt = 0
         reconnectBlockedReason = nil
+    }
+
+    @objc private func becameActive() {
+        // An opportunity to check an existing session, not a background timer.
+        checkStreamRecovery()
+    }
+
+    private func checkStreamRecovery() {
+        let eligible = autoReconnect && connectionWanted && ready && !busy && !diagnosticRunning
+            && UserDefaults.standard.bool(forKey: "MotoLink.resumeTelemetry")
+            && current.map(isCurrent) == true
+        guard let action = streamRecovery.nextAction(at: ProcessInfo.processInfo.systemUptime,
+                                                      eligible: eligible) else { return }
+        switch action {
+        case .rearmStream:
+            record("stream_recovery", "Нет структурно корректного 4A не менее 45 секунд. Один повтор известного профиля 08; соединение сохраняется.")
+            request([0x08])
+        case .preserveActiveLink:
+            record("stream_stalled_link_alive", "4A пока не вернулся, но другие корректные пакеты поступают. Сохраняем соединение: повторное обнаружение мотоцикла в движении может быть недоступно.")
+        case .restartTransport:
+            failSetup("Поток 4A не восстановился и все корректные пакеты отсутствуют не менее 30 секунд; восстанавливаем канал", retry: true)
+        }
+    }
+
+    private func previouslyVerified(_ peripheral: CBPeripheral) -> Bool {
+        UserDefaults.standard.stringArray(forKey: Key.verifiedDevices)?.contains(peripheral.identifier.uuidString) == true
+    }
+
+    private func rememberVerified(_ peripheral: CBPeripheral) {
+        var identifiers = UserDefaults.standard.stringArray(forKey: Key.verifiedDevices) ?? []
+        guard !identifiers.contains(peripheral.identifier.uuidString) else { return }
+        identifiers.append(peripheral.identifier.uuidString)
+        UserDefaults.standard.set(identifiers, forKey: Key.verifiedDevices)
     }
 
     /// Retry completed failures, not an OS connection which is still pending.
@@ -395,6 +435,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     private func clearTransport() {
         session = UUID()
+        streamRecovery.reset()
         lastStreamAt = nil
         rssiPending = false
         lastRSSIRequestAt = nil
@@ -421,7 +462,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         control = nil
         notifications.removeAll()
         subscribed.removeAll()
-        reenableNotifications.removeAll()
+        pendingNotification = nil
     }
 
     private func failSetup(_ message: String, error: Error? = nil, retry: Bool = false) {
@@ -541,6 +582,8 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
         guard bluetoothPowered else {
             stopScan()
             clearTransport()
+            found.removeAll()
+            nearby.removeAll()
             current = nil
             connecting = false
             connected = false
@@ -659,7 +702,9 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
         guard isCurrent(peripheral) else { return }
         if let error { failSetup("Ошибка поиска сервиса", error: error, retry: true); return }
         guard let service = peripheral.services?.first(where: { $0.uuid == CBUUID(string: MotoProtocol.service) }) else {
-            failSetup("Ожидаемый сервис Kawasaki отсутствует. Эта модель пока не подтверждена.")
+            let verified = previouslyVerified(peripheral)
+            failSetup(verified ? "Ранее проверенный сервис Kawasaki временно не найден"
+                : "Ожидаемый сервис Kawasaki отсутствует. Эта модель пока не подтверждена.", retry: verified)
             return
         }
         record("setup", "Сервис найден; поиск каналов")
@@ -673,56 +718,63 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
         let characteristics = service.characteristics ?? []
         guard let write = characteristics.first(where: { $0.uuid == CBUUID(string: MotoProtocol.control) }),
               write.properties.contains(.write) else {
-            failSetup("Канал запросов с подтверждением не найден")
+            failSetup("Канал запросов с подтверждением не найден", retry: previouslyVerified(peripheral))
             return
         }
         control = write
         for identifier in MotoProtocol.notify {
             guard let characteristic = characteristics.first(where: { $0.uuid == CBUUID(string: identifier) }),
                   characteristic.properties.contains(.notify) else {
-                failSetup("Канал уведомлений отсутствует: \(identifier)")
+                failSetup("Канал уведомлений отсутствует: \(identifier)", retry: previouslyVerified(peripheral))
                 return
             }
             notifications[identifier.uppercased()] = characteristic
         }
-        record("setup", "Каналы найдены; включение трёх уведомлений; maxWriteWithResponse=\(peripheral.maximumWriteValueLength(for: .withResponse))")
+        rememberVerified(peripheral)
+        record("setup", "Каналы найдены; последовательная проверка трёх уведомлений; maxWriteWithResponse=\(peripheral.maximumWriteValueLength(for: .withResponse))")
         subscribed.removeAll()
-        reenableNotifications.removeAll()
+        pendingNotification = nil
         for characteristic in notifications.values {
             if characteristic.isNotifying {
-                // State restoration may return an already subscribed channel.
-                // Re-enable once so this session gets explicit confirmations.
-                reenableNotifications.insert(characteristic.uuid.uuidString.uppercased())
-                peripheral.setNotifyValue(false, for: characteristic)
-            } else {
-                peripheral.setNotifyValue(true, for: characteristic)
+                // Preserve restored subscriptions instead of interrupting data
+                // merely to obtain another confirmation from the same channel.
+                subscribed.insert(characteristic.uuid.uuidString.uppercased())
+                record("notify_restored", "Действующая подписка сохранена", characteristic: characteristic.uuid.uuidString)
             }
         }
         status = "Подписка на три канала…"
+        subscribeNext(peripheral)
+    }
+
+    private func subscribeNext(_ peripheral: CBPeripheral) {
+        guard isCurrent(peripheral), !ready, pendingNotification == nil else { return }
+        for identifier in MotoProtocol.notify.map({ $0.uppercased() }) where !subscribed.contains(identifier) {
+            guard let characteristic = notifications[identifier] else { return }
+            pendingNotification = identifier
+            peripheral.setNotifyValue(true, for: characteristic)
+            return
+        }
+        guard subscribed.count == MotoProtocol.notify.count else { return }
+        setupTimeout?.cancel()
+        setupTimeout = nil
+        ready = true
+        status = "Каналы готовы. Выберите диагностический запрос."
+        record("ready", "Все три подписки подтверждены")
+        if autoReconnect && UserDefaults.standard.bool(forKey: "MotoLink.resumeTelemetry") {
+            runFullDiagnostic()
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         guard isCurrent(peripheral), characteristic.service?.uuid == CBUUID(string: MotoProtocol.service),
               notifications[characteristic.uuid.uuidString.uppercased()] === characteristic else { return }
         if let error { failSetup("Не удалось включить уведомления", error: error, retry: true); return }
-        if !characteristic.isNotifying,
-           reenableNotifications.remove(characteristic.uuid.uuidString.uppercased()) != nil {
-            peripheral.setNotifyValue(true, for: characteristic)
-            return
-        }
         guard characteristic.isNotifying else { failSetup("Мотоцикл отключил уведомления", retry: true); return }
-        subscribed.insert(characteristic.uuid.uuidString.uppercased())
+        let identifier = characteristic.uuid.uuidString.uppercased()
+        if pendingNotification == identifier { pendingNotification = nil }
+        subscribed.insert(identifier)
         record("notify", "Уведомления подтверждены", characteristic: characteristic.uuid.uuidString)
-        if subscribed.count == MotoProtocol.notify.count {
-            setupTimeout?.cancel()
-            setupTimeout = nil
-            ready = true
-            status = "Каналы готовы. Выберите диагностический запрос."
-            record("ready", "Все три подписки подтверждены")
-            if autoReconnect && UserDefaults.standard.bool(forKey: "MotoLink.resumeTelemetry") {
-                runFullDiagnostic()
-            }
-        }
+        subscribeNext(peripheral)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -730,6 +782,7 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
               notifications[characteristic.uuid.uuidString.uppercased()] === characteristic else { return }
         if let error {
             record("rx_error", Self.errorDetails(error), characteristic: characteristic.uuid.uuidString)
+            checkStreamRecovery()
             return
         }
         guard let data = characteristic.value else { return }
@@ -737,11 +790,18 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
         lastPacketAt = Date()
         record("rx", MotoProtocol.inspect(data), characteristic: characteristic.uuid.uuidString, data: data)
         let bytes = Array(data)
+        if BLEStreamRecoveryPolicy.isPacket(data) {
+            streamRecovery.receivedPacket(at: ProcessInfo.processInfo.systemUptime)
+        }
         if bytes.first == 0x40 {
             capabilities = MotoProtocol.capabilities(data) ?? []
             measurements = []
         }
-        if bytes.count >= 15, bytes.count == Int(bytes[1]) + 3, bytes[0] == 0x4A { streamPackets += 1 }
+        if BLEStreamRecoveryPolicy.isStreamFrame(data) {
+            streamPackets += 1
+            lastStreamAt = lastPacketAt
+            streamRecovery.receivedStream(at: ProcessInfo.processInfo.systemUptime)
+        }
         // Missing/sentinel values in a new valid frame must not leave the old
         // measurement looking current. Malformed frames preserve the last time.
         if bytes.count >= 3, bytes.count == Int(bytes[1]) + 3 {
@@ -776,12 +836,14 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             // callback can be mistaken for the next queued write.
             rejectedResponse = true
             if writeConfirmed { finishRequest(received: false, rejected: true) }
+            checkStreamRecovery()
             return
         }
         if let activeWrite, matchesResponse(data, command: activeWrite.command) {
             responseReceived = true
             if writeConfirmed { finishRequest(received: true) }
         }
+        checkStreamRecovery()
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {

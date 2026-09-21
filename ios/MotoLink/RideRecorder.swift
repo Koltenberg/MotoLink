@@ -99,6 +99,9 @@ func gpsGaps(in records: [RideRecord], ride: RideSummary) -> [GPSGap] {
 final class RideArchive {
     private let queue = DispatchQueue(label: "app.motolink.rides")
     private let directory: URL
+    // Confined to queue; changing rides starts a fresh checkpoint schedule.
+    private var checkpointRideID: UUID?
+    private var checkpointPolicy = JournalCheckpointPolicy()
     var onError: ((String) -> Void)?
 
     init() throws {
@@ -140,7 +143,7 @@ final class RideArchive {
         return records
     }
 
-    func append(_ records: [RideRecord], summary: RideSummary) {
+    func append(_ records: [RideRecord], summary: RideSummary, forceCheckpoint: Bool = false) {
         queue.async { [self] in
             do {
                 let log = url(summary.id, "jsonl")
@@ -166,9 +169,20 @@ final class RideArchive {
                     bytes.append(0x0A)
                     try handle.write(contentsOf: bytes)
                 }
-                try handle.synchronize()
-                try Self.encoder.encode(summary).write(to: url(summary.id, "json"),
-                    options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                if checkpointRideID != summary.id {
+                    checkpointRideID = summary.id
+                    checkpointPolicy = JournalCheckpointPolicy()
+                }
+                let boundary = records.contains {
+                    ["started", "finished", "lifecycle", "bluetooth", "gap", "gps_gap"].contains($0.kind)
+                }
+                let uptime = ProcessInfo.processInfo.systemUptime
+                if checkpointPolicy.shouldCheckpoint(at: uptime, forced: forceCheckpoint || boundary) {
+                    try handle.synchronize()
+                    try Self.encoder.encode(summary).write(to: url(summary.id, "json"),
+                        options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                    checkpointPolicy.checkpointSucceeded(at: uptime)
+                }
             } catch { DispatchQueue.main.async { self.onError?(error.localizedDescription) } }
         }
     }
@@ -212,6 +226,7 @@ final class RideArchive {
     func export(_ summary: RideSummary, completion: @escaping (Result<[URL], Error>) -> Void) {
         queue.async { [self] in
             do {
+                try checkpointForExport(summary)
                 let root = FileManager.default.temporaryDirectory
                     .appendingPathComponent("MotoLink-capture-\(UUID().uuidString)", isDirectory: true)
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -240,6 +255,7 @@ final class RideArchive {
     func exportGPXDetails(_ summary: RideSummary, completion: @escaping (Result<[URL], Error>) -> Void) {
         queue.async { [self] in
             do {
+                try checkpointForExport(summary)
                 let records = try records(summary.id)
                 let root = FileManager.default.temporaryDirectory
                     .appendingPathComponent("MotoLink-ride-\(UUID().uuidString)", isDirectory: true)
@@ -276,6 +292,19 @@ final class RideArchive {
                 }
                 DispatchQueue.main.async { completion(.success(files)) }
             } catch { DispatchQueue.main.async { completion(.failure(error)) } }
+        }
+    }
+
+    /// Runs on queue after all earlier appends. A failed checkpoint must reach
+    /// the export caller, rather than presenting a successful share operation.
+    private func checkpointForExport(_ summary: RideSummary) throws {
+        let handle = try FileHandle(forWritingTo: url(summary.id, "jsonl"))
+        defer { try? handle.close() }
+        try handle.synchronize()
+        try Self.encoder.encode(summary).write(to: url(summary.id, "json"),
+            options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        if checkpointRideID == summary.id {
+            checkpointPolicy.checkpointSucceeded(at: ProcessInfo.processInfo.systemUptime)
         }
     }
 }

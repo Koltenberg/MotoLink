@@ -38,7 +38,7 @@ enum MotoTheme {
         case .caption, .caption2, .footnote: size = 16
         default: size = 20
         }
-        return .custom("PixelifySans-Regular", size: size, relativeTo: style)
+        return .custom("MotoLinkPixel-Regular", size: size, relativeTo: style)
     }
 }
 

@@ -18,7 +18,7 @@
     <key>UIBackgroundModes</key><array><string>bluetooth-central</string><string>location</string></array>
     <key>UIApplicationSceneManifest</key>
     <dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
-    <key>UIAppFonts</key><array><string>Fonts/PixelifySans.ttf</string></array>
+    <key>UIAppFonts</key><array><string>Fonts/MotoLinkPixel.ttf</string></array>
     <key>UILaunchScreen</key><dict/>
     <key>UISupportedInterfaceOrientations</key>
     <array><string>UIInterfaceOrientationPortrait</string></array>
