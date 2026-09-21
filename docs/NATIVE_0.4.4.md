@@ -25,3 +25,7 @@
 - [didFailToConnect](https://developer.apple.com/documentation/corebluetooth/cbcentralmanagerdelegate/centralmanager(_:didfailtoconnect:error:)): ошибка завершённого подключения может быть временной, допустима новая попытка.
 - [Системная задержка подключения](https://developer.apple.com/documentation/corebluetooth/cbconnectperipheraloptionstartdelaykey): длительность в секундах через NSNumber.
 - [connect](https://developer.apple.com/documentation/corebluetooth/cbcentralmanager/connect(_:options:)): у ожидающего запроса нет автоматического таймаута.
+
+## Фактическая сборка
+
+[Actions 35624636435](https://github.com/Koltenberg/MotoLink/actions/runs/35624636435), коммит `41b756622e3ed1977adea7de3c17e739ff950820`: 33 Swift + 20 Python + 7 проверки профиля успешно. Release скомпилирован для simulator и физического arm64 iPhone. Локальная проверка скачанного пакета подтвердила версию 0.4.4, build 8 и SHA-256 `0c6d21e2d7cde050c3938e1d8885d7e696ae2f6d133fb4115ee418215efb8b1a`. Размер IPA 481 458 байт. Пакет пока unsigned; подпись, установка и реальная проверка восстановления связи остаются необходимы. Номер версии берётся из настроек Xcode через Info.plist, а не дублируется вручную.
