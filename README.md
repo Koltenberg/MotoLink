@@ -8,7 +8,7 @@
 
 [GitHub Actions](https://github.com/Koltenberg/MotoLink/actions/workflows/ios-build.yml) собирает неподписанную IPA для arm64, iOS 16+. Успех сборки не подтверждает Bluetooth и фоновые режимы на устройстве. Для установки нужна личная подпись; публикация исходников не обновляет установленное приложение автоматически. Личные дорожные журналы в репозиторий не загружаются.
 
-Подробности: [проверки](docs/VALIDATION.md), [совместимость моделей](docs/COMPATIBILITY.md).
+Подробности: [проверки](docs/VALIDATION.md), [совместимость моделей](docs/COMPATIBILITY.md), [разбор RIDEOLOGY APK и карта полей](docs/RIDEOLOGY_RESEARCH_2026-09-21.md).
 
 ## Возможности и ограничения
 

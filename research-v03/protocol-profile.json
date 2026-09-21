@@ -2,7 +2,7 @@
   "schema": "motolink.protocol-profile/1",
   "sourceCommit": "06a0f61681e119f5e5dd9a793d8a61c891a020f8",
   "secondaryCommit": "a8726cf562541738592b555bb0dbe4569f7003f4",
-  "modelEvidence": "Kawasaki-ER500F upstream; EX500G only03,40,41verified",
+  "modelEvidence": "Upstream Kawasaki-ER500F; EX500G first native capture includes 03/40/41/45/4A/4B, with limited payload blocks and unconfirmed long-ride reconnect. See docs/RIDEOLOGY_RESEARCH_2026-09-21.md.",
   "primarySequence": [
     "03",
     "40",
