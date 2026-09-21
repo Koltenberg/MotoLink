@@ -198,7 +198,7 @@ struct ContentView: View {
             if bluetooth.diagnosticRunning {
                 HStack { ProgressView(); Text(bluetooth.diagnosticStatus).font(.caption) }
             } else { Text(bluetooth.diagnosticStatus).font(.caption).foregroundStyle(.secondary) }
-            Text("Значения 4A и температуры помечаются экспериментальными до проверки формата EX500G. Все пакеты сохраняются даже без расшифровки.")
+            Text("Показатели остаются экспериментальными. Поле впрыска сохраняется без единиц: его смысл и масштаб ещё проверяем. Все пакеты сохраняются даже без расшифровки.")
                 .font(.caption).foregroundStyle(.secondary)
             DisclosureGroup("Отдельные запросы") {
                 requestButton("Модель и версия", subtitle: "Информация из ответа", icon: "bolt.circle", commands: [0x03])
@@ -364,21 +364,11 @@ private struct BikeActivityView: View, Equatable {
     let bluetooth: MotorcycleBluetooth
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var snapshot = Snapshot()
+    @State private var snapshot = BikeActivitySnapshot()
     @State private var lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth }
-
-    private struct Snapshot: Equatable {
-        var live = false
-        var speed: Int?
-        var rpm: Int?
-        var gear: Int?
-        var temperature: Int?
-        var moving: Bool { live && (speed ?? 0) > 1 }
-        var running: Bool { live && (rpm ?? 0) > 0 }
-    }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -393,13 +383,22 @@ private struct BikeActivityView: View, Equatable {
             }
             .frame(width: 132, height: 66)
             .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(snapshot.speed.map { "\($0) км/ч" } ?? "— км/ч")
-                    .font(.title3.monospacedDigit().weight(.semibold))
-                Text("Передача: \(snapshot.gear.map(String.init) ?? "—")")
-                    .font(.caption.monospacedDigit())
-                Text("\(snapshot.rpm.map(String.init) ?? "—") об/мин · \(snapshot.temperature.map(String.init) ?? "—") °C")
-                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(snapshot.label).font(.subheadline.weight(.semibold))
+                HStack(spacing: 7) {
+                    Text("Мотор").font(.caption).foregroundStyle(.secondary)
+                    levels(snapshot.engineLevel, count: 4, color: .red)
+                }.accessibilityElement(children: .ignore)
+                    .accessibilityLabel(snapshot.engineLevel == nil ? "Нет свежих оборотов"
+                        : snapshot.running ? "Двигатель работает" : "Двигатель остановлен")
+                HStack(spacing: 7) {
+                    Image(systemName: "thermometer.medium").font(.caption)
+                    levels(snapshot.thermalLevel, count: 8, color: .orange)
+                    Text(snapshot.temperature.map { "\($0) °C" } ?? "— °C")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }.accessibilityElement(children: .ignore)
+                    .accessibilityLabel(snapshot.temperature.map { "Охлаждение: \($0) градусов" }
+                        ?? "Нет свежей температуры охлаждения")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -413,19 +412,20 @@ private struct BikeActivityView: View, Equatable {
         .onChange(of: scenePhase) { phase in if phase == .active { sample() } }
     }
 
+    private func levels(_ level: Int?, count: Int, color: Color) -> some View {
+        HStack(spacing: 3) {
+            ForEach(0..<count, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(index < (level ?? 0) ? color.opacity(0.8) : Color.white.opacity(0.12))
+                    .frame(width: count == 4 ? 10 : 5, height: 6)
+            }
+        }.accessibilityHidden(true)
+    }
+
     private func sample() {
-        let now = Date()
-        let live = TelemetryFreshness.state(connected: bluetooth.connected, ready: bluetooth.ready,
-            lastStreamAt: bluetooth.lastStreamAt, now: now) == .receiving
-        func value(_ id: String) -> Int? {
-            guard live, let measurement = bluetooth.measurements.first(where: { $0.id == id }),
-                  measurement.value.isFinite,
-                  now.timeIntervalSince(measurement.timestamp) >= 0,
-                  now.timeIntervalSince(measurement.timestamp) <= 15 else { return nil }
-            return Int(measurement.value.rounded())
-        }
-        snapshot = Snapshot(live: live, speed: value("wheel_speed"), rpm: value("engine_speed"),
-            gear: value("gear_position"), temperature: value("engine_water_temperature"))
+        let next = BikeActivitySnapshot.sample(connected: bluetooth.connected, ready: bluetooth.ready,
+            measurements: bluetooth.measurements, now: Date())
+        if snapshot != next { snapshot = next }
         lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
     }
 

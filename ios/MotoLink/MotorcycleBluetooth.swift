@@ -663,7 +663,7 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             let ids: [UInt8: Set<String>] = [
                 0x41: ["ecu_battery12V"],
                 0x45: ["engine_water_temperature", "inlet_air_temperature"],
-                0x4A: ["engine_speed", "wheel_speed", "gear_position", "throttle_position"]
+                0x4A: ["engine_speed", "wheel_speed", "gear_position", "throttle_position", "fuel_injection_raw"]
             ]
             if let invalidated = ids[bytes[0]] { measurements.removeAll { invalidated.contains($0.id) } }
         }

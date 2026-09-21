@@ -164,12 +164,19 @@ enum MotoProtocol {
                 }
             }
         }
-        // Upstream 4A mapping has not yet been validated with an EX500G stream.
-        // Retain provenance and the raw packet; do not present these as verified.
+        // The first EX500G ride is consistent with part of the upstream layout,
+        // but it does not calibrate every value. Keep experimental provenance.
         if b[0] == 0x4A, b.count >= 15, b[5] == 0x05, b[6] != 0xFF {
             func add(_ id: String, _ label: String, _ value: Double, _ unit: String) {
                 result.append(Measurement(id: id, label: label, value: value, unit: unit,
                     timestamp: time, source: "Kawasaki BLE · 0x4A · экспериментально"))
+            }
+            // Retain the upstream injection candidate without guessing its scale.
+            // This is not AFR, lambda, fuel volume, or an independently measured sensor.
+            if (supports("fuel_injection", mode: 0) || supports("fuel_injection", mode: 1)),
+               !(b[7] == 0xFF && b[8] == 0xFF) {
+                add("fuel_injection_raw", "Впрыск: исходное значение",
+                    Double((Int(b[7]) << 8) | Int(b[8])), "без единиц")
             }
             if supports("engine_speed", mode: 0), !(b[11] == 0xFF && b[12] == 0xFF) {
                 add("engine_speed", "Обороты двигателя", Double((Int(b[11] & 0x7F) << 8) | Int(b[12])), "об/мин")
@@ -290,5 +297,47 @@ enum TelemetryFreshness {
         guard ready, let lastStreamAt else { return .waiting }
         let age = now.timeIntervalSince(lastStreamAt)
         return age >= 0 && age <= 15 ? .receiving : .stale
+    }
+}
+
+/// A small visual summary, independent of UI frame rate. Missing/future/stale
+/// measurements cannot animate a motorcycle. Temperature is a visual scale,
+/// not a model-specific overheating threshold or a fan/light reading.
+struct BikeActivitySnapshot: Equatable {
+    var live = false
+    var moving = false
+    var running = false
+    var engineLevel: Int?
+    var temperature: Int?
+    var thermalLevel: Int?
+    var label = "Нет связи"
+
+    static func sample(connected: Bool, ready: Bool,
+                       measurements: [MotoProtocol.Measurement], now: Date) -> Self {
+        guard connected, ready else {
+            var empty = Self()
+            empty.label = connected ? "Готовим связь…" : "Нет связи"
+            return empty
+        }
+        func fresh(_ id: String, maxAge: TimeInterval, range: ClosedRange<Double>) -> Double? {
+            guard let value = measurements.first(where: { $0.id == id }),
+                  value.value.isFinite, range.contains(value.value) else { return nil }
+            let age = now.timeIntervalSince(value.timestamp)
+            return age >= 0 && age <= maxAge ? value.value : nil
+        }
+        let rpm = fresh("engine_speed", maxAge: 3, range: 0...32767)
+        let speed = fresh("wheel_speed", maxAge: 3, range: 0...511)
+        let water = fresh("engine_water_temperature", maxAge: 30, range: -40...215)
+        var state = Self()
+        state.live = rpm != nil || speed != nil
+        state.moving = (speed ?? 0) > 1
+        state.running = (rpm ?? 0) > 0
+        state.engineLevel = rpm.map { min(4, max(0, Int(ceil($0 / 2000)))) }
+        state.temperature = water.map { Int($0.rounded()) }
+        state.thermalLevel = water.map { min(8, max(0, Int((($0 + 20) / 20).rounded()))) }
+        state.label = !state.live ? "Ждём свежие данные" : state.moving
+            ? "Данные движения поступают" : state.running ? "Двигатель работает"
+            : rpm == 0 ? "Двигатель остановлен" : "Мотоцикл стоит"
+        return state
     }
 }

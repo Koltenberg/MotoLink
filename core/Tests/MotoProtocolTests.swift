@@ -80,4 +80,26 @@ final class MotoProtocolTests: XCTestCase {
         for index in 5..<35 { cap[index] = 0xFF }
         XCTAssertNil(MotoProtocol.capabilities(cap))
     }
+
+    func testInjectionCandidateRetainsRawBitsWithoutPhysicalScale() {
+        var b: [UInt8] = [0x4A, 0x0C, 0, 0xFF, 0xFF, 0x05, 0x01, 0x03, 0x87, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0]
+        let raw = MotoProtocol.measurements(Data(b), capabilities: capabilities)
+            .first { $0.id == "fuel_injection_raw" }
+        XCTAssertEqual(raw?.value, 903)
+        XCTAssertEqual(raw?.unit, "без единиц")
+        b[7] = 0; b[8] = 0
+        XCTAssertEqual(MotoProtocol.measurements(Data(b), capabilities: capabilities)
+            .first { $0.id == "fuel_injection_raw" }?.value, 0)
+    }
+
+    func testInjectionSentinelOrUnsupportedCapabilityDoesNotBecomeData() {
+        var b: [UInt8] = [0x4A, 0x0C, 0, 0xFF, 0xFF, 0x05, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0]
+        XCTAssertNil(MotoProtocol.measurements(Data(b), capabilities: capabilities)
+            .first { $0.id == "fuel_injection_raw" })
+        b[7] = 1; b[8] = 2
+        for mode: UInt8 in [2, 3] {
+            let unsupported = [MotoProtocol.Capability(id: "fuel_injection", label: "test", mode: mode)]
+            XCTAssertTrue(MotoProtocol.measurements(Data(b), capabilities: unsupported).isEmpty)
+        }
+    }
 }

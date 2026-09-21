@@ -308,6 +308,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private var autoSuppressedForConnection = false
     private var cancellables = Set<AnyCancellable>()
     private var pendingGPSGapReason: String?
+    private var batteryMonitoringBeforeRide: Bool?
 
     override init() {
         super.init()
@@ -336,6 +337,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                 // Do not silently bridge a killed app's GPS gap or auto-start GPS from a cold launch.
             }
         } catch { self.error = error.localizedDescription }
+        if active != nil { beginBatteryMonitoring() }
         location.delegate = self
         location.desiredAccuracy = kCLLocationAccuracyBest
         location.distanceFilter = 10
@@ -398,6 +400,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func stop() {
+        guard active != nil else { return }
+        recordPhoneHealth(reason: "finished")
         guard var summary = active else { return }
         location.stopUpdatingLocation()
         locationRunning = false
@@ -419,6 +423,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         archive?.append(ending, summary: summary)
         history.insert(summary, at: 0)
         active = nil
+        endBatteryMonitoring()
         previous = nil
         distanceAnchor = nil
         speedMS = nil
@@ -471,6 +476,39 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     func recordLifecycle(_ detail: String) {
         guard active != nil else { return }
         append([RideRecord(kind: "lifecycle", timestamp: Date(), detail: detail)])
+        recordPhoneHealth(reason: "lifecycle")
+    }
+
+    /// Reuses the existing capture timer and lifecycle events. No extra polling
+    /// or network traffic. Battery monitoring is restored when the ride ends.
+    func recordPhoneHealth(reason: String = "periodic") {
+        guard active != nil else { return }
+        let device = UIDevice.current
+        let level = device.batteryLevel
+        let percent = level.isFinite && (0...1).contains(level)
+            ? String(Int((level * 100).rounded())) : "unknown"
+        let batteryState: String
+        switch device.batteryState {
+        case .charging: batteryState = "charging"
+        case .full: batteryState = "full"
+        case .unplugged: batteryState = "unplugged"
+        default: batteryState = "unknown"
+        }
+        let process = ProcessInfo.processInfo
+        let detail = "reason=\(reason); batteryPercent=\(percent); batteryState=\(batteryState); lowPower=\(process.isLowPowerModeEnabled); thermalState=\(process.thermalState.rawValue); appState=\(UIApplication.shared.applicationState.rawValue)"
+        append([RideRecord(kind: "phone_health", timestamp: Date(), detail: detail)])
+    }
+
+    private func beginBatteryMonitoring() {
+        guard batteryMonitoringBeforeRide == nil else { return }
+        batteryMonitoringBeforeRide = UIDevice.current.isBatteryMonitoringEnabled
+        UIDevice.current.isBatteryMonitoringEnabled = true
+    }
+
+    private func endBatteryMonitoring() {
+        guard let previous = batteryMonitoringBeforeRide else { return }
+        UIDevice.current.isBatteryMonitoringEnabled = previous
+        batteryMonitoringBeforeRide = nil
     }
 
     /// Start the capture even without GPS permission: BLE evidence must survive
@@ -532,6 +570,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         points = []; gaps = []; pendingGPSGapReason = nil
         segment = 0; previous = nil; distanceAnchor = nil; speedMS = nil; lastLocationAt = nil; lastTelemetryTimes = [:]
         active = RideSummary(id: UUID(), startedAt: Date(), lastSavedAt: Date(), trigger: trigger)
+        beginBatteryMonitoring()
         append([RideRecord(kind: "started", timestamp: Date(), detail: "GPS и скорость: iPhone. BLE-подключение не доказывает работу двигателя.")])
         recordLifecycle("iOS \(UIDevice.current.systemVersion); locationPermission=\(authorization.rawValue); lowPower=\(ProcessInfo.processInfo.isLowPowerModeEnabled)")
         if authorization == .authorizedAlways || authorization == .authorizedWhenInUse {
