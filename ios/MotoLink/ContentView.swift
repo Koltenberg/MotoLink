@@ -254,6 +254,11 @@ struct ContentView: View {
                         .font(MotoTheme.font(.headline)).frame(maxWidth: .infinity).padding(.vertical, 12)
                 }.buttonStyle(PixelButtonStyle(prominent: true)).foregroundStyle(.white).disabled(rides.finishingRide)
             }
+            if let error = rides.error {
+                Text("Не удалось сохранить: \(error)")
+                    .font(.caption).foregroundStyle(.orange)
+                    .accessibilityLabel("Ошибка сохранения. " + error)
+            }
         }
     }
 
@@ -379,11 +384,6 @@ struct ShareSheet: UIViewControllerRepresentable {
             let sharedItems = items
             DispatchQueue.global(qos: .utility).async {
                 MotoLinkExportCleanup.removeCompletedExports(sharedItems)
-            }
-            if let error = rides.error {
-                Text("Не удалось сохранить: \(error)")
-                    .font(.caption).foregroundStyle(.orange)
-                    .accessibilityLabel("Ошибка сохранения. " + error)
             }
         }
         return controller
