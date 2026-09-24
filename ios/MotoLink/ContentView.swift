@@ -6,6 +6,8 @@ struct ContentView: View {
     @ObservedObject var bluetooth: MotorcycleBluetooth
     @ObservedObject var rides: RideRecorder
     @State private var showHelp = false
+    @State private var showDiagnostics = false
+    @State private var justSaved = false
 
     private let accent = MotoTheme.accent
     private var occupied: Bool { bluetooth.connecting || bluetooth.connected }
@@ -15,41 +17,48 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     header
-                    connectionCard
                     if !occupied { discovery }
-                    captureControls
+                    connectionCard
                     rideStatus
                     NavigationLink { RideHistoryView(rides: rides) } label: {
-                        Label("Поездки и журналы", systemImage: "clock.arrow.circlepath")
+                        Label("Мои поездки", systemImage: "clock.arrow.circlepath")
                             .frame(maxWidth: .infinity, alignment: .leading).padding(18)
                             .pixelPanel()
                     }.buttonStyle(.plain)
-                    DisclosureGroup("Показатели мотоцикла") {
-                        MotorcycleMeasurementsView(bluetooth: bluetooth)
-                    }
-                    DisclosureGroup("Диагностика") {
-                        VStack(alignment: .leading, spacing: 20) {
-                            diagnosticControls
-                            logSection
-                        }.padding(.top, 12)
-                    }
                 }
                 .padding(20)
             }
             .background(MotoTheme.background)
             .navigationTitle("Moto Link")
             .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .bottom) {
+                captureControls.padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(MotoTheme.background)
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button { showHelp = true } label: {
-                        Image(systemName: "questionmark.circle")
-                    }
-                    .accessibilityLabel("Как подключиться")
+                    Menu {
+                        Button { showHelp = true } label: { Label("Как пользоваться", systemImage: "questionmark.circle") }
+                        Button { showDiagnostics = true } label: { Label("Диагностика", systemImage: "wrench.and.screwdriver") }
+                    } label: { Image(systemName: "ellipsis.circle") }
+                    .accessibilityLabel("Помощь и дополнительные действия")
                 }
             }
             .sheet(isPresented: $showHelp) { help }
-            .sheet(item: $bluetooth.exportedFiles) { files in
-                ShareSheet(items: files.urls)
+            .sheet(isPresented: $showDiagnostics) {
+                NavigationStack {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 20) {
+                            diagnosticControls
+                            logSection
+                        }.padding(20)
+                    }.background(MotoTheme.background)
+                        .navigationTitle("Диагностика")
+                        .toolbar { ToolbarItem(placement: .confirmationAction) {
+                            Button("Готово") { showDiagnostics = false }
+                        } }
+                        .sheet(item: $bluetooth.exportedFiles) { files in ShareSheet(items: files.urls) }
+                }
             }
         }
         .sheet(item: $rides.exportedFiles) { files in ShareSheet(items: files.urls) }
@@ -66,10 +75,8 @@ struct ContentView: View {
                 Spacer()
                 Text(AppBuild.version).font(.caption.monospaced()).foregroundStyle(.secondary)
             }
-            Text(rides.active == nil ? "Подключись.\nИ поехали." : "Записываем\nтвою поездку.")
-                .font(MotoTheme.font(.largeTitle))
-            Label("На iPhone · запись без интернета", systemImage: "iphone")
-                .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
+            Label("Всё на iPhone · без интернета", systemImage: "iphone")
+                .font(.subheadline).foregroundStyle(.secondary)
         }
     }
 
@@ -86,23 +93,21 @@ struct ContentView: View {
                 Spacer(minLength: 0)
                 if bluetooth.connecting { ProgressView() }
             }
+            MotorcycleDashboardView(bluetooth: bluetooth).equatable()
             BikeActivityView(bluetooth: bluetooth).equatable()
-            if rides.active != nil {
+            if rides.active != nil && !rides.finishRequested {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     let state = TelemetryFreshness.state(connected: bluetooth.connected,
                         ready: bluetooth.ready, lastStreamAt: bluetooth.lastStreamAt, now: context.date)
                     Text(state == .receiving ? "Данные байка поступают" : state == .disconnected
                          ? "Данные байка не поступают" : state == .stale
-                         ? "Поток данных байка прервался" : "Ждём поток данных байка")
+                         ? "Ждём новые данные" : "Ждём данные байка")
                         .font(MotoTheme.font(.headline)).foregroundStyle(state == .receiving ? Color.green : Color.orange)
-                    if bluetooth.connecting, let requested = bluetooth.connectionRequestedAt {
-                        Text("Ожидание связи: \(duration(context.date.timeIntervalSince(requested))). Переподключение пока не подтверждено.")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
                 }
             }
-            if rides.active != nil && !bluetooth.connected {
-                Text("Связь с байком прервалась. Журнал остаётся на телефоне, запись GPS продолжается при доступном сигнале.")
+            if rides.active != nil && !rides.finishRequested && !bluetooth.connected
+                && bluetooth.autoReconnect && bluetooth.bluetoothPowered && bluetooth.reconnectBlockedReason == nil {
+                Text("Связь пропала. Пробуем подключиться снова; поездка сохраняется.")
                     .font(.caption).foregroundStyle(.orange)
             }
             if let reason = bluetooth.reconnectBlockedReason {
@@ -136,21 +141,6 @@ struct ContentView: View {
                         Text(message).font(.caption).foregroundStyle(.orange)
                     }
                 }
-                Text("Событий Bluetooth: \(ride.rawEventCount ?? 0)")
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                if let last = bluetooth.lastPacketAt {
-                    HStack {
-                        Text("Последний пакет Bluetooth")
-                        Text(last, style: .time)
-                    }.font(.caption).foregroundStyle(.secondary)
-                } else {
-                    Text("Ожидаем данные байка. Само подключение ещё не подтверждает телеметрию.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            if let error = rides.error {
-                Label("Ошибка сохранения: \(error)", systemImage: "exclamationmark.triangle")
-                    .font(MotoTheme.font(.subheadline)).foregroundStyle(.orange)
             }
             if let error = bluetooth.storageError {
                 Text("Ошибка журнала Bluetooth: \(error)").font(.caption).foregroundStyle(.orange)
@@ -175,11 +165,10 @@ struct ContentView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(device.name).font(MotoTheme.font(.headline))
-                            Text(device.id.uuidString.suffix(8))
-                                .font(.caption.monospaced()).foregroundStyle(.secondary)
+                            Text("Доступен рядом")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text("\(device.rssi) dBm").font(.caption.monospaced())
                         Image(systemName: "chevron.right")
                     }
                     .padding(16)
@@ -194,6 +183,12 @@ struct ContentView: View {
     private var diagnosticControls: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Проверка каналов").font(MotoTheme.font(.title3).weight(.semibold))
+            Text("Событий в поездке: \(rides.active?.rawEventCount ?? 0)")
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            if let last = bluetooth.lastPacketAt {
+                Text("Последние данные: \(last.formatted(date: .omitted, time: .standard))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Text("Соберём сведения, возможности, напряжение, температуры и попробуем запустить поток. Если поток не появится, автоматически применим один резервный профиль совместимости. Он передаёт мотоциклу имя телефона MotoLink.")
                 .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
             Button { bluetooth.runFullDiagnostic() } label: {
@@ -214,9 +209,10 @@ struct ContentView: View {
     }
 
     private var captureControls: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 8) {
             if rides.active == nil {
                 Button {
+                    justSaved = false
                     rides.setAutoRecord(false)
                     rides.startCapture()
                     if rides.active != nil {
@@ -228,29 +224,37 @@ struct ContentView: View {
                     Label("Начать запись", systemImage: "record.circle")
                         .font(MotoTheme.font(.headline)).frame(maxWidth: .infinity).padding(.vertical, 12)
                 }.buttonStyle(PixelButtonStyle(prominent: true)).foregroundStyle(.white)
-                    .disabled(!bluetooth.ready || bluetooth.busy || bluetooth.diagnosticRunning)
-                Text(bluetooth.ready ? "Запишем GPS, доступные данные байка и ошибки в один журнал." : "Включи мотоцикл и подключись перед движением.")
-                    .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
-            } else {
-                if bluetooth.diagnosticRunning {
-                    HStack { ProgressView(); Text("Проверяем данные байка…").font(MotoTheme.font(.subheadline)) }
-                    Text("Дождись окончания проверки перед движением. Запись уже идёт.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    .disabled(!bluetooth.ready || bluetooth.busy || bluetooth.diagnosticRunning || rides.finishingRide)
+                if justSaved {
+                    NavigationLink { RideHistoryView(rides: rides) } label: {
+                        Label("Поездка сохранена · открыть историю", systemImage: "checkmark.circle")
+                            .font(.caption).foregroundStyle(.green)
+                    }
                 } else {
-                    Label("Запись идёт · без ограничения времени", systemImage: "record.circle.fill")
-                        .font(MotoTheme.font(.subheadline).weight(.semibold)).foregroundStyle(accent)
+                    Text(bluetooth.ready ? "Поездка сохранится на этом iPhone." : "Подключись к мотоциклу перед движением.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                if rides.finishingRide {
+                    HStack { ProgressView(); Text("Сохраняем на iPhone…").font(.subheadline) }
+                } else if rides.finishRequested {
+                    Label("Сохранение не завершено", systemImage: "exclamationmark.triangle")
+                        .font(.subheadline).foregroundStyle(.orange)
+                } else if bluetooth.diagnosticRunning {
+                    HStack { ProgressView(); Text("Готовим запись. Подожди перед выездом…").font(.subheadline) }
+                } else {
+                    Label("Запись идёт", systemImage: "record.circle.fill")
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(accent)
                 }
                 Button {
                     bluetooth.stop()
-                    rides.finishAndExport()
+                    rides.stop { _ in justSaved = true }
                 } label: {
-                    Label(rides.exporting ? "Сохраняем…" : "Закончить и сохранить", systemImage: "square.and.arrow.up")
+                    Label(rides.finishingRide ? "Сохраняем…" : "Завершить поездку", systemImage: "stop.circle")
                         .font(MotoTheme.font(.headline)).frame(maxWidth: .infinity).padding(.vertical, 12)
-                }.buttonStyle(PixelButtonStyle(prominent: true)).foregroundStyle(.white).disabled(rides.exporting)
-                Text("После остановки сохрани журнал в «Файлы». Остановка двигателя сама запись не завершает.")
-                    .font(.caption).foregroundStyle(.secondary)
+                }.buttonStyle(PixelButtonStyle(prominent: true)).foregroundStyle(.white).disabled(rides.finishingRide)
             }
-        }.padding(18).pixelPanel(Color(red: 0.14, green: 0.07, blue: 0.085), accent: true)
+        }
     }
 
     private var logSection: some View {
@@ -345,12 +349,13 @@ struct ContentView: View {
                     Text("Потеря GPS или Bluetooth не завершает сеанс. Пропущенные данные не выдумываются; при остановке приложения системой возможны пробелы.")
                 }
                 Section("После поездки") {
-                    Text("Остановись и нажми «Закончить и сохранить» → «Сохранить в Файлы» → «На iPhone». Повторно выгрузить журнал можно в разделе «Поездки и журналы».")
+                    Text("Остановись и нажми «Завершить поездку». Она сохранится на iPhone в разделе «Мои поездки». Там можно изменить название и заметку, выгрузить журнал или удалить запись.")
                     Text("Журнал содержит маршрут. Передавай его лично, не публикуй в открытом репозитории.")
                 }
                 Section("Показатели") {
                     Text("Доступность и расшифровка показателей зависят от мотоцикла. Все полученные пакеты сохраняются даже без расшифровки. Скорость и расстояние GPS поступают с телефона.")
                     Text("История и схема маршрута открываются без интернета. Пропуски GPS не превращаются в измеренный путь; пунктир показывает только границы неизвестного участка.")
+                    Text("Скорость на главном экране поступает от мотоцикла. Если данных нет, виден прочерк. Вращение колёс и выхлоп отражают движение и обороты; свет — оформление, а не датчик фар. Тепло показано по температуре охлаждающей жидкости.")
                 }
                 Section("Семейства Kawasaki") {
                     Text("Начальная база: Ninja 500 / Z500 с Bluetooth (2024–2025), Ninja 650 / Z650 с совместимой TFT-приборкой (с 2020). Подключение RIDEOLOGY подтверждено документацией; полная совместимость Moto Link зависит от модели, рынка и комплектации.")
@@ -375,13 +380,18 @@ struct ShareSheet: UIViewControllerRepresentable {
             DispatchQueue.global(qos: .utility).async {
                 MotoLinkExportCleanup.removeCompletedExports(sharedItems)
             }
+            if let error = rides.error {
+                Text("Не удалось сохранить: \(error)")
+                    .font(.caption).foregroundStyle(.orange)
+                    .accessibilityLabel("Ошибка сохранения. " + error)
+            }
         }
         return controller
     }
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
-/// One static texture, two effect frames per second. Packet-rate updates do
+/// One static texture, at most four effect frames per second. Packet-rate updates do
 /// not redraw this child; background/reduced-motion/low-power mode pauses it.
 private struct BikeActivityView: View, Equatable {
     let bluetooth: MotorcycleBluetooth
@@ -389,19 +399,20 @@ private struct BikeActivityView: View, Equatable {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var snapshot = BikeActivitySnapshot()
     @State private var lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    @State private var visible = false
+    @State private var refreshTimer: Timer?
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth }
 
     private var animating: Bool {
-        scenePhase == .active && !reduceMotion && !lowPower && snapshot.live
+        visible && scenePhase == .active && !reduceMotion && !lowPower && snapshot.live
             && (snapshot.moving || snapshot.running || (snapshot.thermalLevel ?? 0) > 0)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            TimelineView(.animation(minimumInterval: 0.5, paused: !animating)) { context in
-                let phase = animating ? Int(context.date.timeIntervalSince1970 * 2) % 4 : 0
+            TimelineView(.animation(minimumInterval: 0.25, paused: !animating)) { context in
+                let phase = animating ? Int(context.date.timeIntervalSince1970 * 4) % 8 : 0
                 ZStack {
                     Canvas { canvas, size in
                         // Static pixel ground: no scrolling background or 60 Hz loop.
@@ -415,7 +426,7 @@ private struct BikeActivityView: View, Equatable {
                         .resizable().interpolation(.none).scaledToFit()
                         .saturation(snapshot.live ? 1 : 0.15)
                         .opacity(snapshot.live ? 1 : 0.70)
-                        .offset(y: animating && snapshot.running && phase % 2 == 1 ? 0.7 : 0)
+                        .offset(y: animating && snapshot.running && phase % 2 == 1 ? 1.0 : 0)
                     Canvas { canvas, size in
                         drawEffects(context: canvas, size: size, phase: phase)
                     }
@@ -423,15 +434,7 @@ private struct BikeActivityView: View, Equatable {
             }
             .frame(maxWidth: 360)
             .accessibilityHidden(true)
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(snapshot.label).font(MotoTheme.font(.subheadline).weight(.semibold))
-                Spacer(minLength: 2)
-                Text(snapshot.temperature.map { "\($0) °C" } ?? "— °C")
-                    .font(.system(.headline, design: .monospaced).monospacedDigit())
-                    .foregroundStyle((snapshot.thermalLevel ?? 0) >= 6 ? Color.orange : Color.secondary)
-                    .accessibilityLabel(snapshot.temperature.map { "Охлаждающая жидкость: \($0) градусов" }
-                        ?? "Нет свежей температуры охлаждающей жидкости")
-            }
+            Text(snapshot.label).font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
             HStack(spacing: 4) {
                 ForEach(0..<4) { index in
                     Rectangle().fill(snapshot.live && index < (snapshot.engineLevel ?? 0)
@@ -443,13 +446,23 @@ private struct BikeActivityView: View, Equatable {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(snapshot.live ? "Свежие данные мотоцикла" : "Нет свежих данных мотоцикла")
-            Text("Свет и выхлоп — оформление. Тепло — по температуре ОЖ.")
-                .font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { sample() }
-        .onReceive(ticker) { _ in if scenePhase == .active { sample() } }
-        .onChange(of: scenePhase) { phase in if phase == .active { sample() } }
+        .onAppear { visible = true; updateRefreshTimer() }
+        .onDisappear { visible = false; stopRefreshTimer() }
+        .onChange(of: scenePhase) { _ in updateRefreshTimer() }
+    }
+
+    private func stopRefreshTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+    }
+
+    private func updateRefreshTimer() {
+        stopRefreshTimer()
+        guard visible && scenePhase == .active else { return }
+        sample()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in sample() }
     }
 
     private func sample() {
@@ -470,33 +483,33 @@ private struct BikeActivityView: View, Equatable {
         if snapshot.running {
             // Cosmetic head/tail lights, not decoded switches or beam state.
             pixel(0.817, 0.345, 3, 2, Color(red: 1, green: 0.93, blue: 0.77).opacity(0.8))
-            pixel(0.838, 0.364, 6, 2, Color(red: 1, green: 0.93, blue: 0.77).opacity(0.10))
-            pixel(0.865, 0.380, 8, 3, Color(red: 1, green: 0.93, blue: 0.77).opacity(0.05))
+            pixel(0.838, 0.364, 6, 2, Color(red: 1, green: 0.93, blue: 0.77).opacity(0.22))
+            pixel(0.865, 0.380, 8, 3, Color(red: 1, green: 0.93, blue: 0.77).opacity(0.10))
             pixel(0.126, 0.196, 3, 1, MotoTheme.accent.opacity(0.65))
             // Exhaust exists at cold idle too. Density follows RPM, not a smoke sensor.
             for index in 0..<(2 + (snapshot.engineLevel ?? 0)) {
                 let travel = Double((index + phase) % 7) / 7
                 let heat = Double(snapshot.thermalLevel ?? 0) / 8
                 pixel(0.165 - travel * 0.13, 0.49 - travel * (0.10 + heat * 0.14),
-                      2 + travel * 3, 1 + travel * 2, Color.gray.opacity(0.20 * (1 - travel)))
+                      3 + travel * 4, 2 + travel * 2, Color.gray.opacity(0.38 * (1 - travel)))
             }
         }
         if snapshot.moving {
             // Moving highlights on the rims; body and brake calipers stay fixed.
             for (x, y, radius) in [(0.190, 0.698, 0.083), (0.813, 0.717, 0.088)] {
                 for offset in [0.0, 180.0] {
-                    let angle = Double(phase) * 45 + offset
+                    let angle = Double(phase) * 22.5 + offset
                     var path = Path()
                     path.addArc(center: CGPoint(x: x * size.width, y: y * size.height),
                                 radius: radius * size.width,
-                                startAngle: .degrees(angle), endAngle: .degrees(angle + 26),
+                                startAngle: .degrees(angle), endAngle: .degrees(angle + 38),
                                 clockwise: false)
-                    context.stroke(path, with: .color(Color(red: 1, green: 0.42, blue: 0.40).opacity(0.6)), lineWidth: unit)
+                    context.stroke(path, with: .color(Color(red: 1, green: 0.48, blue: 0.45).opacity(0.85)), lineWidth: 2 * unit)
                 }
             }
             for index in 0..<4 {
-                let x = 0.18 + Double(index) * 0.18 - Double(phase) * 0.018
-                pixel(x, 0.968, 5, 1, Color.gray.opacity(0.25))
+                let x = 0.22 + Double(index) * 0.18 - Double(phase) * 0.014
+                pixel(x, 0.968, 7, 1, Color.gray.opacity(0.38))
             }
         }
         if let heat = snapshot.thermalLevel, heat > 0 {
@@ -506,7 +519,7 @@ private struct BikeActivityView: View, Equatable {
                               blue: 0.64 - 0.14 * warmth).opacity(0.12 + 0.18 * warmth)
             if snapshot.running {
                 for index in 0..<(2 + heat / 2) {
-                    let travel = (Double(index) + Double(phase) / 4) / 7
+                    let travel = (Double(index) + Double(phase) / 8) / 7
                     let x = 0.16 - travel * 0.14
                     let y = 0.49 - travel * (0.12 + 0.14 * warmth)
                     pixel(x, y, 2 + travel * 4, 1 + warmth, color)

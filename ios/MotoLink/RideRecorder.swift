@@ -50,6 +50,9 @@ struct RideSummary: Codable, Identifiable {
     var gpsSpeedQualityVersion: Int? = nil
     var acceptedSpeedCount: Int? = nil
     var streamCoverage: RideTelemetryCoverage? = nil
+    var title: String? = nil
+    var note: String? = nil
+    var metadataUpdatedAt: Date? = nil
     var elapsed: TimeInterval { max(0, (endedAt ?? Date()).timeIntervalSince(startedAt)) }
 }
 
@@ -107,6 +110,7 @@ final class RideArchive {
     // Confined to queue; changing rides starts a fresh checkpoint schedule.
     private var checkpointRideID: UUID?
     private var checkpointPolicy = JournalCheckpointPolicy()
+    private var appendedFinishIDs = Set<UUID>()
     var onError: ((String) -> Void)?
 
     init() throws {
@@ -148,7 +152,8 @@ final class RideArchive {
         return records
     }
 
-    func append(_ records: [RideRecord], summary: RideSummary, forceCheckpoint: Bool = false) {
+    func append(_ records: [RideRecord], summary: RideSummary, forceCheckpoint: Bool = false,
+                completion: ((Result<Void, Error>) -> Void)? = nil) {
         queue.async { [self] in
             do {
                 let log = url(summary.id, "jsonl")
@@ -169,11 +174,16 @@ final class RideArchive {
                         try handle.write(contentsOf: Data([10]))
                     }
                 }
-                for record in records {
+                let finishesRide = summary.endedAt != nil && records.contains { $0.kind == "finished" }
+                let pendingRecords = finishesRide && appendedFinishIDs.contains(summary.id) ? [] : records
+                for record in pendingRecords {
                     var bytes = try Self.encoder.encode(record)
                     bytes.append(0x0A)
                     try handle.write(contentsOf: bytes)
                 }
+                // Retrying a failed fsync/manifest replacement must not append
+                // another finish boundary when those bytes were already written.
+                if finishesRide { appendedFinishIDs.insert(summary.id) }
                 if checkpointRideID != summary.id {
                     checkpointRideID = summary.id
                     checkpointPolicy = JournalCheckpointPolicy()
@@ -188,7 +198,47 @@ final class RideArchive {
                         options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
                     checkpointPolicy.checkpointSucceeded(at: uptime)
                 }
-            } catch { DispatchQueue.main.async { self.onError?(error.localizedDescription) } }
+                if finishesRide { appendedFinishIDs.remove(summary.id) }
+                if let completion { DispatchQueue.main.async { completion(.success(())) } }
+            } catch {
+                DispatchQueue.main.async {
+                    self.onError?(error.localizedDescription)
+                    completion?(.failure(error))
+                }
+            }
+        }
+    }
+
+    func updateMetadata(_ id: UUID, title: String, note: String, activeID: UUID?,
+                        completion: @escaping (Result<RideSummary, Error>) -> Void) {
+        queue.async { [self] in
+            let result = Result { () throws -> RideSummary in
+                let files = try RideArchiveFiles(directory: directory)
+                let data = try files.updateMetadata(id, title: title, note: note, activeID: activeID)
+                return try Self.decoder.decode(RideSummary.self, from: data)
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func deleteCompleted(_ ids: [UUID], activeID: UUID?,
+                         completion: @escaping ([UUID], String?) -> Void) {
+        queue.async { [self] in
+            var deleted: [UUID] = []
+            var failures = 0
+            var lastFailure: String?
+            do {
+                let files = try RideArchiveFiles(directory: directory)
+                for id in Set(ids) {
+                    do {
+                        try files.deleteCompletedRide(id, activeID: activeID)
+                        deleted.append(id)
+                    } catch { failures += 1; lastFailure = error.localizedDescription }
+                }
+            } catch { failures = ids.count; lastFailure = error.localizedDescription }
+            let message = failures == 0 ? nil
+                : "Удалено поездок: \(deleted.count). Не удалось удалить: \(failures). \(lastFailure ?? "Ошибка хранилища.") Если удаление прервалось, часть файлов могла быть удалена; повторите его."
+            DispatchQueue.main.async { completion(deleted, message) }
         }
     }
 
@@ -231,6 +281,7 @@ final class RideArchive {
     func export(_ summary: RideSummary, completion: @escaping (Result<[URL], Error>) -> Void) {
         queue.async { [self] in
             do {
+                let summary = try currentSummaryForExport(summary)
                 try checkpointForExport(summary)
                 let root = FileManager.default.temporaryDirectory
                     .appendingPathComponent("MotoLink-capture-\(UUID().uuidString)", isDirectory: true)
@@ -260,6 +311,7 @@ final class RideArchive {
     func exportGPXDetails(_ summary: RideSummary, completion: @escaping (Result<[URL], Error>) -> Void) {
         queue.async { [self] in
             do {
+                let summary = try currentSummaryForExport(summary)
                 try checkpointForExport(summary)
                 let records = try records(summary.id)
                 let root = FileManager.default.temporaryDirectory
@@ -312,6 +364,16 @@ final class RideArchive {
             checkpointPolicy.checkpointSucceeded(at: ProcessInfo.processInfo.systemUptime)
         }
     }
+
+    private func currentSummaryForExport(_ requested: RideSummary) throws -> RideSummary {
+        // A detail screen can hold an older value after an edit. Export must
+        // neither lose the new title/note nor resurrect a deleted manifest.
+        let files = try RideArchiveFiles(directory: directory)
+        let stored = try Self.decoder.decode(RideSummary.self, from: files.manifest(requested.id))
+        if stored.endedAt != nil { return stored }
+        guard requested.endedAt == nil else { throw RideArchiveFileError.activeRide }
+        return requested
+    }
 }
 
 final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate {
@@ -328,6 +390,10 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     @Published var exportedFiles: SharedFiles?
     @Published private(set) var exporting = false
     @Published private(set) var restoringRoute = false
+    @Published private(set) var finishingRide = false
+    @Published private(set) var finishRequested = false
+    @Published private(set) var changingHistory = false
+    @Published private(set) var historyError: String?
 
     private let location = CLLocationManager()
     private var archive: RideArchive?
@@ -344,6 +410,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private var cancellables = Set<AnyCancellable>()
     private var pendingGPSGapReason: String?
     private var batteryMonitoringBeforeRide: Bool?
+    private var pendingFinish: (summary: RideSummary, records: [RideRecord], gaps: [GPSGap])?
 
     override init() {
         super.init()
@@ -431,7 +498,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func resume() {
-        guard active != nil, !locationRunning, !restoringRoute else { return }
+        guard active != nil, !locationRunning, !restoringRoute, !finishRequested else { return }
         guard authorization == .authorizedAlways ||
                 (authorization == .authorizedWhenInUse && UIApplication.shared.applicationState == .active) else {
             status = "Для продолжения открой приложение и разреши геопозицию"; return
@@ -445,10 +512,15 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         status = "Запись маршрута · GPS iPhone"
     }
 
-    func stop() {
-        guard active != nil else { return }
+    func stop(completion: ((RideSummary) -> Void)? = nil) {
+        guard active != nil, !finishingRide, let archive else { return }
+        if pendingFinish != nil {
+            persistPendingFinish(using: archive, completion: completion)
+            return
+        }
         recordPhoneHealth(reason: "finished")
         guard var summary = active else { return }
+        finishRequested = true
         location.stopUpdatingLocation()
         locationRunning = false
         autoStopWork?.cancel(); autoStopWork = nil
@@ -458,25 +530,46 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
            pendingGPSGapReason != nil || Date().timeIntervalSince(last.timestamp) > GPSContinuity.gapInterval {
             let gap = GPSGap(id: UUID().uuidString, startedAt: last.timestamp, endedAt: Date(), from: last.gpsCoordinate,
                 to: nil, reason: pendingGPSGapReason ?? "Поездка завершена без новых точек GPS")
-            gaps.append(gap)
             ending.append(RideRecord(kind: "gps_gap", timestamp: gap.endedAt, gap: gap))
         } else if points.isEmpty && summary.pointCount == 0 {
             let gap = GPSGap(id: UUID().uuidString, startedAt: summary.startedAt, endedAt: Date(),
                             from: nil, to: nil, reason: "За поездку не получено ни одной точной точки GPS")
-            gaps.append(gap)
             ending.append(RideRecord(kind: "gps_gap", timestamp: gap.endedAt, gap: gap))
         }
-        archive?.append(ending, summary: summary)
-        history.insert(summary, at: 0)
-        active = nil
-        restoringRoute = false
-        endBatteryMonitoring()
-        previous = nil
-        distanceAnchor = nil
-        speedMS = nil
-        pendingGPSGapReason = nil
-        autoSuppressedForConnection = bluetoothConnected
-        status = "Поездка сохранена на iPhone"
+        pendingFinish = (summary, ending, ending.compactMap(\.gap))
+        persistPendingFinish(using: archive, completion: completion)
+    }
+
+    private func persistPendingFinish(using archive: RideArchive, completion: ((RideSummary) -> Void)?) {
+        guard let pendingFinish else { return }
+        finishingRide = true
+        error = nil
+        let finished = pendingFinish.summary
+        status = "Сохраняем поездку…"
+        archive.append(pendingFinish.records, summary: finished, forceCheckpoint: true) { [weak self] result in
+            guard let self, self.active?.id == finished.id else { return }
+            self.finishingRide = false
+            switch result {
+            case .success:
+                self.gaps.append(contentsOf: pendingFinish.gaps)
+                self.history.insert(finished, at: 0)
+                self.active = nil
+                self.pendingFinish = nil
+                self.finishRequested = false
+                self.restoringRoute = false
+                self.endBatteryMonitoring()
+                self.previous = nil
+                self.distanceAnchor = nil
+                self.speedMS = nil
+                self.pendingGPSGapReason = nil
+                self.autoSuppressedForConnection = self.bluetoothConnected
+                self.status = "Поездка сохранена на iPhone"
+                completion?(finished)
+            case .failure(let failure):
+                self.error = failure.localizedDescription
+                self.status = "Не удалось завершить сохранение. Запись приостановлена — повторите завершение."
+            }
+        }
     }
 
     func bluetoothChanged(_ connected: Bool) {
@@ -502,7 +595,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func recordMeasurements(_ measurements: [MotoProtocol.Measurement]) {
-        guard active != nil, !measurements.isEmpty else { return }
+        guard active != nil, !finishRequested, !measurements.isEmpty else { return }
         let sampled = measurements.filter { sample in
             guard sample.timestamp.timeIntervalSince(lastTelemetryTimes[sample.id] ?? .distantPast) >= 1 else { return false }
             lastTelemetryTimes[sample.id] = sample.timestamp
@@ -515,7 +608,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
 
     /// Called only for a structurally valid 4A, independently of decoding fields.
     func recordStreamFrame(at date: Date) {
-        guard let summary = active, date >= summary.startedAt else { return }
+        guard let summary = active, !finishRequested, date >= summary.startedAt else { return }
         if active?.streamCoverage == nil { active?.streamCoverage = RideTelemetryCoverage() }
         active?.streamCoverage?.receive(at: date)
     }
@@ -523,7 +616,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     /// Raw packets are never sampled or pruned from a ride, including malformed
     /// notifications which may become interpretable after the first road test.
     func recordDiagnostic(_ event: DiagnosticEvent) {
-        guard active != nil else { return }
+        guard active != nil, !finishRequested else { return }
         active?.rawEventCount = (active?.rawEventCount ?? 0) + 1
         append([RideRecord(kind: "diagnostic", timestamp: Date(), diagnostic: event)])
     }
@@ -575,9 +668,52 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func finishAndExport() {
-        guard active != nil else { return }
-        stop()
-        if let summary = history.first { export(summary) }
+        stop { [weak self] summary in self?.export(summary) }
+    }
+
+    func updateRideMetadata(_ ride: RideSummary, title: String, note: String,
+                            completion: @escaping (Bool) -> Void) {
+        guard !changingHistory, !exporting, let archive else {
+            historyError = "Дождитесь завершения операции с журналом."; completion(false); return
+        }
+        guard active?.id != ride.id, ride.endedAt != nil else {
+            historyError = "Сначала завершите эту поездку."; completion(false); return
+        }
+        historyError = nil
+        changingHistory = true
+        archive.updateMetadata(ride.id, title: title, note: note, activeID: active?.id) { [weak self] result in
+            guard let self else { return }
+            self.changingHistory = false
+            switch result {
+            case .success(let updated):
+                if let index = self.history.firstIndex(where: { $0.id == updated.id }) { self.history[index] = updated }
+                completion(true)
+            case .failure(let failure): self.historyError = failure.localizedDescription; completion(false)
+            }
+        }
+    }
+
+    func deleteCompletedRides(_ ids: [UUID], completion: ((Bool) -> Void)? = nil) {
+        guard !changingHistory, !exporting, let archive else {
+            historyError = "Дождитесь завершения операции с журналом."; completion?(false); return
+        }
+        guard !ids.contains(where: { $0 == active?.id }) else {
+            historyError = "Текущую поездку удалять нельзя."; completion?(false); return
+        }
+        let requested = Set(ids)
+        guard requested.isSubset(of: Set(history.map(\.id))) else {
+            historyError = "Поездка уже удалена или ещё не завершена."; completion?(false); return
+        }
+        historyError = nil
+        changingHistory = true
+        archive.deleteCompleted(Array(requested), activeID: active?.id) { [weak self] deleted, failure in
+            guard let self else { return }
+            self.changingHistory = false
+            let removed = Set(deleted)
+            self.history.removeAll { removed.contains($0.id) }
+            self.historyError = failure
+            completion?(failure == nil)
+        }
     }
 
     func load(_ summary: RideSummary, completion: @escaping (Result<[RideRecord], Error>) -> Void) {
@@ -597,7 +733,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func export(_ summary: RideSummary) {
-        guard !exporting, let archive else { return }
+        guard !exporting, !changingHistory, !finishRequested, let archive else { return }
         exporting = true
         archive.export(summary) { [weak self] result in
             self?.exporting = false
@@ -609,7 +745,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func exportGPX(_ summary: RideSummary) {
-        guard !exporting, let archive else { return }
+        guard !exporting, !changingHistory, !finishRequested, let archive else { return }
         exporting = true
         archive.exportGPXDetails(summary) { [weak self] result in
             self?.exporting = false
@@ -622,6 +758,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
 
     private func begin(trigger: String) {
         guard archive != nil else { status = "Хранилище недоступно — запись не начата"; return }
+        pendingFinish = nil
+        finishRequested = false
         restoringRoute = false
         points = []; gaps = []; pendingGPSGapReason = nil
         segment = 0; previous = nil; distanceAnchor = nil; speedMS = nil; lastLocationAt = nil; lastTelemetryTimes = [:]
@@ -658,13 +796,12 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     @discardableResult private func finishAfterDisconnect() -> Bool {
         guard active?.trigger == "bluetooth", !bluetoothConnected,
               let disconnectedAt, Date().timeIntervalSince(disconnectedAt) >= 120 else { return false }
-        stop()
-        status = "Автопоездка завершена: связь отсутствовала 2 минуты"
+        stop { [weak self] _ in self?.status = "Автопоездка завершена: связь отсутствовала 2 минуты" }
         return true
     }
 
     private func append(_ records: [RideRecord]) {
-        guard var summary = active else { return }
+        guard var summary = active, !finishRequested else { return }
         summary.lastSavedAt = Date(); active = summary
         archive?.append(records, summary: summary)
     }
@@ -703,7 +840,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard let startedAt = active?.startedAt, !finishAfterDisconnect() else { return }
+        guard let startedAt = active?.startedAt, !finishRequested, !finishAfterDisconnect() else { return }
         var records: [RideRecord] = []
         for fix in locations.sorted(by: { $0.timestamp < $1.timestamp }) {
             records.append(RideRecord(kind: "gps_observation", timestamp: fix.timestamp,

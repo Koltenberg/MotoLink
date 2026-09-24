@@ -43,7 +43,11 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     @Published var exportedFiles: SharedFiles?
 
     @Published private(set) var capabilities: [MotoProtocol.Capability] = []
-    @Published private(set) var measurements: [MotoProtocol.Measurement] = []
+    private var telemetryPresentation = TelemetryPresentation()
+    @Published private(set) var dashboardTelemetry = TelemetryPresentation()
+    private var telemetryPeripheralID: UUID?
+    private var lastDashboardPublication: TimeInterval?
+    var measurements: [MotoProtocol.Measurement] { telemetryPresentation.measurements }
     @Published private(set) var diagnosticRunning = false
     @Published private(set) var diagnosticStatus = "Готов к полной проверке"
     @Published private(set) var streamPackets = 0
@@ -413,6 +417,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     private func beginConnection(_ peripheral: CBPeripheral, delay: TimeInterval = 0) {
         stopScan()
+        selectTelemetryCatalogue(for: peripheral.identifier)
         clearTransport()
         transportRecoveryError = nil
         terminalStatus = nil
@@ -478,6 +483,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     private func prepare(_ peripheral: CBPeripheral) {
+        selectTelemetryCatalogue(for: peripheral.identifier)
         clearTransport()
         connected = true
         connecting = false
@@ -493,6 +499,22 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         }
         setupTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: timeout)
+    }
+
+    private func selectTelemetryCatalogue(for identifier: UUID) {
+        guard telemetryPeripheralID != identifier else { return }
+        telemetryPeripheralID = identifier
+        telemetryPresentation = TelemetryPresentation()
+        publishTelemetry(force: true)
+    }
+
+    private func publishTelemetry(force: Bool = false) {
+        let now = ProcessInfo.processInfo.systemUptime
+        // Two readable display updates per second; every packet is still
+        // decoded, journalled and passed to onMeasurements without this limit.
+        guard force || lastDashboardPublication == nil || now - lastDashboardPublication! >= 0.5 else { return }
+        lastDashboardPublication = now
+        dashboardTelemetry = telemetryPresentation
     }
 
     private func clearTransport() {
@@ -513,7 +535,8 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         if diagnosticRunning { diagnosticStatus = "Проверка прервана; журнал сохранён" }
         diagnosticRunning = false
         capabilities = []
-        measurements = []
+        telemetryPresentation.invalidateReadings()
+        publishTelemetry(force: true)
         pendingWrites.removeAll()
         lastSlowQueryAt.removeAll()
         activeWrite = nil
@@ -886,9 +909,10 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
         if BLEStreamRecoveryPolicy.isPacket(data) {
             streamRecovery.receivedPacket(at: ProcessInfo.processInfo.systemUptime)
         }
-        if bytes.first == 0x40 {
-            capabilities = MotoProtocol.capabilities(data) ?? []
-            measurements = []
+        if let supported = MotoProtocol.capabilities(data) {
+            capabilities = supported
+            telemetryPresentation.configure(supported)
+            publishTelemetry(force: true)
         }
         if BLEStreamRecoveryPolicy.isStreamFrame(data) {
             streamPackets += 1
@@ -896,21 +920,11 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             streamRecovery.receivedStream(at: ProcessInfo.processInfo.systemUptime)
             if let timestamp = lastStreamAt { onStreamFrame?(timestamp) }
         }
-        // Missing/sentinel values in a new valid frame must not leave the old
-        // measurement looking current. Malformed frames preserve the last time.
-        if bytes.count >= 3, bytes.count == Int(bytes[1]) + 3 {
-            let ids: [UInt8: Set<String>] = [
-                0x41: ["ecu_battery12V"],
-                0x45: ["engine_water_temperature", "inlet_air_temperature"],
-                0x4A: ["engine_speed", "wheel_speed", "gear_position", "throttle_position", "fuel_injection_raw"]
-            ]
-            if let invalidated = ids[bytes[0]] { measurements.removeAll { invalidated.contains($0.id) } }
-        }
         let decoded = MotoProtocol.measurements(data, capabilities: capabilities)
-        for value in decoded {
-            measurements.removeAll { $0.id == value.id }
-            measurements.append(value)
-        }
+        // A private atomic replacement preserves row identities and order while
+        // invalidating missing values. Display sampling never throttles capture.
+        telemetryPresentation.receive(data, decoded: decoded)
+        publishTelemetry()
         if !decoded.isEmpty {
             if bytes.first == 0x4A {
                 decodedStreamFrames += 1

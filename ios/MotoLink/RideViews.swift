@@ -120,6 +120,17 @@ struct MotorcycleMeasurementsView: View {
 struct RideHistoryView: View {
     @ObservedObject var rides: RideRecorder
     @State private var visibleLimit = 30
+    @State private var pendingDelete: RideSummary?
+    @State private var showingDelete = false
+    @State private var showingClear = false
+    @State private var clearIDs: [UUID] = []
+
+    private var busy: Bool { rides.changingHistory || rides.exporting || rides.finishingRide }
+    private var totalDistance: Double {
+        rides.history.reduce(0) { total, ride in
+            total + (ride.distanceMeters.isFinite ? max(0, ride.distanceMeters) : 0)
+        }
+    }
 
     private var months: [RideHistoryMonth] {
         let latest = rides.history.sorted { $0.startedAt > $1.startedAt }.prefix(visibleLimit)
@@ -135,15 +146,22 @@ struct RideHistoryView: View {
                 Text(rides.history.isEmpty ? "Завершённые поездки появятся здесь." : "Все поездки хранятся на этом iPhone. Для просмотра и экспорта интернет не нужен.")
                     .font(.caption).foregroundStyle(.secondary)
                 if !rides.history.isEmpty {
+                    Text(String(format: "Поездок: %d · %.1f км", rides.history.count, totalDistance / 1000))
+                        .font(.system(.headline, design: .rounded).monospacedDigit())
+                    Text("По записям GPS, без неизвестных участков. Это не одометр мотоцикла.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Text("Показано \(min(visibleLimit, rides.history.count)) из \(rides.history.count)")
                         .font(.system(.caption).monospacedDigit()).foregroundStyle(.secondary)
                 }
+                if rides.changingHistory { ProgressView("Обновляем историю…") }
+                if let failure = rides.historyError { Text(failure).font(.caption).foregroundStyle(.orange) }
             }.listRowBackground(MotoTheme.background)
             ForEach(months) { group in
                 Section {
                     ForEach(group.rides) { ride in
                         NavigationLink { RideDetailView(rides: rides, ride: ride) } label: {
                             VStack(alignment: .leading, spacing: 6) {
+                                if let title = ride.title { Text(title).font(.system(.headline, design: .rounded)) }
                                 Text(ride.startedAt, format: .dateTime.day().month().hour().minute())
                                     .font(.system(.headline, design: .rounded).monospacedDigit())
                                 Text(String(format: "GPS %.2f км · %@", ride.distanceMeters / 1000, duration(ride.elapsed)))
@@ -152,6 +170,12 @@ struct RideHistoryView: View {
                             .padding(.vertical, 5)
                         }
                         .listRowBackground(MotoTheme.background)
+                        .swipeActions(allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                pendingDelete = ride; showingDelete = true
+                            } label: { Label("Удалить", systemImage: "trash") }
+                            .disabled(busy)
+                        }
                     }
                 } header: {
                     Text(group.month, format: .dateTime.month(.wide).year())
@@ -166,6 +190,31 @@ struct RideHistoryView: View {
         .font(.system(.body, design: .rounded))
         .scrollContentBackground(.hidden).background(MotoTheme.background)
         .navigationTitle("Мои поездки")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Menu {
+                    Button("Удалить завершённые поездки…", role: .destructive) {
+                        clearIDs = rides.history.map(\.id); showingClear = true
+                    }.disabled(rides.history.isEmpty || busy)
+                } label: { Image(systemName: "ellipsis.circle") }
+                    .accessibilityLabel("Действия с историей")
+            }
+        }
+        .confirmationDialog("Удалить поездку?", isPresented: $showingDelete, titleVisibility: .visible) {
+            Button("Удалить поездку", role: .destructive) {
+                if let ride = pendingDelete { rides.deleteCompletedRides([ride.id]) }
+                pendingDelete = nil
+            }
+            Button("Отмена", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("Будут удалены маршрут, заметка и журнал этой поездки с iPhone. Копии, которые вы сохранили отдельно, останутся. Отменить удаление нельзя.")
+        }
+        .confirmationDialog("Очистить историю?", isPresented: $showingClear, titleVisibility: .visible) {
+            Button("Удалить поездок: \(clearIDs.count)", role: .destructive) { rides.deleteCompletedRides(clearIDs) }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Все выбранные завершённые поездки и их журналы будут удалены с iPhone. Текущая запись и отдельно сохранённые копии останутся. Отменить удаление нельзя.")
+        }
     }
 }
 
@@ -178,6 +227,9 @@ private struct RideHistoryMonth: Identifiable {
 struct RideDetailView: View {
     @ObservedObject var rides: RideRecorder
     let ride: RideSummary
+    @Environment(\.dismiss) private var dismiss
+    @State private var showingEditor = false
+    @State private var showingDelete = false
     @State private var points: [TrackPoint] = []
     @State private var ranges: [RideMeasurementRange] = []
     @State private var gaps: [GPSGap] = []
@@ -187,14 +239,21 @@ struct RideDetailView: View {
     @State private var loadRequestID = UUID()
 
     var body: some View {
+        let ride = rides.history.first(where: { $0.id == self.ride.id }) ?? self.ride
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 if loading { ProgressView("Открываем запись с iPhone…") }
                 if let error { Text(error).foregroundStyle(.orange) }
+                if let failure = rides.historyError { Text(failure).font(.caption).foregroundStyle(.orange) }
+                if let title = ride.title { Text(title).font(MotoTheme.font(.title2).bold()) }
                 Text(ride.startedAt, format: .dateTime.day().month().year().hour().minute())
                     .font(.system(.title2, design: .rounded).bold().monospacedDigit())
                 Text(String(format: "GPS %.2f км · %@", ride.distanceMeters / 1000, duration(ride.elapsed)))
                     .font(.system(.title3, design: .rounded).monospacedDigit())
+                if let note = ride.note {
+                    Text(note).font(.system(.body)).frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
                 Text(ride.acceptedSpeedCount == 0 ? "Скорость GPS: нет надёжных замеров"
                      : String(format: "Максимальная скорость GPS: %.0f км/ч", ride.maxSpeedMS * 3.6))
                     .monospacedDigit()
@@ -203,10 +262,10 @@ struct RideDetailView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if let coverage = ride.streamCoverage {
-                    Text("Поток байка: \(duration(coverage.observedSeconds)) из \(duration(ride.elapsed))")
+                    Text("Данные байка: \(duration(coverage.observedSeconds)) из \(duration(ride.elapsed))")
                         .font(.system(.headline, design: .rounded).monospacedDigit())
-                    Text(coverage.frameCount == 0 ? "Пакеты движения не получены. Значок Bluetooth сам по себе не означает запись данных."
-                         : "Посчитаны интервалы между пакетами движения. Пропуски связи не добавляются к этому времени.")
+                    Text(coverage.frameCount == 0 ? "За эту поездку данные движения не поступали."
+                         : "Время, когда поступали данные движения. Пропуски связи не учитываются.")
                         .font(.caption).foregroundStyle(coverage.frameCount == 0 ? Color.orange : Color.secondary)
                 }
                 if !points.isEmpty {
@@ -248,7 +307,7 @@ struct RideDetailView: View {
                         }.font(.system(.subheadline, design: .rounded))
                     }
                 }
-                DisclosureGroup("Технические подробности") {
+                DisclosureGroup("Подробности записи") {
                     if let version = ride.recordedAppVersion {
                         Text("Записано в Moto Link \(version) · сборка \(ride.recordedAppBuild ?? "—")")
                             .font(.caption).foregroundStyle(.secondary)
@@ -259,14 +318,33 @@ struct RideDetailView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }.font(.system(.subheadline, design: .rounded))
                 Button { rides.export(ride) } label: { Label("Сохранить единый журнал", systemImage: "square.and.arrow.up") }
-                    .buttonStyle(PixelButtonStyle()).disabled(rides.exporting || loading || error != nil)
+                    .buttonStyle(PixelButtonStyle()).disabled(rides.exporting || rides.changingHistory || loading || error != nil)
                 Button { rides.exportGPX(ride) } label: { Label("Отдельно: GPX и маршрут", systemImage: "map") }
-                    .buttonStyle(PixelButtonStyle()).disabled(rides.exporting || loading || error != nil)
+                    .buttonStyle(PixelButtonStyle()).disabled(rides.exporting || rides.changingHistory || loading || error != nil)
+                Button(role: .destructive) { showingDelete = true } label: {
+                    Label("Удалить поездку", systemImage: "trash")
+                }.buttonStyle(PixelButtonStyle())
+                    .disabled(rides.exporting || rides.changingHistory || rides.active?.id == ride.id)
             }.padding(20)
         }
         .font(.system(.body, design: .rounded))
         .background(MotoTheme.background)
         .navigationTitle("Поездка")
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button("Изменить") { showingEditor = true }
+                    .disabled(rides.changingHistory || rides.exporting || rides.active?.id == ride.id)
+            }
+        }
+        .sheet(isPresented: $showingEditor) { RideMetadataEditor(rides: rides, ride: ride) }
+        .confirmationDialog("Удалить поездку?", isPresented: $showingDelete, titleVisibility: .visible) {
+            Button("Удалить поездку", role: .destructive) {
+                rides.deleteCompletedRides([ride.id]) { success in if success { dismiss() } }
+            }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Маршрут, заметка и журнал этой поездки будут удалены с iPhone. Отдельно сохранённые копии останутся. Отменить удаление нельзя.")
+        }
         .task(id: ride.id) {
             let requestID = UUID()
             loadRequestID = requestID
@@ -287,6 +365,55 @@ struct RideDetailView: View {
             }
         }
         .onDisappear { loadRequestID = UUID() }
+    }
+}
+
+private struct RideMetadataEditor: View {
+    @ObservedObject var rides: RideRecorder
+    let ride: RideSummary
+    @Environment(\.dismiss) private var dismiss
+    @State private var title: String
+    @State private var note: String
+
+    init(rides: RideRecorder, ride: RideSummary) {
+        self.rides = rides
+        self.ride = ride
+        _title = State(initialValue: ride.title ?? "")
+        _note = State(initialValue: ride.note ?? "")
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Название") {
+                    TextField("Например, до работы", text: $title)
+                        .onChange(of: title) { value in if value.count > 80 { title = String(value.prefix(80)) } }
+                }
+                Section("Заметка") {
+                    TextEditor(text: $note).frame(minHeight: 150)
+                        .onChange(of: note) { value in if value.count > 4000 { note = String(value.prefix(4000)) } }
+                    Text("\(note.count) / 4000").font(.caption).foregroundStyle(.secondary)
+                }
+                Section {
+                    Text("Название и заметка не меняют маршрут, показатели и исходный журнал.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let failure = rides.historyError { Text(failure).font(.caption).foregroundStyle(.orange) }
+                    if rides.changingHistory { ProgressView("Сохраняем…") }
+                }
+            }
+            .font(.system(.body))
+            .navigationTitle("Изменить поездку")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.disabled(rides.changingHistory) }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Сохранить") {
+                        rides.updateRideMetadata(ride, title: title, note: note) { success in if success { dismiss() } }
+                    }.disabled(rides.changingHistory || rides.exporting)
+                }
+            }
+            .interactiveDismissDisabled(rides.changingHistory)
+        }
     }
 }
 
