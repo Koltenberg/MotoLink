@@ -16,6 +16,55 @@ class CaptureError(RuntimeError):
     pass
 
 
+def version(value, label):
+    if not isinstance(value, str) or not re.fullmatch(r"\d+(?:\.\d+){0,2}", value):
+        raise CaptureError(f"Invalid {label}: {value!r}")
+    parts = tuple(map(int, value.split(".")))
+    return parts + (0,) * (3 - len(parts))
+
+
+def select_runtime(info, runtimes, device_type):
+    sdk_name = info.get("DTSDKName", "")
+    if not isinstance(sdk_name, str) or not sdk_name.startswith("iphonesimulator"):
+        raise CaptureError(f"Simulator app must record DTSDKName=iphonesimulator<version>; got {sdk_name!r}")
+    sdk = version(sdk_name.removeprefix("iphonesimulator"), "simulator SDK version")
+    app_minimum = version(info.get("MinimumOSVersion"), "app MinimumOSVersion")
+    device_minimum = version(device_type.get("minRuntimeVersionString", "0"), "device minimum runtime")
+    minimum = max(app_minimum, device_minimum)
+    print(f"Simulator selection: SDK={sdk_name}; app minimum={info.get('MinimumOSVersion')}; "
+          f"device={device_type['name']}; device minimum={device_type.get('minRuntimeVersionString', 'not reported')}", flush=True)
+    candidates = []
+    for runtime in runtimes:
+        identifier = runtime.get("identifier", "unknown")
+        runtime_name = runtime.get("name", "unknown")
+        if "iOS" not in runtime_name:
+            reason = "not iOS"
+        elif not runtime.get("isAvailable"):
+            reason = "unavailable: " + str(runtime.get("availabilityError") or "not reported")
+        else:
+            try:
+                runtime_version = version(runtime.get("version"), "runtime version")
+            except CaptureError as error:
+                reason = str(error)
+            else:
+                if runtime_version < minimum:
+                    reason = "older than app/device minimum"
+                elif runtime_version > sdk:
+                    # This is a deterministic CI policy, not a claim that Apple
+                    # universally prohibits newer runtimes with an older SDK.
+                    reason = "newer than selected SDK (CI selection policy)"
+                else:
+                    reason = "candidate: exact SDK match" if runtime_version == sdk else "candidate: older than SDK"
+                    candidates.append((runtime_version, identifier))
+        print(f"Runtime {runtime_name} ({runtime.get('version', '?')}, {identifier}): {reason}", flush=True)
+    if not candidates:
+        raise CaptureError(f"No available iOS runtime between app/device minimum {minimum} and SDK {sdk}; "
+                           "install a matching runtime for the selected Xcode")
+    selected = max(candidates)[1]
+    print(f"Selected simulator runtime: {selected}; SDK={sdk_name}", flush=True)
+    return selected
+
+
 def run(*args, timeout=60, deadline=None):
     if deadline is not None:
         remaining = deadline - time.monotonic()
@@ -98,27 +147,25 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
 def capture(app, output):
     app, output = Path(app).resolve(), Path(output).resolve()
     with (app / "Info.plist").open("rb") as info:
-        bundle_id = plistlib.load(info)["CFBundleIdentifier"]
+        app_info = plistlib.load(info)
+    bundle_id = app_info["CFBundleIdentifier"]
     output.mkdir(parents=True, exist_ok=True)
     for name in ("simulator-home.png", "simulator-large-text.png"):
         (output / name).unlink(missing_ok=True)
     deadline = time.monotonic() + 480
     runtimes = json.loads(run("list", "runtimes", "-j", deadline=deadline))["runtimes"]
-    available = [item for item in runtimes if item.get("isAvailable") and "iOS" in item["name"]]
-    if not available:
-        raise CaptureError("No available iOS simulator runtime")
-    runtime = max(available, key=lambda item: tuple(map(int, re.findall(r"\d+", item.get("version", "0")))))["identifier"]
     types = json.loads(run("list", "devicetypes", "-j", deadline=deadline))["devicetypes"]
-    device_type = next((item["identifier"] for item in types if item["name"] == "iPhone 16"), None)
+    device_type = next((item for item in types if item["name"] == "iPhone 16"), None)
     if not device_type:
         raise CaptureError("iPhone 16 simulator device type is unavailable")
+    runtime = select_runtime(app_info, runtimes, device_type)
     failures = []
     for attempt in range(1, 3):
         print(f"Simulator capture attempt {attempt}/2", flush=True)
         # Publish neither partial captures nor images left by a failed attempt.
         with tempfile.TemporaryDirectory(prefix="motolink-visual-") as temporary:
             try:
-                images = capture_attempt(app, Path(temporary), device_type, runtime,
+                images = capture_attempt(app, Path(temporary), device_type["identifier"], runtime,
                                          bundle_id, attempt, deadline)
             except (CaptureError, subprocess.TimeoutExpired, OSError) as error:
                 failures.append(f"attempt {attempt}: {error}")

@@ -30,7 +30,8 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.app = self.root / "MotoLink.app"
         self.app.mkdir()
-        (self.app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "org.koltenberg.MotoLink"}))
+        (self.app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "org.koltenberg.MotoLink",
+            "DTSDKName": "iphonesimulator18.5", "MinimumOSVersion": "16.0"}))
         self.output = self.root / "output"
         self.calls = []
         self.devices = []
@@ -41,7 +42,7 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.calls.append(args)
         if args[:2] == ("list", "runtimes"):
             return json.dumps({"runtimes": [{"identifier": "runtime-ios", "isAvailable": True,
-                                            "name": "iOS 26", "version": "26.0"}]})
+                                            "name": "iOS 18.5", "version": "18.5"}]})
         if args[:2] == ("list", "devicetypes"):
             return json.dumps({"devicetypes": [{"name": "iPhone 16", "identifier": "iphone16"}]})
         if args[0] == "create":
@@ -140,6 +141,53 @@ class SimulatorCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(CAPTURE.CaptureError, "budget exhausted"):
                 CAPTURE.run("boot", "simulator", deadline=99)
             process.assert_not_called()
+
+
+class RuntimeSelectionTests(unittest.TestCase):
+    info = {"DTSDKName": "iphonesimulator18.5", "MinimumOSVersion": "16.0"}
+    device = {"name": "iPhone 16", "minRuntimeVersionString": "18.0.0"}
+
+    def runtime(self, version, available=True):
+        return {"identifier": "ios-" + version, "name": "iOS " + version,
+                "version": version, "isAvailable": available}
+
+    def test_sdk_match_wins_over_globally_newest_runtime(self):
+        selected = CAPTURE.select_runtime(self.info, [self.runtime("18.4"),
+            self.runtime("18.5"), self.runtime("26.2")], self.device)
+        self.assertEqual(selected, "ios-18.5")
+
+    def test_closest_older_runtime_is_used_if_exact_sdk_is_missing(self):
+        selected = CAPTURE.select_runtime(self.info, [self.runtime("18.0"),
+            self.runtime("18.4.1"), self.runtime("26.2")], self.device)
+        self.assertEqual(selected, "ios-18.4.1")
+
+    def test_only_newer_runtime_fails_instead_of_silently_selecting_it(self):
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "install a matching runtime"):
+            CAPTURE.select_runtime(self.info, [self.runtime("26.2")], self.device)
+
+    def test_app_minimum_is_enforced_even_when_sdk_matches(self):
+        info = {"DTSDKName": "iphonesimulator18.5", "MinimumOSVersion": "18.5"}
+        with self.assertRaises(CAPTURE.CaptureError):
+            CAPTURE.select_runtime(info, [self.runtime("18.4")], self.device)
+
+    def test_device_minimum_excludes_old_os_that_cannot_boot_selected_iphone(self):
+        with self.assertRaises(CAPTURE.CaptureError):
+            CAPTURE.select_runtime(self.info, [self.runtime("17.5")], self.device)
+
+    def test_unavailable_exact_match_does_not_hide_available_older_runtime(self):
+        selected = CAPTURE.select_runtime(self.info, [self.runtime("18.5", False),
+            self.runtime("18.4")], self.device)
+        self.assertEqual(selected, "ios-18.4")
+
+    def test_invalid_or_physical_device_sdk_is_rejected(self):
+        for sdk in [None, "iphoneos18.5", "iphonesimulatorbad"]:
+            with self.assertRaises(CAPTURE.CaptureError):
+                CAPTURE.select_runtime({**self.info, "DTSDKName": sdk}, [self.runtime("18.5")], self.device)
+
+    def test_malformed_runtime_is_logged_and_skipped(self):
+        selected = CAPTURE.select_runtime(self.info, [self.runtime("unknown"),
+            self.runtime("18.5.0")], self.device)
+        self.assertEqual(selected, "ios-18.5.0")
 
 
 if __name__ == "__main__":
