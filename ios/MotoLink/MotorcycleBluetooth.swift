@@ -31,6 +31,8 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     @Published private(set) var reconnectAttempt = 0
     @Published private(set) var reconnectBlockedReason: String?
     private var reconnectPolicy = BLEReconnectPolicy()
+    private var reconnectScheduler = BLEReconnectScheduler()
+    private var reconnectTask: DispatchWorkItem?
     private var streamRecovery = BLEStreamRecoveryPolicy()
     private var transportRecoveryError: Error?
     private var lastPacketPeripheralID: UUID?
@@ -46,6 +48,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     @Published private(set) var diagnosticStatus = "Готов к полной проверке"
     @Published private(set) var streamPackets = 0
     var onMeasurements: (([MotoProtocol.Measurement]) -> Void)?
+    var onStreamFrame: ((Date) -> Void)?
 
     private var diagnosticPhase = 0
     private var decodedStreamFrames = 0
@@ -124,6 +127,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         writeTimeout?.cancel()
         responseTimeout?.cancel()
         observationTimeout?.cancel()
+        reconnectTask?.cancel()
     }
 
     func scan() {
@@ -186,7 +190,16 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         } else if !enabled, connecting, let current {
             connectionWanted = false
             terminalStatus = "Ожидание подключения остановлено"
-            central.cancelPeripheralConnection(current)
+            if current.state == .disconnected {
+                // A cooldown has no OS request and therefore no disconnect
+                // callback to release the selected peripheral for a new scan.
+                clearTransport()
+                self.current = nil
+                connecting = false
+                status = terminalStatus!
+            } else {
+                central.cancelPeripheralConnection(current)
+            }
         }
     }
 
@@ -200,7 +213,8 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         stopScan()
         clearTransport()
         if let current {
-            central.cancelPeripheralConnection(current)
+            if current.state == .disconnected { self.current = nil }
+            else { central.cancelPeripheralConnection(current) }
         }
         connecting = false
         connected = false
@@ -296,11 +310,15 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     /// Called by the existing low-frequency capture timer; this is diagnostic
     /// observation, not a background keepalive or a reconnect deadline.
     func recordHealthSnapshot() {
+        resumeScheduledReconnect()
         let now = Date()
         let packetAge = lastPacketAt.map { Int(max(0, now.timeIntervalSince($0))) } ?? -1
         let streamAge = lastStreamAt.map { Int(max(0, now.timeIntervalSince($0))) } ?? -1
         let waiting = connecting ? connectionRequestedAt.map { Int(max(0, now.timeIntervalSince($0))) } ?? -1 : 0
-        record("ble_health", "connected=\(connected); ready=\(ready); connecting=\(connecting); waitSeconds=\(waiting); packetAgeSeconds=\(packetAge); streamAgeSeconds=\(streamAge); peripheralState=\(current?.state.rawValue ?? -1); reconnectAttempt=\(reconnectAttempt); appState=\(UIApplication.shared.applicationState.rawValue)")
+        let cooldown = reconnectScheduler.pending.flatMap {
+            reconnectScheduler.remaining(for: $0, now: ProcessInfo.processInfo.systemUptime)
+        }.map { Int(ceil($0)) } ?? 0
+        record("ble_health", "connected=\(connected); ready=\(ready); connecting=\(connecting); waitSeconds=\(waiting); packetAgeSeconds=\(packetAge); streamAgeSeconds=\(streamAge); peripheralState=\(current?.state.rawValue ?? -1); reconnectAttempt=\(reconnectAttempt); retryCooldownSeconds=\(cooldown); appState=\(UIApplication.shared.applicationState.rawValue)")
         checkStreamRecovery()
         // One local RSSI read per minute, only while visible and between commands.
         if UIApplication.shared.applicationState == .active, ready, !busy,
@@ -325,6 +343,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     private func resetRecovery() {
+        cancelScheduledReconnect()
         reconnectPolicy.reset()
         transportRecoveryError = nil
         reconnectAttempt = 0
@@ -333,6 +352,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     @objc private func becameActive() {
         // An opportunity to check an existing session, not a background timer.
+        resumeScheduledReconnect()
         checkStreamRecovery()
     }
 
@@ -367,7 +387,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     /// Retry completed failures, not an OS connection which is still pending.
-    /// CoreBluetooth owns the delay so recovery does not depend on an app timer.
+    /// An app-side deadline also bounds immediate CoreBluetooth failures.
     private func recoverConnection(_ peripheral: CBPeripheral, error: Error?, wanted: Bool) {
         let nsError = error as NSError?
         let removedPairing = nsError?.domain == CBErrorDomain
@@ -387,7 +407,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         guard let delay = reconnectPolicy.nextDelay(allowed: allowed,
             requiresPairing: removedPairing || pairingLimit, cancelled: cancelled) else { return }
         reconnectAttempt = reconnectPolicy.failureCount
-        record("reconnect", "attempt=\(reconnectAttempt); systemDelaySeconds=\(Int(delay)); \(Self.errorDetails(error))")
+        record("reconnect", "attempt=\(reconnectAttempt); appDelaySeconds=\(Int(delay)); \(Self.errorDetails(error))")
         beginConnection(peripheral, delay: delay)
     }
 
@@ -408,15 +428,53 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             lastPacketPeripheralID = peripheral.identifier
         }
         lastStreamAt = nil
-        connectionRequestedAt = Date()
+        connectionRequestedAt = nil
         reconnectPolicy.connectionStarted()
+        status = delay > 0 ? "Повтор подключения через \(Int(delay)) сек…" : "Ожидание \(selectedName)…"
+        guard reconnectScheduler.schedule(after: delay, now: ProcessInfo.processInfo.systemUptime) != nil else {
+            connecting = false
+            connectionWanted = false
+            current = nil
+            record("error", "Не удалось запланировать повтор подключения: неверный интервал")
+            return
+        }
+        resumeScheduledReconnect()
+    }
+
+    private func cancelScheduledReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectScheduler.cancel()
+    }
+
+    /// A timer may be suspended in the background. BLE/health/foreground events
+    /// also visit this deadline, and the ticket can only be consumed once.
+    private func resumeScheduledReconnect() {
+        guard let ticket = reconnectScheduler.pending, let current,
+              connectionWanted, bluetoothPowered,
+              let remaining = reconnectScheduler.remaining(for: ticket,
+                    now: ProcessInfo.processInfo.systemUptime) else { return }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        if remaining > 0 {
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.reconnectScheduler.pending == ticket else { return }
+                self.resumeScheduledReconnect()
+            }
+            reconnectTask = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: item)
+            return
+        }
+        guard reconnectScheduler.consume(ticket, now: ProcessInfo.processInfo.systemUptime) else { return }
+        connectionRequestedAt = Date()
         status = "Ожидание \(selectedName)…"
-        record("connection", "Запрошено подключение к \(selectedName); id=\(peripheral.identifier.uuidString)")
-        // A pending request is never cancelled merely because it takes time.
-        // Only a completed didFail/didDisconnect creates another request.
-        let options: [String: Any]? = delay > 0
-            ? [CBConnectPeripheralOptionStartDelayKey: NSNumber(value: delay)] : nil
-        central.connect(peripheral, options: options)
+        record("connection", "Запрошено подключение к \(selectedName); id=\(current.identifier.uuidString)")
+        // Do not delegate the cooldown to CBConnectPeripheralOptionStartDelayKey:
+        // Real iOS 26.6.2 rides received invalidParameters immediately on
+        // requests using this option; the callback does not identify which
+        // parameter was rejected. Regardless of cause, the app must rate-limit.
+        // Once this request is issued, no deadline cancels it: iOS owns the wait.
+        central.connect(current, options: nil)
     }
 
     private func prepare(_ peripheral: CBPeripheral) {
@@ -438,6 +496,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     private func clearTransport() {
+        cancelScheduledReconnect()
         session = UUID()
         streamRecovery.reset()
         lastStreamAt = nil
@@ -627,6 +686,10 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
             return
         }
         if let current, connectionWanted {
+            if reconnectScheduler.pending != nil {
+                resumeScheduledReconnect()
+                return
+            }
             if current.state == .connected { prepare(current) }
             else if current.state != .connecting { central.connect(current, options: nil) }
             return
@@ -678,7 +741,8 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        guard current === peripheral, peripheral.state == .disconnected else { return }
+        guard current === peripheral, peripheral.state == .disconnected,
+              reconnectScheduler.pending == nil else { return }
         let wanted = connectionWanted
         let recoveryError = transportRecoveryError ?? error
         transportRecoveryError = nil
@@ -695,7 +759,8 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        guard current === peripheral, peripheral.state == .disconnected else { return }
+        guard current === peripheral, peripheral.state == .disconnected,
+              reconnectScheduler.pending == nil else { return }
         let shouldReconnect = connectionWanted && autoReconnect && bluetoothPowered
         let recoveryError = transportRecoveryError ?? error
         transportRecoveryError = nil
@@ -829,6 +894,7 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             streamPackets += 1
             lastStreamAt = lastPacketAt
             streamRecovery.receivedStream(at: ProcessInfo.processInfo.systemUptime)
+            if let timestamp = lastStreamAt { onStreamFrame?(timestamp) }
         }
         // Missing/sentinel values in a new valid frame must not leave the old
         // measurement looking current. Malformed frames preserve the last time.

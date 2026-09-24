@@ -13,6 +13,7 @@ final class MotoLinkController: ObservableObject {
         // One explicit full-capture flow; disable the legacy two-minute auto-ride mode.
         rides.setAutoRecord(false)
         bluetooth.onMeasurements = { [weak self] in self?.rides.recordMeasurements($0) }
+        bluetooth.onStreamFrame = { [weak self] in self?.rides.recordStreamFrame(at: $0) }
         bluetooth.onDiagnosticEvent = { [weak self] in self?.rides.recordDiagnostic($0) }
         bluetooth.$connected.removeDuplicates().sink { [weak self] connected in
             self?.rides.bluetoothChanged(connected)

@@ -54,6 +54,12 @@ python3 "$project_root/research-v03/test_protocol_profile.py" \
 xcrun swift test --package-path "$project_root/core" \
   --scratch-path "$build_root/swift-tests" \
   2>&1 | tee "$run_dir/protocol-tests.log"
+xcrun swiftc "$project_root/core/JournalCheckpointPolicy.swift" \
+  "$project_root/ios/MotoLink/SessionLogStore.swift" \
+  "$project_root/scripts/test-export-cleanup.swift" \
+  -o "$build_root/export-cleanup-tests" \
+  2>&1 | tee "$run_dir/export-cleanup-compile.log"
+"$build_root/export-cleanup-tests" 2>&1 | tee "$run_dir/export-cleanup-tests.log"
 
 common=(
   -project "$project_root/ios/MotoLink.xcodeproj"

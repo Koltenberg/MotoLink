@@ -367,7 +367,16 @@ struct ContentView: View {
 struct ShareSheet: UIViewControllerRepresentable {
     let items: [URL]
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
+        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        controller.completionWithItemsHandler = { _, _, _, _ in
+            // Completion also covers cancellation. The share extension has now
+            // finished reading the copies; saved Documents journals stay intact.
+            let sharedItems = items
+            DispatchQueue.global(qos: .utility).async {
+                MotoLinkExportCleanup.removeCompletedExports(sharedItems)
+            }
+        }
+        return controller
     }
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

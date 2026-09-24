@@ -45,6 +45,11 @@ struct RideSummary: Codable, Identifiable {
     var telemetryCount: Int = 0
     var interruptionCount: Int = 0
     var rawEventCount: Int? = nil
+    var recordedAppVersion: String? = nil
+    var recordedAppBuild: String? = nil
+    var gpsSpeedQualityVersion: Int? = nil
+    var acceptedSpeedCount: Int? = nil
+    var streamCoverage: RideTelemetryCoverage? = nil
     var elapsed: TimeInterval { max(0, (endedAt ?? Date()).timeIntervalSince(startedAt)) }
 }
 
@@ -322,6 +327,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     @Published private(set) var error: String?
     @Published var exportedFiles: SharedFiles?
     @Published private(set) var exporting = false
+    @Published private(set) var restoringRoute = false
 
     private let location = CLLocationManager()
     private var archive: RideArchive?
@@ -347,19 +353,30 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             let all = try archive?.summaries() ?? []
             history = all.filter { $0.endedAt != nil }
             if var interrupted = all.first(where: { $0.endedAt == nil }) {
-                active = interrupted
                 if interrupted.trigger == "bluetooth" { disconnectedAt = interrupted.lastSavedAt }
-                do {
-                    let records = try archive?.records(interrupted.id) ?? []
-                    points = records.compactMap(\.point)
-                    gaps = gpsGaps(in: records, ride: interrupted)
-                    lastLocationAt = points.last?.timestamp
-                }
-                catch { self.error = "Не удалось восстановить все точки поездки: \(error.localizedDescription)" }
-                segment = points.last?.segment ?? 0
                 interrupted.interruptionCount += 1
                 interrupted.lastSavedAt = Date()
                 active = interrupted
+                restoringRoute = true
+                let restoredID = interrupted.id
+                // Large old journals must not block AppDelegate initialization
+                // and CoreBluetooth restoration. BLE capture can continue while
+                // the serial archive queue loads the previous route.
+                archive?.load(restoredID) { [weak self] result in
+                    guard let self, self.restoringRoute, let current = self.active,
+                          current.id == restoredID else { return }
+                    self.restoringRoute = false
+                    switch result {
+                    case .success(let records):
+                        self.points = records.compactMap(\.point)
+                        self.gaps = gpsGaps(in: records, ride: current)
+                        self.lastLocationAt = self.points.last?.timestamp
+                        self.segment = self.points.last?.segment ?? 0
+                    case .failure(let failure):
+                        self.error = "Не удалось восстановить все точки поездки: \(failure.localizedDescription)"
+                    }
+                    self.resume()
+                }
                 append([RideRecord(kind: "gap", timestamp: Date(), detail: "Процесс перезапущен; маршрут возобновляется новым сегментом")])
                 status = "Незавершённая поездка восстановлена"
                 pendingGPSGapReason = "Приложение было перезапущено"
@@ -414,7 +431,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func resume() {
-        guard active != nil, !locationRunning else { return }
+        guard active != nil, !locationRunning, !restoringRoute else { return }
         guard authorization == .authorizedAlways ||
                 (authorization == .authorizedWhenInUse && UIApplication.shared.applicationState == .active) else {
             status = "Для продолжения открой приложение и разреши геопозицию"; return
@@ -443,7 +460,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                 to: nil, reason: pendingGPSGapReason ?? "Поездка завершена без новых точек GPS")
             gaps.append(gap)
             ending.append(RideRecord(kind: "gps_gap", timestamp: gap.endedAt, gap: gap))
-        } else if points.isEmpty {
+        } else if points.isEmpty && summary.pointCount == 0 {
             let gap = GPSGap(id: UUID().uuidString, startedAt: summary.startedAt, endedAt: Date(),
                             from: nil, to: nil, reason: "За поездку не получено ни одной точной точки GPS")
             gaps.append(gap)
@@ -452,6 +469,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         archive?.append(ending, summary: summary)
         history.insert(summary, at: 0)
         active = nil
+        restoringRoute = false
         endBatteryMonitoring()
         previous = nil
         distanceAnchor = nil
@@ -464,6 +482,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     func bluetoothChanged(_ connected: Bool) {
         let changed = bluetoothConnected != connected
         bluetoothConnected = connected
+        if !connected { active?.streamCoverage?.endSegment() }
         if connected {
             autoStopWork?.cancel(); autoStopWork = nil
             disconnectedAt = nil
@@ -492,6 +511,13 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         guard !sampled.isEmpty else { return }
         active?.telemetryCount += sampled.count
         append(sampled.map { RideRecord(kind: "motorcycle", timestamp: $0.timestamp, measurement: $0) })
+    }
+
+    /// Called only for a structurally valid 4A, independently of decoding fields.
+    func recordStreamFrame(at date: Date) {
+        guard let summary = active, date >= summary.startedAt else { return }
+        if active?.streamCoverage == nil { active?.streamCoverage = RideTelemetryCoverage() }
+        active?.streamCoverage?.receive(at: date)
     }
 
     /// Raw packets are never sampled or pruned from a ride, including malformed
@@ -596,9 +622,15 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
 
     private func begin(trigger: String) {
         guard archive != nil else { status = "Хранилище недоступно — запись не начата"; return }
+        restoringRoute = false
         points = []; gaps = []; pendingGPSGapReason = nil
         segment = 0; previous = nil; distanceAnchor = nil; speedMS = nil; lastLocationAt = nil; lastTelemetryTimes = [:]
         active = RideSummary(id: UUID(), startedAt: Date(), lastSavedAt: Date(), trigger: trigger)
+        active?.recordedAppVersion = AppBuild.version
+        active?.recordedAppBuild = AppBuild.number
+        active?.gpsSpeedQualityVersion = 1
+        active?.acceptedSpeedCount = 0
+        active?.streamCoverage = RideTelemetryCoverage()
         beginBatteryMonitoring()
         append([RideRecord(kind: "started", timestamp: Date(), detail: "GPS и скорость: iPhone. BLE-подключение не доказывает работу двигателя.")])
         recordLifecycle("iOS \(UIDevice.current.systemVersion); locationPermission=\(authorization.rawValue); lowPower=\(ProcessInfo.processInfo.isLowPowerModeEnabled)")
@@ -683,8 +715,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                 markGPSGap("Нет точной геопозиции; ненадёжная точка отклонена")
                 continue
             }
-            var speed: Double? = fix.speed >= 0 && fix.speed <= 100 ? fix.speed : nil
-            if fix.speedAccuracy > 8 { speed = nil }
+            let speed = GPSSpeedQuality.accepted(speed: fix.speed, speedAccuracy: fix.speedAccuracy,
+                horizontalAccuracy: fix.horizontalAccuracy, courseAccuracy: fix.courseAccuracy)
             if let last = points.last {
                 let elapsed = fix.timestamp.timeIntervalSince(last.timestamp)
                 let distance = fix.distance(from: CLLocation(latitude: last.latitude, longitude: last.longitude))
@@ -732,6 +764,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             if let speed {
                 let maximum = max(active?.maxSpeedMS ?? 0, speed)
                 active?.maxSpeedMS = maximum
+                active?.acceptedSpeedCount = (active?.acceptedSpeedCount ?? 0) + 1
             }
             records.append(RideRecord(kind: "gps", timestamp: fix.timestamp, point: point))
             previous = fix; speedMS = speed; lastLocationAt = fix.timestamp

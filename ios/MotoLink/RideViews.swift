@@ -195,8 +195,20 @@ struct RideDetailView: View {
                     .font(.system(.title2, design: .rounded).bold().monospacedDigit())
                 Text(String(format: "GPS %.2f км · %@", ride.distanceMeters / 1000, duration(ride.elapsed)))
                     .font(.system(.title3, design: .rounded).monospacedDigit())
-                Text(String(format: "Максимальная скорость GPS: %.0f км/ч", ride.maxSpeedMS * 3.6))
+                Text(ride.acceptedSpeedCount == 0 ? "Скорость GPS: нет надёжных замеров"
+                     : String(format: "Максимальная скорость GPS: %.0f км/ч", ride.maxSpeedMS * 3.6))
                     .monospacedDigit()
+                if ride.gpsSpeedQualityVersion == nil {
+                    Text("Старая запись: скорость GPS могла содержать выбросы. Исходный журнал сохранён.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let coverage = ride.streamCoverage {
+                    Text("Поток байка: \(duration(coverage.observedSeconds)) из \(duration(ride.elapsed))")
+                        .font(.system(.headline, design: .rounded).monospacedDigit())
+                    Text(coverage.frameCount == 0 ? "Пакеты движения не получены. Значок Bluetooth сам по себе не означает запись данных."
+                         : "Посчитаны интервалы между пакетами движения. Пропуски связи не добавляются к этому времени.")
+                        .font(.caption).foregroundStyle(coverage.frameCount == 0 ? Color.orange : Color.secondary)
+                }
                 if !points.isEmpty {
                     Text("Схема маршрута").font(MotoTheme.font(.title3).bold())
                     LocalRouteOverview(points: points, showGapBoundaries: showGapBoundaries)
@@ -237,6 +249,10 @@ struct RideDetailView: View {
                     }
                 }
                 DisclosureGroup("Технические подробности") {
+                    if let version = ride.recordedAppVersion {
+                        Text("Записано в Moto Link \(version) · сборка \(ride.recordedAppBuild ?? "—")")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Text("Точек GPS: \(points.count). Измерений байка: \(ride.telemetryCount). Разрывов процесса: \(ride.interruptionCount).")
                         .font(.system(.caption).monospacedDigit()).foregroundStyle(.secondary)
                     Text("Автостарт означает подключение Bluetooth, а не включение зажигания. Просмотр этой поездки не включает GPS и не отправляет координаты в интернет.")

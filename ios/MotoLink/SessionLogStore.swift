@@ -36,6 +36,10 @@ final class SessionLogStore {
     private let directory: URL
     private let setupURL: URL
     private var setupSnapshot = SetupSnapshot()
+    // Queue-confined. A retry/error burst must not rewrite the entire 400-event
+    // setup snapshot for every event. Raw JSONL still receives every event.
+    private var setupCheckpoint = JournalCheckpointPolicy()
+    private var setupDirty = false
     private var fileURL: URL
     private var handle: FileHandle
     private var bytesWritten = 0
@@ -61,6 +65,9 @@ final class SessionLogStore {
         if let bytes = try? Data(contentsOf: setupURL), bytes.count <= 1024 * 1024,
            let saved = try? JSONDecoder().decode(SetupSnapshot.self, from: bytes) { setupSnapshot = saved }
         try Self.prune(directory: directory, preserving: fileURL)
+        // A previous process may have exited while a share sheet was open.
+        // Only old, strictly validated export copies in tmp are eligible.
+        queue.async { MotoLinkExportCleanup.removeStale() }
     }
 
     deinit { try? handle.close() }
@@ -87,6 +94,7 @@ final class SessionLogStore {
         queue.async { [self] in
             do {
                 try handle.synchronize()
+                try checkpointSetup(forced: true)
                 let destination = FileManager.default.temporaryDirectory
                     .appendingPathComponent("MotoLink-export-\(UUID().uuidString)", isDirectory: true)
                 try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
@@ -119,15 +127,30 @@ final class SessionLogStore {
         if setupSnapshot.events.count > 400 {
             setupSnapshot.events.removeFirst(setupSnapshot.events.count - 400)
         }
+        setupDirty = true
+        // Identity and capabilities must survive a crash even if received just
+        // after a periodic checkpoint. Other setup events are coalesced.
+        try checkpointSetup(forced: isIdentity || isCapabilities)
+    }
+
+    private func checkpointSetup(forced: Bool = false) throws {
+        guard setupDirty else { return }
+        let uptime = ProcessInfo.processInfo.systemUptime
+        guard setupCheckpoint.shouldCheckpoint(at: uptime, forced: forced) else { return }
         var bytes = try JSONEncoder().encode(setupSnapshot)
         while bytes.count > 1024 * 1024 && !setupSnapshot.events.isEmpty {
             setupSnapshot.events.removeFirst()
             bytes = try JSONEncoder().encode(setupSnapshot)
         }
         try bytes.write(to: setupURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        // A failed atomic write leaves the snapshot dirty for the next append,
+        // export or rotation. Never acknowledge persistence before it succeeds.
+        setupCheckpoint.checkpointSucceeded(at: uptime)
+        setupDirty = false
     }
 
     private func rotate() throws {
+        try checkpointSetup(forced: true)
         try handle.synchronize()
         try handle.close()
         fileURL = Self.nextURL(in: directory)
@@ -163,6 +186,50 @@ final class SessionLogStore {
         let files = try logFiles(in: directory)
         for file in files.prefix(max(0, files.count - 5)) where file != current {
             try FileManager.default.removeItem(at: file)
+        }
+    }
+}
+
+/// Export copies are disposable only after their activity has finished. Never
+/// accept a Documents path, a generic prefix match, a nested root or a symlink.
+enum MotoLinkExportCleanup {
+    private static let prefixes = ["MotoLink-capture-", "MotoLink-ride-", "MotoLink-export-"]
+    private static let gracePeriod: TimeInterval = 24 * 60 * 60
+
+    private static func ownedDirectory(_ directory: URL, temporaryDirectory: URL) -> URL? {
+        guard directory.isFileURL, temporaryDirectory.isFileURL else { return nil }
+        let candidate = directory.standardizedFileURL
+        let root = temporaryDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        guard candidate.deletingLastPathComponent().resolvingSymlinksInPath().path == root.path,
+              let prefix = prefixes.first(where: { candidate.lastPathComponent.hasPrefix($0) }),
+              UUID(uuidString: String(candidate.lastPathComponent.dropFirst(prefix.count))) != nil,
+              let values = try? candidate.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+              values.isDirectory == true, values.isSymbolicLink != true,
+              candidate.resolvingSymlinksInPath().path == root.appendingPathComponent(candidate.lastPathComponent).path
+        else { return nil }
+        return candidate
+    }
+
+    static func removeCompletedExports(_ files: [URL],
+                                       temporaryDirectory: URL = FileManager.default.temporaryDirectory) {
+        let directories = Set(files.filter(\.isFileURL).map { $0.deletingLastPathComponent() })
+        for directory in directories {
+            guard let owned = ownedDirectory(directory, temporaryDirectory: temporaryDirectory) else { continue }
+            try? FileManager.default.removeItem(at: owned)
+        }
+    }
+
+    static func removeStale(temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+                            now: Date = Date()) {
+        let keys: Set<URLResourceKey> = [.creationDateKey, .contentModificationDateKey]
+        guard let contents = try? FileManager.default.contentsOfDirectory(at: temporaryDirectory,
+            includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else { return }
+        for directory in contents {
+            guard let owned = ownedDirectory(directory, temporaryDirectory: temporaryDirectory),
+                  let values = try? owned.resourceValues(forKeys: keys),
+                  let created = values.creationDate, let modified = values.contentModificationDate,
+                  now.timeIntervalSince(max(created, modified)) > gracePeriod else { continue }
+            try? FileManager.default.removeItem(at: owned)
         }
     }
 }
