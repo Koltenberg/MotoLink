@@ -14,7 +14,9 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-15
+    # Explicit Intel image: repeated ARM runner CoreSimulator install/launch
+    # timeouts happened before app UI execution. Device output remains arm64.
+    runs-on: macos-15-intel
     timeout-minutes: 25
     steps:
       - name: Check out project
