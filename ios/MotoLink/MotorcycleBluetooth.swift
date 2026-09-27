@@ -47,6 +47,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private var lastRSSIAt: Date?
     private var userRescanAfterCancellation: CBPeripheral?
     private var userRescanMayStartScan = false
+    private var cancelResume = BLECancelResumePolicy()
+    private var nativeReconnect = BLENativeReconnectPolicy()
+    private var nativeDisconnectLogged = false
     @Published private(set) var storageError: String?
     @Published private(set) var exportBusy = false
     @Published var exportedFiles: SharedFiles?
@@ -84,6 +87,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     private var central: CBCentralManager!
+    // CoreBluetooth delegate is weak. Keep the OS-specific adapter alive, and
+    // expose exactly one disconnect selector for that OS (Nordic issue #132).
+    private var centralDelegate: MotoCentralDelegate!
     private var found: [UUID: CBPeripheral] = [:]
     private var current: CBPeripheral?
     private var savedID: UUID?
@@ -128,7 +134,12 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             storageError = error.localizedDescription
         }
         record("app", "MotoLink \(AppBuild.version) (\(AppBuild.number)) · iOS \(UIDevice.current.systemVersion)")
-        central = CBCentralManager(delegate: self, queue: .main, options: [
+        if #available(iOS 17.0, *) { centralDelegate = MotoModernCentralDelegate(self) }
+        else { centralDelegate = MotoLegacyCentralDelegate(self) }
+        #if targetEnvironment(simulator)
+        validateCentralDelegateSelectors()
+        #endif
+        central = CBCentralManager(delegate: centralDelegate, queue: .main, options: [
             CBCentralManagerOptionRestoreIdentifierKey: "app.motolink.central.v1",
             CBCentralManagerOptionShowPowerAlertKey: true
         ])
@@ -219,7 +230,18 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     func connectRemembered() {
-        guard bluetoothPowered, current == nil, let savedID else { return }
+        guard bluetoothPowered, let savedID else { return }
+        if let current {
+            guard current.identifier == savedID,
+                  cancelResume.requestedResume(for: current.identifier) else { return }
+            resumeConnectionIntent()
+            userRescanMayStartScan = false
+            status = "Подключимся после завершения отмены…"
+            record("connection_resume_queued", "Новое подключение запрошено пользователем; ждём завершения предыдущей отмены")
+            // Do not set connectionWanted yet. A racing didConnect still belongs
+            // to the closing request and must be cancelled, not prepared.
+            return
+        }
         resumeConnectionIntent()
         guard let peripheral = central.retrievePeripherals(withIdentifiers: [savedID]).first else {
             status = "Сохранённый мотоцикл не найден в iOS. Повторите поиск."
@@ -235,7 +257,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
               connecting, !connected, !ready, connectionWanted,
               reconnectScheduler.pending == nil, userRescanAfterCancellation == nil,
               !reconnectPolicy.transportRestartPending,
-              current?.state == .connecting, let connectionRequestedAt else { return false }
+              !nativeReconnect.awaitingCancellation,
+              current?.state == .connecting || nativeReconnect.systemOwnsPendingConnection,
+              let connectionRequestedAt else { return false }
         let wait = now.timeIntervalSince(connectionRequestedAt)
         return wait.isFinite && wait >= 120
     }
@@ -249,6 +273,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         resetRecovery()
         userRescanAfterCancellation = current
         userRescanMayStartScan = true
+        cancelResume.requestedCancellation(for: current.identifier)
         connectionWanted = false
         terminalStatus = "Ожидание остановлено. Повторите поиск, когда будете готовы."
         clearTransport()
@@ -256,15 +281,19 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         record("user_rescan_requested", "waitSeconds=\(waited); waitOrigin=\(connectionWaitOrigin); autoReconnect=\(autoReconnect); ожидаем подтверждение отмены от iOS")
         // Keep current's identity until a terminal callback. A racing didConnect
         // sees connectionWanted=false and cancels instead of preparing telemetry.
+        nativeReconnect.cancellationRequested()
         central.cancelPeripheralConnection(current)
     }
 
     private func completeUserRescanCancellation(_ peripheral: CBPeripheral, error: Error?) -> Bool {
         guard let requested = userRescanAfterCancellation, requested === peripheral else { return false }
+        let resumeRemembered = cancelResume.completedCancellation(for: peripheral.identifier,
+            canResume: bluetoothPowered && !connectionPaused)
         let startScan = userRescanMayStartScan
-            && UIApplication.shared.applicationState == .active && bluetoothPowered
+            && !resumeRemembered && UIApplication.shared.applicationState == .active && bluetoothPowered
         resetRecovery()
         clearTransport()
+        nativeReconnect.clearConnection()
         current = nil
         connecting = false
         connected = false
@@ -272,7 +301,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         connectionRequestedAt = nil
         terminalStatus = nil
         record("user_rescan_cancelled", "scanNow=\(startScan); \(Self.errorDetails(error))")
-        if startScan {
+        if resumeRemembered {
+            connectRemembered()
+        } else if startScan {
             scan()
         } else {
             status = "Ожидание остановлено. Повторите поиск, когда будете готовы."
@@ -282,25 +313,33 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     func setAutoReconnect(_ enabled: Bool) {
         guard !enabled || hasRememberedDevice else { return }
-        if !enabled { resetRecovery() }
+        if !enabled {
+            resetRecovery()
+            cancelResume.revokeResume()
+        }
         autoReconnect = enabled
         shouldResumeAtPowerOn = enabled
         UserDefaults.standard.set(enabled, forKey: Key.reconnect)
         if enabled { resumeConnectionIntent() }
         record("setting", "Автоподключение: \(enabled ? "включено" : "выключено")")
-        if enabled, bluetoothPowered, current == nil {
+        if enabled, bluetoothPowered {
             connectRemembered()
-        } else if !enabled, connecting, let current {
+        } else if !enabled, connecting || nativeReconnect.systemOwnsPendingConnection, let current {
             connectionWanted = false
             terminalStatus = "Ожидание подключения остановлено"
-            if current.state == .disconnected {
+            if current.state == .disconnected && !nativeReconnect.systemOwnsPendingConnection
+                && !nativeReconnect.awaitingCancellation {
                 // A cooldown has no OS request and therefore no disconnect
                 // callback to release the selected peripheral for a new scan.
                 clearTransport()
+                cancelResume.reset()
+                nativeReconnect.clearConnection()
                 self.current = nil
                 connecting = false
                 status = terminalStatus!
             } else {
+                cancelResume.requestedCancellation(for: current.identifier)
+                nativeReconnect.cancellationRequested()
                 central.cancelPeripheralConnection(current)
             }
         }
@@ -316,6 +355,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     /// enabling auto-connect resumes it; radio cycling/restoration cannot undo it.
     func pauseConnection() {
         resetRecovery()
+        cancelResume.revokeResume()
         connectionPaused = true
         shouldResumeAtPowerOn = false
         UserDefaults.standard.set(true, forKey: Key.paused)
@@ -324,8 +364,19 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         stopScan()
         clearTransport()
         if let current {
-            if current.state == .disconnected { self.current = nil }
-            else { central.cancelPeripheralConnection(current) }
+            if current.state == .disconnected && !nativeReconnect.systemOwnsPendingConnection
+                && !nativeReconnect.awaitingCancellation {
+                cancelResume.reset()
+                nativeReconnect.clearConnection()
+                self.current = nil
+            } else {
+                cancelResume.requestedCancellation(for: current.identifier)
+                nativeReconnect.cancellationRequested()
+                central.cancelPeripheralConnection(current)
+            }
+        } else {
+            cancelResume.reset()
+            nativeReconnect.clearConnection()
         }
         connecting = false
         connected = false
@@ -439,7 +490,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         let cooldown = reconnectScheduler.pending.flatMap {
             reconnectScheduler.remaining(for: $0, now: ProcessInfo.processInfo.systemUptime)
         }.map { Int(ceil($0)) } ?? 0
-        record("ble_health", "connected=\(connected); ready=\(ready); connecting=\(connecting); waitSeconds=\(waiting); waitOrigin=\(connecting ? connectionWaitOrigin : "none"); packetAgeSeconds=\(packetAge); streamAgeSeconds=\(streamAge); peripheralState=\(current?.state.rawValue ?? -1); reconnectAttempt=\(reconnectAttempt); retryCooldownSeconds=\(cooldown); appState=\(UIApplication.shared.applicationState.rawValue); centralState=\(central.state.rawValue); protectedDataAvailable=\(UIApplication.shared.isProtectedDataAvailable); lastRSSIdBm=\(rssiValue); rssiAgeSeconds=\(rssiAge)")
+        record("ble_health", "connected=\(connected); ready=\(ready); connecting=\(connecting); waitSeconds=\(waiting); waitOrigin=\(connecting ? connectionWaitOrigin : "none"); packetAgeSeconds=\(packetAge); streamAgeSeconds=\(streamAge); peripheralState=\(current?.state.rawValue ?? -1); reconnectAttempt=\(reconnectAttempt); retryCooldownSeconds=\(cooldown); systemReconnectPending=\(nativeReconnect.systemOwnsPendingConnection); cancelPending=\(nativeReconnect.awaitingCancellation); appState=\(UIApplication.shared.applicationState.rawValue); centralState=\(central.state.rawValue); protectedDataAvailable=\(UIApplication.shared.isProtectedDataAvailable); lastRSSIdBm=\(rssiValue); rssiAgeSeconds=\(rssiAge)")
         checkStreamRecovery()
         // One local RSSI read per minute, only while visible and between commands.
         if UIApplication.shared.applicationState == .active, ready, !busy,
@@ -537,6 +588,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     private func beginConnection(_ peripheral: CBPeripheral, delay: TimeInterval = 0) {
+        cancelResume.reset()
+        nativeReconnect.clearConnection()
+        nativeDisconnectLogged = false
         onTransportIdentity?(peripheral.identifier)
         stopScan()
         selectTelemetryCatalogue(for: peripheral.identifier)
@@ -581,6 +635,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private func resumeScheduledReconnect() {
         guard let ticket = reconnectScheduler.pending, let current,
               connectionWanted, bluetoothPowered,
+              !nativeReconnect.systemOwnsPendingConnection, !nativeReconnect.awaitingCancellation,
               let remaining = reconnectScheduler.remaining(for: ticket,
                     now: ProcessInfo.processInfo.systemUptime) else { return }
         reconnectTask?.cancel()
@@ -604,10 +659,39 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         // requests using this option; the callback does not identify which
         // parameter was rejected. Regardless of cause, the app must rate-limit.
         // Once this request is issued, no deadline cancels it: iOS owns the wait.
-        central.connect(current, options: nil)
+        issueConnectionRequest(current)
     }
 
+    private func issueConnectionRequest(_ peripheral: CBPeripheral) {
+        let supported: Bool
+        if #available(iOS 17.0, *) { supported = true } else { supported = false }
+        let enabled = nativeReconnect.connectionRequested(for: peripheral.identifier,
+            supported: supported, enabled: autoReconnect && !connectionPaused)
+        if #available(iOS 17.0, *), enabled {
+            record("native_reconnect", "Системное восстановление iOS включено для этого запроса; параметры радиосвязи не меняются")
+            central.connect(peripheral, options: [CBConnectPeripheralOptionEnableAutoReconnect: true])
+        } else {
+            central.connect(peripheral, options: nil)
+        }
+    }
+
+    #if targetEnvironment(simulator)
+    private func validateCentralDelegateSelectors() {
+        let legacy = NSSelectorFromString("centralManager:didDisconnectPeripheral:error:")
+        let modern = NSSelectorFromString("centralManager:didDisconnectPeripheral:timestamp:isReconnecting:error:")
+        if #available(iOS 17.0, *) {
+            precondition(centralDelegate.responds(to: modern) && !centralDelegate.responds(to: legacy),
+                         "Modern CoreBluetooth adapter must expose only the timestamp disconnect selector")
+        } else {
+            precondition(centralDelegate.responds(to: legacy) && !centralDelegate.responds(to: modern),
+                         "Legacy CoreBluetooth adapter must expose only the old disconnect selector")
+        }
+        print("MotoLink CoreBluetooth delegate selector check passed")
+    }
+    #endif
+
     private func prepare(_ peripheral: CBPeripheral) {
+        nativeDisconnectLogged = false
         onTransportIdentity?(peripheral.identifier)
         selectTelemetryCatalogue(for: peripheral.identifier)
         clearTransport()
@@ -696,7 +780,10 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         status = recover ? "Канал прервался. Восстанавливаем связь…" : message
         // Keep this peripheral until didDisconnect. Never overlap connect and
         // cancel, and ignore late GATT callbacks from the closing session.
-        if let current { central.cancelPeripheralConnection(current) }
+        if let current {
+            nativeReconnect.cancellationRequested()
+            central.cancelPeripheralConnection(current)
+        }
     }
 
     private func isCurrent(_ peripheral: CBPeripheral) -> Bool {
@@ -819,6 +906,9 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         bluetoothPowered = central.state == .poweredOn
         guard bluetoothPowered else {
+            cancelResume.reset()
+            nativeReconnect.clearConnection()
+            nativeDisconnectLogged = false
             userRescanAfterCancellation = nil
             userRescanMayStartScan = false
             stopScan()
@@ -840,15 +930,19 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
             return
         }
         if let current, connectionWanted {
+            if nativeReconnect.awaitingCancellation { return }
             if reconnectScheduler.pending != nil {
                 resumeScheduledReconnect()
                 return
             }
-            if current.state == .connected { prepare(current) }
-            else if current.state != .connecting {
+            if current.state == .connected {
+                nativeReconnect.preparedConnectedState(current.identifier)
+                prepare(current)
+            }
+            else if current.state != .connecting && !nativeReconnect.systemOwnsPendingConnection {
                 connectionRequestedAt = Date()
                 connectionWaitOrigin = "request"
-                central.connect(current, options: nil)
+                issueConnectionRequest(current)
             }
             return
         }
@@ -865,6 +959,7 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
             }
             current = peripheral
             peripheral.delegate = self
+            nativeReconnect.restored(peripheral.identifier, connecting: peripheral.state == .connecting)
             onTransportIdentity?(peripheral.identifier)
             connectionWanted = true
             connecting = peripheral.state != .connected
@@ -896,8 +991,14 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        guard current === peripheral, connectionWanted else {
+        guard current === peripheral, connectionWanted,
+              !nativeReconnect.awaitingCancellation, !reconnectPolicy.transportRestartPending else {
+            if current === peripheral { nativeReconnect.cancellationRequested() }
             central.cancelPeripheralConnection(peripheral)
+            return
+        }
+        guard nativeReconnect.connected(peripheral.identifier) else {
+            record("native_reconnect_duplicate", "Соединение уже подготовлено по текущему состоянию после отложенного события iOS")
             return
         }
         record("connection", "BLE соединение установлено; телеметрия ещё не подтверждена")
@@ -909,10 +1010,18 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
         guard current === peripheral, peripheral.state == .disconnected,
               reconnectScheduler.pending == nil else { return }
         if completeUserRescanCancellation(peripheral, error: error) { return }
+        let resumeRemembered = cancelResume.completedCancellation(for: peripheral.identifier,
+            canResume: bluetoothPowered && !connectionPaused)
         let wanted = connectionWanted
+        let cause = error as NSError?
+        if nativeReconnect.rejectOptionIfUsed(invalidParameters: cause?.domain == CBErrorDomain
+            && cause?.code == CBError.Code.invalidParameters.rawValue) {
+            record("native_reconnect_fallback", "iOS отклонила запрос с новым параметром. В этом процессе следующие запросы без него; ограничение частоты повторов сохраняется")
+        }
         let recoveryError = transportRecoveryError ?? error
         transportRecoveryError = nil
         clearTransport()
+        nativeReconnect.clearConnection()
         current = nil
         connecting = false
         connected = false
@@ -921,26 +1030,143 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
         record("error", "\(status); \(Self.errorDetails(error))")
         recordHealthSnapshot()
         // An encryption timeout is not evidence that the bond was removed.
-        recoverConnection(peripheral, error: recoveryError, wanted: wanted)
+        if resumeRemembered { connectRemembered() }
+        else { recoverConnection(peripheral, error: recoveryError, wanted: wanted) }
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard current === peripheral, peripheral.state == .disconnected,
               reconnectScheduler.pending == nil else { return }
+        completeDisconnection(peripheral, error: error)
+    }
+
+    @available(iOS 17.0, *)
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
+                        timestamp: CFAbsoluteTime, isReconnecting: Bool, error: Error?) {
+        guard current === peripheral else { return }
+        let receivedAt = Date().timeIntervalSinceReferenceDate
+        let cause = error as NSError?
+        let pairingFailure = cause?.domain == CBErrorDomain &&
+            [CBError.Code.peerRemovedPairingInformation.rawValue,
+             CBError.Code.tooManyLEPairedDevices.rawValue].contains(cause?.code ?? -1)
+        let mayResume = connectionWanted && autoReconnect && bluetoothPowered
+            && !connectionPaused && !pairingFailure && !reconnectPolicy.transportRestartPending
+        let action = nativeReconnect.disconnected(peripheral.identifier,
+            timestamp: timestamp, reconnecting: isReconnecting,
+            peripheralIsConnected: peripheral.state == .connected, mayResume: mayResume)
+        record("native_disconnect", "eventCFAbsoluteTime=\(timestamp); receivedCFAbsoluteTime=\(receivedAt); systemIsReconnecting=\(isReconnecting); peripheralState=\(peripheral.state.rawValue); action=\(action); \(Self.errorDetails(error))")
+        switch action {
+        case .ignore:
+            return
+        case .applicationFallback:
+            completeDisconnection(peripheral, error: error)
+        case .waitForSystem:
+            recordNativeDisconnection(error, reconnect: true)
+            onConfirmedTransportBoundary?(peripheral.identifier)
+            clearTransport()
+            connected = false
+            connecting = true
+            connectionRequestedAt = Date()
+            connectionWaitOrigin = "system_reconnect_observation"
+            status = "iPhone восстанавливает связь с мотоциклом…"
+            // No connect/cancel/timer here: iOS already owns the pending request.
+        case .prepareConnected:
+            recordNativeDisconnection(error, reconnect: true)
+            onConfirmedTransportBoundary?(peripheral.identifier)
+            connected = false
+            record("connection", "BLE соединение установлено; телеметрия ещё не подтверждена; source=native_current_state")
+            prepare(peripheral)
+        case .cancelConnection:
+            if connected {
+                recordNativeDisconnection(error, reconnect: false)
+                onConfirmedTransportBoundary?(peripheral.identifier)
+            }
+            if pairingFailure {
+                transportRecoveryError = error
+                reconnectBlockedReason = "iOS сообщает о проблеме сопряжения. На остановке проверь настройки Bluetooth."
+                terminalStatus = reconnectBlockedReason
+            }
+            // A setup-triggered cancel still intends to retry after its ACK.
+            // A racing system-reconnect notification must not revoke that intent.
+            if pairingFailure || !reconnectPolicy.transportRestartPending {
+                connectionWanted = false
+            }
+            clearTransport()
+            connected = false
+            connecting = false
+            nativeReconnect.cancellationRequested()
+            central.cancelPeripheralConnection(peripheral)
+        }
+    }
+
+    private func recordNativeDisconnection(_ error: Error?, reconnect: Bool) {
+        guard !nativeDisconnectLogged else { return }
+        nativeDisconnectLogged = true
+        record("connection", "Отключено; \(Self.errorDetails(error)); reconnect=\(reconnect); systemOwnership=true")
+    }
+
+    private func completeDisconnection(_ peripheral: CBPeripheral, error: Error?) {
         onConfirmedTransportBoundary?(peripheral.identifier)
         if completeUserRescanCancellation(peripheral, error: error) { return }
+        let resumeRemembered = cancelResume.completedCancellation(for: peripheral.identifier,
+            canResume: bluetoothPowered && !connectionPaused)
         let shouldReconnect = connectionWanted && autoReconnect && bluetoothPowered
         let recoveryError = transportRecoveryError ?? error
         transportRecoveryError = nil
         recordHealthSnapshot()
         clearTransport()
+        nativeReconnect.clearConnection()
         current = nil
         connecting = false
         connected = false
         connectionWanted = false
         status = terminalStatus ?? "Связь прервана"
-        record("connection", "Отключено; \(Self.errorDetails(error)); reconnect=\(shouldReconnect)")
-        recoverConnection(peripheral, error: recoveryError, wanted: shouldReconnect)
+        if nativeDisconnectLogged {
+            record("native_reconnect_terminal", "Системное ожидание завершено; \(Self.errorDetails(error)); reconnect=\(shouldReconnect)")
+        } else {
+            record("connection", "Отключено; \(Self.errorDetails(error)); reconnect=\(shouldReconnect)")
+        }
+        nativeDisconnectLogged = false
+        if resumeRemembered { connectRemembered() }
+        else { recoverConnection(peripheral, error: recoveryError, wanted: shouldReconnect) }
+    }
+}
+
+/// CoreBluetooth chooses optional delegate selectors at runtime. Keeping the
+/// modern and legacy selectors on different objects avoids precedence ambiguity.
+private class MotoCentralDelegate: NSObject, CBCentralManagerDelegate {
+    weak var owner: MotorcycleBluetooth?
+    init(_ owner: MotorcycleBluetooth) { self.owner = owner; super.init() }
+    func centralManagerDidUpdateState(_ central: CBCentralManager) { owner?.centralManagerDidUpdateState(central) }
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        owner?.centralManager(central, willRestoreState: dict)
+    }
+    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
+                        advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        owner?.centralManager(central, didDiscover: peripheral, advertisementData: advertisementData, rssi: RSSI)
+    }
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        owner?.centralManager(central, didConnect: peripheral)
+    }
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        owner?.centralManager(central, didFailToConnect: peripheral, error: error)
+    }
+}
+
+private final class MotoLegacyCentralDelegate: MotoCentralDelegate {
+    @objc
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        owner?.centralManager(central, didDisconnectPeripheral: peripheral, error: error)
+    }
+}
+
+@available(iOS 17.0, *)
+private final class MotoModernCentralDelegate: MotoCentralDelegate {
+    @objc
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
+                        timestamp: CFAbsoluteTime, isReconnecting: Bool, error: Error?) {
+        owner?.centralManager(central, didDisconnectPeripheral: peripheral,
+                              timestamp: timestamp, isReconnecting: isReconnecting, error: error)
     }
 }
 
