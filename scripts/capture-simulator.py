@@ -71,6 +71,16 @@ def select_runtime(info, runtimes, device_type):
     return selected
 
 
+def select_device_type(types):
+    # Use an observed type from the installed Xcode. Current runner images
+    # provide iPhone 17; older Xcodes retain the previous iPhone 16 baseline.
+    for name in ("iPhone 17", "iPhone 16"):
+        selected = next((item for item in types if item.get("name") == name), None)
+        if selected is not None:
+            return selected
+    raise CaptureError("Neither iPhone 17 nor iPhone 16 simulator device type is available")
+
+
 def run(*args, timeout=60, deadline=None):
     if deadline is not None:
         remaining = deadline - time.monotonic()
@@ -204,9 +214,7 @@ def capture(app, output):
     deadline = time.monotonic() + 600
     runtimes = json.loads(run("list", "runtimes", "-j", deadline=deadline))["runtimes"]
     types = json.loads(run("list", "devicetypes", "-j", deadline=deadline))["devicetypes"]
-    device_type = next((item for item in types if item["name"] == "iPhone 16"), None)
-    if not device_type:
-        raise CaptureError("iPhone 16 simulator device type is unavailable")
+    device_type = select_device_type(types)
     runtime = select_runtime(app_info, runtimes, device_type)
     failures = []
     for attempt in range(1, 3):

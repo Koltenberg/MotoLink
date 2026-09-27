@@ -249,6 +249,24 @@ class SimulatorCaptureTests(unittest.TestCase):
             process.assert_not_called()
 
 
+class DeviceSelectionTests(unittest.TestCase):
+    def test_current_iphone_wins_even_when_previous_type_appears_first(self):
+        previous = {"name": "iPhone 16", "identifier": "iphone16", "minRuntimeVersionString": "18.0"}
+        current = {"name": "iPhone 17", "identifier": "iphone17", "minRuntimeVersionString": "26.0"}
+        selected = CAPTURE.select_device_type([previous, current])
+        self.assertIs(selected, current)
+
+    def test_older_xcode_uses_observed_previous_iphone_type(self):
+        previous = {"name": "iPhone 16", "identifier": "iphone16"}
+        self.assertIs(CAPTURE.select_device_type([{"name": "iPad Air"}, previous]), previous)
+
+    def test_absent_supported_iphone_types_fails_instead_of_inventing_identifier(self):
+        for types in ([], [{"name": "iPad Air"}], [{"name": "iPhone 17 Pro"}]):
+            with self.subTest(types=types):
+                with self.assertRaisesRegex(CAPTURE.CaptureError, "Neither iPhone 17 nor iPhone 16"):
+                    CAPTURE.select_device_type(types)
+
+
 class RuntimeSelectionTests(unittest.TestCase):
     info = {"DTSDKName": "iphonesimulator18.5", "MinimumOSVersion": "16.0"}
     device = {"name": "iPhone 16", "minRuntimeVersionString": "18.0.0"}

@@ -14,9 +14,11 @@ concurrency:
 
 jobs:
   build:
-    # Explicit Intel image: repeated ARM runner CoreSimulator install/launch
-    # timeouts happened before app UI execution. Device output remains arm64.
-    runs-on: macos-15-intel
+    # Pin a matching modern Xcode/runtime after macOS 15 / iOS 18.5
+    # CoreSimulator startup failed on both ARM and Intel runners.
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     timeout-minutes: 25
     steps:
       - name: Check out project
