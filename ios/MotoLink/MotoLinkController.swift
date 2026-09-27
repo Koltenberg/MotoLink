@@ -7,6 +7,7 @@ final class MotoLinkController: ObservableObject {
     static let shared = MotoLinkController()
     let rides = RideRecorder()
     let bluetooth = MotorcycleBluetooth()
+    private lazy var connectionContext = ConnectionContextMonitor { [weak self] in self?.rides.recordConnectionContext($0) }
     private var subscriptions = Set<AnyCancellable>()
 
     private init() {
@@ -17,6 +18,12 @@ final class MotoLinkController: ObservableObject {
         bluetooth.onDiagnosticEvent = { [weak self] in self?.rides.recordDiagnostic($0) }
         bluetooth.$connected.removeDuplicates().sink { [weak self] connected in
             self?.rides.bluetoothChanged(connected)
+            self?.connectionContext.snapshot(reason: connected ? "bike_connected" : "bike_disconnected")
+        }.store(in: &subscriptions)
+        rides.$active.map { $0?.id }.removeDuplicates().receive(on: DispatchQueue.main).sink { [weak self] id in
+            guard let self else { return }
+            self.connectionContext.setRecording(id != nil)
+            if id != nil { self.rides.recordConnectionContext(ConnectionTestSettingsView.capture()) }
         }.store(in: &subscriptions)
         Timer.publish(every: 15, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             guard let self, self.rides.active != nil else { return }

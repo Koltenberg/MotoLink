@@ -37,6 +37,8 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.devices = []
         self.failure = None
         self.launch_result = "org.koltenberg.MotoLink: 1234"
+        self.active_mode = None
+        self.content_size = "large"
 
     def fake_run(self, *args, **kwargs):
         self.calls.append(args)
@@ -52,9 +54,15 @@ class SimulatorCaptureTests(unittest.TestCase):
         if self.failure:
             self.failure(args)
         if args[0] == "launch":
+            self.active_mode = "companion" if "--companion-visual-check" in args else "home"
             return self.launch_result
+        if args[0] == "terminate":
+            self.active_mode = None
+        if args[:1] == ("ui",) and args[2] == "content_size":
+            self.content_size = args[3]
         if args[0] == "io":
-            screenshot(Path(args[-1]), marker=args[1].encode())
+            marker = f"{args[1]}|mode:{self.active_mode}|size:{self.content_size}|".encode()
+            screenshot(Path(args[-1]), marker=marker)
         return ""
 
     def execute(self):
@@ -64,13 +72,55 @@ class SimulatorCaptureTests(unittest.TestCase):
     def test_real_required_steps_run_without_redundant_global_appearance(self):
         self.execute()
         self.assertEqual(len(self.devices), 1)
-        self.assertTrue((self.output / "simulator-home.png").is_file())
-        self.assertTrue((self.output / "simulator-large-text.png").is_file())
+        self.assertEqual({image.name for image in self.output.glob("*.png")}, set(CAPTURE.SCREENSHOT_NAMES))
         commands = [args[0] for args in self.calls]
         self.assertIn("install", commands)
         self.assertIn("launch", commands)
         self.assertIn(("ui", self.devices[0], "content_size", "accessibility-large"), self.calls)
         self.assertFalse(any("appearance" in args or args[0] == "status_bar" for args in self.calls))
+
+    def test_companion_relaunch_resets_text_size_and_preserves_home_captures(self):
+        self.execute()
+        device = self.devices[0]
+        terminate = self.calls.index(("terminate", device, "org.koltenberg.MotoLink"))
+        reset = self.calls.index(("ui", device, "content_size", "large"))
+        launch = self.calls.index(("launch", device, "org.koltenberg.MotoLink", "--companion-visual-check"))
+        self.assertLess(terminate, reset)
+        self.assertLess(reset, launch)
+        for name, mode, size in [
+            ("simulator-home.png", "home", "large"),
+            ("simulator-large-text.png", "home", "accessibility-large"),
+            ("simulator-companion.png", "companion", "large"),
+            ("simulator-companion-large-text.png", "companion", "accessibility-large"),
+        ]:
+            self.assertIn(f"mode:{mode}|size:{size}|".encode(), (self.output / name).read_bytes())
+
+    def test_companion_failure_retries_all_captures_without_publishing_partial_home(self):
+        def fail(args):
+            if args[0] == "io" and Path(args[-1]).name == "simulator-companion-large-text.png":
+                raise CAPTURE.CaptureError("companion screenshot failed")
+        self.failure = fail
+        self.output.mkdir()
+        for name in CAPTURE.SCREENSHOT_NAMES:
+            screenshot(self.output / name)
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "companion screenshot failed"):
+            self.execute()
+        self.assertEqual(len(self.devices), 2)
+        self.assertEqual(list(self.output.glob("*.png")), [])
+        for device in self.devices:
+            self.assertIn(("delete", device), self.calls)
+
+    def test_failed_companion_launch_cannot_capture_the_previous_home_process(self):
+        def fail(args):
+            if args[0] == "launch" and "--companion-visual-check" in args:
+                self.launch_result = ""
+            elif args[0] == "launch":
+                self.launch_result = "org.koltenberg.MotoLink: 1234"
+        self.failure = fail
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "Companion launch did not return a process ID"):
+            self.execute()
+        self.assertFalse(any(args[0] == "io" and "companion" in Path(args[-1]).name for args in self.calls))
+        self.assertEqual(list(self.output.glob("*.png")), [])
 
     def test_boot_timeout_gets_one_fresh_simulator_then_all_checks(self):
         def fail(args):

@@ -5,6 +5,7 @@ import UIKit
 struct ContentView: View {
     @ObservedObject var bluetooth: MotorcycleBluetooth
     @ObservedObject var rides: RideRecorder
+    @StateObject private var companion = CompanionStore()
     @State private var showHelp = false
     @State private var showDiagnostics = false
     @State private var justSaved = false
@@ -17,9 +18,14 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     header
+                    rideStatus
                     if !occupied { discovery }
                     connectionCard
-                    rideStatus
+                    CompanionHomeCard(store: companion, rides: rides)
+                    NavigationLink { RideStatisticsView(rides: rides) } label: {
+                        Label("Неделя и месяц", systemImage: "chart.bar")
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(18).pixelPanel()
+                    }.buttonStyle(.plain)
                     NavigationLink { RideHistoryView(rides: rides) } label: {
                         Label("Мои поездки", systemImage: "clock.arrow.circlepath")
                             .frame(maxWidth: .infinity, alignment: .leading).padding(18)
@@ -49,6 +55,7 @@ struct ContentView: View {
                 NavigationStack {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 20) {
+                            ConnectionTestSettingsView()
                             diagnosticControls
                             logSection
                         }.padding(20)
@@ -93,8 +100,19 @@ struct ContentView: View {
                 Spacer(minLength: 0)
                 if bluetooth.connecting { ProgressView() }
             }
-            MotorcycleDashboardView(bluetooth: bluetooth).equatable()
-            BikeActivityView(bluetooth: bluetooth).equatable()
+            SpeedComparisonView(bluetooth: bluetooth, rides: rides).equatable()
+            DisclosureGroup("Приборы и мотоцикл") {
+                MotorcycleDashboardView(bluetooth: bluetooth).equatable()
+                BikeActivityView(bluetooth: bluetooth).equatable()
+            }
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                if bluetooth.canRequestUserRescan(at: context.date) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Ожидаем мотоцикл. На остановке можно повторить поиск.").font(.caption).foregroundStyle(.secondary)
+                        Button("Повторить поиск") { bluetooth.requestUserRescan() }.buttonStyle(PixelButtonStyle())
+                    }
+                }
+            }
             if rides.active != nil && !rides.finishRequested {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     let state = TelemetryFreshness.state(connected: bluetooth.connected,

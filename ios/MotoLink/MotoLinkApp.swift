@@ -6,11 +6,22 @@ struct MotoLinkApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(bluetooth: delegate.controller.bluetooth, rides: delegate.controller.rides)
+            appContent
                 .preferredColorScheme(.dark)
                 .tint(MotoTheme.accent)
                 .font(MotoTheme.font(.body))
         }
+    }
+    @ViewBuilder private var appContent: some View {
+        #if targetEnvironment(simulator)
+        if ProcessInfo.processInfo.arguments.contains("--companion-visual-check") {
+            CompanionVisualCheckView(rides: delegate.controller.rides)
+        } else {
+            ContentView(bluetooth: delegate.controller.bluetooth, rides: delegate.controller.rides)
+        }
+        #else
+        ContentView(bluetooth: delegate.controller.bluetooth, rides: delegate.controller.rides)
+        #endif
     }
 }
 

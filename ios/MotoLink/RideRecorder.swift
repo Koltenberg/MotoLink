@@ -621,6 +621,11 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         append([RideRecord(kind: "diagnostic", timestamp: Date(), diagnostic: event)])
     }
 
+    func recordConnectionContext(_ detail: String) {
+        guard active != nil, !finishRequested else { return }
+        append([RideRecord(kind: "connection_context", timestamp: Date(), detail: detail)])
+    }
+
     func recordLifecycle(_ detail: String) {
         guard active != nil else { return }
         append([RideRecord(kind: "lifecycle", timestamp: Date(), detail: detail)])

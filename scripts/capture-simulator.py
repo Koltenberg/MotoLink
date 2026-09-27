@@ -12,6 +12,10 @@ import time
 from pathlib import Path
 
 
+SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
+                    "simulator-companion.png", "simulator-companion-large-text.png")
+
+
 class CaptureError(RuntimeError):
     pass
 
@@ -138,7 +142,24 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
         time.sleep(2)
         run("io", device, "screenshot", large, timeout=30, deadline=deadline)
         validate_png(large)
-        return home, large
+        # Launch arguments only take effect in a new process. Reset Dynamic Type
+        # so the companion's first image really checks the ordinary text size.
+        run("terminate", device, bundle_id, timeout=30, deadline=deadline)
+        run("ui", device, "content_size", "large", timeout=30, deadline=deadline)
+        launched = run("launch", device, bundle_id, "--companion-visual-check", timeout=45, deadline=deadline)
+        if not re.search(r":\s*[1-9][0-9]*\s*$", launched):
+            raise CaptureError(f"Companion launch did not return a process ID: {launched}")
+        print(f"Companion launched: {launched}", flush=True)
+        time.sleep(5)
+        companion = output / "simulator-companion.png"
+        companion_large = output / "simulator-companion-large-text.png"
+        run("io", device, "screenshot", companion, timeout=30, deadline=deadline)
+        validate_png(companion)
+        run("ui", device, "content_size", "accessibility-large", timeout=30, deadline=deadline)
+        time.sleep(2)
+        run("io", device, "screenshot", companion_large, timeout=30, deadline=deadline)
+        validate_png(companion_large)
+        return home, large, companion, companion_large
     finally:
         if device and re.fullmatch(r"[0-9A-Fa-f-]{36}", device):
             cleanup(device)
@@ -150,7 +171,7 @@ def capture(app, output):
         app_info = plistlib.load(info)
     bundle_id = app_info["CFBundleIdentifier"]
     output.mkdir(parents=True, exist_ok=True)
-    for name in ("simulator-home.png", "simulator-large-text.png"):
+    for name in SCREENSHOT_NAMES:
         (output / name).unlink(missing_ok=True)
     deadline = time.monotonic() + 480
     runtimes = json.loads(run("list", "runtimes", "-j", deadline=deadline))["runtimes"]
@@ -175,7 +196,7 @@ def capture(app, output):
                 continue
             for image in images:
                 shutil.copyfile(image, output / image.name)
-            print(f"Simulator capture passed on attempt {attempt}: app launched; both PNGs validated", flush=True)
+            print(f"Simulator capture passed on attempt {attempt}: home and companion launched; all four PNGs validated", flush=True)
             return
     raise CaptureError("Simulator visual validation failed: " + "; ".join(failures))
 
