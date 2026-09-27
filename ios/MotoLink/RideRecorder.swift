@@ -394,6 +394,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     @Published private(set) var finishRequested = false
     @Published private(set) var changingHistory = false
     @Published private(set) var historyError: String?
+    /// Synchronous boundary for a genuinely new ride; restoration/resume never invokes it.
+    var onNewRideStarted: ((UUID) -> Void)?
 
     private let location = CLLocationManager()
     private var archive: RideArchive?
@@ -782,6 +784,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             location.startUpdatingLocation()
         }
         status = "Сеанс записывается на iPhone · GPS и доступные данные Bluetooth"
+        if let id = active?.id { onNewRideStarted?(id) }
     }
 
     private func evaluateAutoStart() {
