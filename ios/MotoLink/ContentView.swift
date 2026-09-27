@@ -276,7 +276,7 @@ struct ContentView: View {
                     Text("Начнём запись при подключении. Сохраняем на iPhone без интернета.").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     ForEach(bluetooth.nearby) { device in
                         Button {
-                            bluetooth.connect(to: device.id, automaticallyReconnect: true)
+                            guard bluetooth.connect(to: device.id, automaticallyReconnect: true) else { return }
                             rides.setAutoRecord(recordAfterPairing)
                             selectedTab = 1
                             showDiscovery = false
@@ -286,7 +286,7 @@ struct ContentView: View {
                                 Text(device.name).font(MotoTheme.font(.headline))
                                 Spacer(); Image(systemName: "chevron.right")
                             }.padding(18).pixelPanel()
-                        }.buttonStyle(.plain)
+                        }.buttonStyle(.plain).disabled(!bluetooth.canScanNearby)
                     }
                     if !bluetooth.bluetoothPowered {
                         Text("Для поиска нужен Bluetooth. Разрешение можно изменить в настройках iPhone.")

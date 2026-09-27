@@ -232,8 +232,8 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         UserDefaults.standard.set(false, forKey: Key.paused)
     }
 
-    func connect(to identifier: UUID, automaticallyReconnect: Bool? = nil) {
-        guard bluetoothPowered, current == nil, let peripheral = found[identifier] else { return }
+    @discardableResult func connect(to identifier: UUID, automaticallyReconnect: Bool? = nil) -> Bool {
+        guard canScanNearby, let peripheral = found[identifier] else { return false }
         BLEDiscoverySelection.connect(identifier, automaticallyReconnect: automaticallyReconnect,
             currentPreference: autoReconnect, commit: { selectedID, enabled in
                 savedID = selectedID
@@ -248,6 +248,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             }, issue: { _ in
                 beginConnection(peripheral)
             })
+        return true
     }
 
     func connectRemembered() {
