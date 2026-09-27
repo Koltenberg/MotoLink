@@ -902,7 +902,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 }
 
-extension MotorcycleBluetooth: CBCentralManagerDelegate {
+// The version-specific adapter owns the Objective-C protocol conformance.
+// These are ordinary Swift forwarding targets, not another delegate surface.
+extension MotorcycleBluetooth {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         bluetoothPowered = central.state == .poweredOn
         guard bluetoothPowered else {
