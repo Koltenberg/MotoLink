@@ -163,6 +163,21 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         reconnectTask?.cancel()
     }
 
+    var canScanNearby: Bool {
+        bluetoothPowered && current == nil && UIApplication.shared.applicationState == .active
+    }
+
+    var scanUnavailableReason: String? {
+        if !bluetoothPowered { return status }
+        if current != nil {
+            return connected ? "Соединение уже активно. Состояние и свежесть данных показаны ниже."
+                : connecting ? "iPhone уже ожидает сохранённый байк. Для другого поиска сначала отмени ожидание в разделе «Поездка»."
+                : "Предыдущее соединение ещё завершается. Дождись завершения, затем повтори поиск."
+        }
+        if UIApplication.shared.applicationState != .active { return "Для поиска открой Moto Link на экране." }
+        return nil
+    }
+
     func scan() {
         guard bluetoothPowered, current == nil, UIApplication.shared.applicationState == .active else { return }
         stopScan()

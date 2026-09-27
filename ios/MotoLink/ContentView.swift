@@ -16,6 +16,8 @@ struct ContentView: View {
     @State private var showHelp = false
     @State private var showDiagnostics = false
     @State private var showDiscovery = false
+    @State private var showConnectionCheck = false
+    @State private var connectionCheckOwnsScan = false
     @State private var justSaved = false
     @State private var recordAfterPairing = true
     private let accent = MotoTheme.accent
@@ -59,6 +61,7 @@ struct ContentView: View {
         .sheet(isPresented: $showProfile) { BikeProfileEditor(store: companion) }
         .sheet(isPresented: $showHelp) { help }
         .sheet(isPresented: $showDiscovery) { discoverySheet }
+        .sheet(isPresented: $showConnectionCheck) { connectionCheck }
         .sheet(isPresented: $showDiagnostics) { diagnostics }
         .sheet(item: $rides.exportedFiles) { files in ShareSheet(items: files.urls) }
         .onAppear {
@@ -74,11 +77,11 @@ struct ContentView: View {
         }
         .onChange(of: rides.active?.id) { id in
             if id != nil { selectedTab = 1 }
-            updateScreenAwake()
+            updateScreenAwake(recording: id != nil)
         }
         .onChange(of: bluetooth.connected) { connected in if connected { selectedTab = 1 } }
-        .onChange(of: scenePhase) { _ in updateScreenAwake() }
-        .onChange(of: keepScreenOn) { _ in updateScreenAwake() }
+        .onChange(of: scenePhase) { phase in updateScreenAwake(phase: phase) }
+        .onChange(of: keepScreenOn) { enabled in updateScreenAwake(keepingScreenOn: enabled) }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
     }
 
@@ -96,6 +99,18 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: compact ? 8 : 16) {
                     if compact && hasRideDisplay { compactConnectionStatus }
                     else { connectionStatus }
+                    if !previewRide {
+                        HStack {
+                            Button { showConnectionCheck = true } label: {
+                                Label("Проверить связь", systemImage: "antenna.radiowaves.left.and.right")
+                            }
+                            Spacer(minLength: 8)
+                            if !occupied && rides.active == nil && bluetooth.hasRememberedDevice {
+                                Button("Другой байк") { showDiscovery = true; bluetooth.scan() }
+                                    .disabled(!bluetooth.canScanNearby)
+                            }
+                        }.font(MotoTheme.font(.subheadline))
+                    }
                     if hasRideDisplay {
                         if compact {
                             HStack(alignment: .top, spacing: 18) {
@@ -114,8 +129,7 @@ struct ContentView: View {
                             rideStatus
                         }
                     } else {
-                        Image("BikeSpriteDetail").resizable().interpolation(.none).scaledToFit()
-                            .frame(maxWidth: .infinity, maxHeight: 185).accessibilityHidden(true)
+                        BikeArtworkView()
                         Text(bluetooth.connecting ? "Ждём твой байк" : "Поехали?")
                             .font(MotoTheme.font(.title)).foregroundStyle(.primary)
                         Text(bluetooth.connecting
@@ -243,6 +257,9 @@ struct ContentView: View {
                     Text("Включи зажигание").font(MotoTheme.font(.title2))
                     Text("Держи iPhone рядом с байком. Выбери его в списке — повторно выбирать не понадобится.")
                         .foregroundStyle(MotoTheme.secondary)
+                    if let reason = bluetooth.scanUnavailableReason {
+                        Text(reason).font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
+                    }
                     if bluetooth.scanning {
                         TimelineView(.periodic(from: .now, by: 1)) { context in
                             HStack { ProgressView(); Text(bluetooth.scanProgress(at: context.date)) }
@@ -253,7 +270,7 @@ struct ContentView: View {
                             Text(bluetooth.scanFoundNothing ? "Мотоцикл не найден. Проверь зажигание и доступность Bluetooth на приборке." : "Готовы найти мотоцикл рядом.")
                         }
                         Button("Искать рядом") { bluetooth.scan() }
-                            .buttonStyle(PixelButtonStyle(prominent: true)).disabled(!bluetooth.bluetoothPowered)
+                            .buttonStyle(PixelButtonStyle(prominent: true)).disabled(!bluetooth.canScanNearby)
                     }
                     Toggle("Записывать поездки автоматически", isOn: $recordAfterPairing)
                     Text("Начнём запись при подключении. Сохраняем на iPhone без интернета.").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
@@ -286,6 +303,72 @@ struct ContentView: View {
         .onDisappear { bluetooth.stopScan() }
     }
 
+    private var connectionCheck: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("Проверяем Bluetooth и видимость байка рядом.")
+                        .font(MotoTheme.font(.headline))
+                    Text("Проверка не подключает другой мотоцикл и не меняет настройки автозаписи. Уже включённое автоподключение продолжает работать.")
+                        .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        VStack(alignment: .leading, spacing: 12) {
+                            LabeledContent("Bluetooth", value: bluetooth.bluetoothPowered ? "Доступен" : "Недоступен")
+                            LabeledContent("Связь", value: bluetooth.ready ? "Подключён" : bluetooth.connected
+                                ? "Готовим данные" : bluetooth.connecting ? "Ожидаем байк" : "Нет подключения")
+                            Text("Данные байка: " + dataFreshness(bluetooth.lastStreamAt, at: context.date))
+                                .foregroundStyle(MotoTheme.secondary)
+                            if bluetooth.scanning {
+                                HStack { ProgressView(); Text(bluetooth.scanProgress(at: context.date)) }
+                            }
+                        }.font(MotoTheme.font(.subheadline)).padding(16).pixelPanel()
+                    }
+                    if let reason = bluetooth.scanUnavailableReason {
+                        Text(reason).font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
+                    }
+                    if !bluetooth.connected {
+                        Text("Мотоциклы рядом").font(MotoTheme.font(.title3))
+                        ForEach(bluetooth.nearby) { device in
+                            Label(device.name, systemImage: "motorcycle")
+                                .font(MotoTheme.font(.headline)).padding(14).frame(maxWidth: .infinity, alignment: .leading).pixelPanel()
+                        }
+                        if bluetooth.nearby.isEmpty && !bluetooth.scanning && connectionCheckOwnsScan {
+                            Text("Байк не найден. Проверь зажигание и доступность Bluetooth на приборке.")
+                                .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
+                        }
+                        Button(bluetooth.scanning ? "Ищем рядом…" : "Проверить ещё раз") { checkVisibility() }
+                            .buttonStyle(PixelButtonStyle(prominent: true))
+                            .disabled(bluetooth.scanning || !bluetooth.canScanNearby)
+                        Text("Найденный байк виден по Bluetooth. Это ещё не подтверждение совместимости или получения показателей. Для подключения выбери его в разделе «Поездка».")
+                            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    }
+                }.padding(20)
+            }.background(MotoTheme.background)
+                .refreshable { checkVisibility() }
+                .navigationTitle("Проверить связь").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showConnectionCheck = false } } }
+        }.onAppear { checkVisibility() }
+            .onDisappear {
+                if connectionCheckOwnsScan { bluetooth.stopScan() }
+                connectionCheckOwnsScan = false
+            }
+    }
+
+    private func checkVisibility() {
+        guard bluetooth.canScanNearby, !bluetooth.scanning else { return }
+        connectionCheckOwnsScan = true
+        bluetooth.scan()
+    }
+
+    private func dataFreshness(_ date: Date?, at now: Date) -> String {
+        guard let date else { return "пока не поступали" }
+        let age = now.timeIntervalSince(date)
+        guard age.isFinite, age >= 0 else { return "время обновления неизвестно" }
+        if age < 3 { return "поступают сейчас" }
+        if age < 60 { return "последнее обновление \(Int(age)) с назад" }
+        return "нет новых данных \(Int(min(age / 60, 999_999))) мин"
+    }
+
     private var settings: some View {
         NavigationStack {
             List {
@@ -296,7 +379,7 @@ struct ContentView: View {
                     Button("Выбрать другой мотоцикл") {
                         showSettings = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showDiscovery = true; bluetooth.scan() }
-                    }.disabled(occupied || rides.active != nil)
+                    }.disabled(!bluetooth.canScanNearby || rides.active != nil)
                 }
                 Section {
                     Toggle("Подключаться автоматически", isOn: Binding(get: { bluetooth.autoReconnect }, set: bluetooth.setAutoReconnect)).disabled(!bluetooth.hasRememberedDevice)
@@ -346,6 +429,8 @@ struct ContentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    Label("Журнал и сведения iPhone доступны без мотоцикла.", systemImage: "iphone")
+                        .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                     ConnectionTestSettingsView()
                     diagnosticControls
                     logSection
@@ -356,15 +441,22 @@ struct ContentView: View {
         }
     }
 
-    private func updateScreenAwake() {
-        UIApplication.shared.isIdleTimerDisabled = keepScreenOn && rides.active != nil && scenePhase == .active
+    private func updateScreenAwake(phase: ScenePhase? = nil, keepingScreenOn: Bool? = nil,
+                                  recording: Bool? = nil) {
+        UIApplication.shared.isIdleTimerDisabled = (keepingScreenOn ?? keepScreenOn)
+            && (recording ?? (rides.active != nil)) && (phase ?? scenePhase) == .active
     }
 
     private var diagnosticControls: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Проверка каналов").font(MotoTheme.font(.title3))
-            Text("Событий в поездке: \(rides.active?.rawEventCount ?? 0)")
+            Text(rides.active != nil ? "Событий в поездке: \(rides.active?.rawEventCount ?? 0)"
+                 : "Последних событий в памяти: \(bluetooth.events.count)")
                 .font(MotoTheme.font(.caption).monospacedDigit()).foregroundStyle(MotoTheme.secondary)
+            if !bluetooth.ready {
+                Text("Запросы показателей станут доступны после подключения к байку. Журнал ниже можно открыть и сохранить сейчас.")
+                    .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
+            }
             if let last = bluetooth.lastPacketAt {
                 Text("Последние данные: \(last.formatted(date: .omitted, time: .standard))")
                     .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
@@ -377,7 +469,7 @@ struct ContentView: View {
                 .disabled(!bluetooth.ready || bluetooth.busy || bluetooth.diagnosticRunning)
             if bluetooth.diagnosticRunning {
                 HStack { ProgressView(); Text(bluetooth.diagnosticStatus).font(MotoTheme.font(.caption)) }
-            } else { Text(bluetooth.diagnosticStatus).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary) }
+            } else if bluetooth.ready { Text(bluetooth.diagnosticStatus).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary) }
             Text("Показатели остаются экспериментальными. Поле впрыска сохраняется без единиц: его смысл и масштаб ещё проверяем. Все пакеты сохраняются даже без расшифровки.")
                 .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
             DisclosureGroup("Отдельные запросы") {
@@ -592,7 +684,8 @@ struct BikeActivityView: View, Equatable {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            TimelineView(.animation(minimumInterval: 0.25, paused: !animating)) { context in
+            BikeArtworkFrame(compact: compact) {
+              TimelineView(.animation(minimumInterval: 0.25, paused: !animating)) { context in
                 let phase = animating ? Int(context.date.timeIntervalSince1970 * 4) % 8 : 0
                 ZStack {
                     Canvas { canvas, size in
@@ -612,8 +705,8 @@ struct BikeActivityView: View, Equatable {
                         drawEffects(context: canvas, size: size, phase: phase)
                     }
                 }.aspectRatio(2, contentMode: .fit)
+              }
             }
-            .frame(maxWidth: 360)
             .accessibilityHidden(true)
             Text(snapshot.label).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
             if !compact { HStack(spacing: 4) {
@@ -630,9 +723,9 @@ struct BikeActivityView: View, Equatable {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear { visible = true; updateRefreshTimer() }
+        .onAppear { visible = true; updateRefreshTimer(phase: scenePhase) }
         .onDisappear { visible = false; stopRefreshTimer() }
-        .onChange(of: scenePhase) { _ in updateRefreshTimer() }
+        .onChange(of: scenePhase) { phase in updateRefreshTimer(phase: phase) }
     }
 
     private func stopRefreshTimer() {
@@ -640,11 +733,13 @@ struct BikeActivityView: View, Equatable {
         refreshTimer = nil
     }
 
-    private func updateRefreshTimer() {
+    private func updateRefreshTimer(phase: ScenePhase) {
         stopRefreshTimer()
         sample()
-        guard visible && scenePhase == .active else { return }
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in sample() }
+        guard visible && phase == .active else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { _ in sample() }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
     }
 
     private func sample() {

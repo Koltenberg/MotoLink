@@ -34,9 +34,9 @@ struct SpeedComparisonView: View, Equatable {
                     .font(MotoTheme.font(.caption).monospacedDigit()).foregroundStyle(MotoTheme.secondary)
             }
         }
-        .onAppear { visible = true; updateTimer() }
+        .onAppear { visible = true; updateTimer(for: scenePhase) }
         .onDisappear { visible = false; timer?.invalidate(); timer = nil }
-        .onChange(of: scenePhase) { _ in updateTimer() }
+        .onChange(of: scenePhase) { phase in updateTimer(for: phase) }
     }
     @ViewBuilder private func reading(_ title: String, _ speed: Double?) -> some View {
         if compact {
@@ -60,8 +60,9 @@ struct SpeedComparisonView: View, Equatable {
             }.frame(maxWidth: .infinity, alignment: .leading).padding(12).pixelPanel(accent: true)
         }
     }
-    private func sample() {
+    private func sample(fromTimer: Bool = false) {
         #if targetEnvironment(simulator)
+        defer { ProductVisualRefreshProbe.sample(panel: "speed", fromTimer: fromTimer) }
         if preview { gps = 64; bike = 68; difference = 4; return }
         #endif
         let now = Date()
@@ -78,12 +79,14 @@ struct SpeedComparisonView: View, Equatable {
            abs(gpsTime.timeIntervalSince(bikeTime)) <= 2 { difference = bike - gps }
         else { difference = nil }
     }
-    private func updateTimer() {
+    private func updateTimer(for phase: ScenePhase) {
         timer?.invalidate(); timer = nil
         guard visible else { return }
         sample()
-        guard scenePhase == .active else { return }
-        let refresh = Timer(timeInterval: 1, repeats: true) { _ in sample() }
+        // Use the callback's new phase, not the previous View captured by the
+        // iOS 16-compatible onChange overload.
+        guard phase == .active else { return }
+        let refresh = Timer(timeInterval: 1, repeats: true) { _ in sample(fromTimer: true) }
         timer = refresh; RunLoop.main.add(refresh, forMode: .common)
     }
 }

@@ -40,6 +40,22 @@ final class CompanionStore: ObservableObject {
         } catch { self.error = error.localizedDescription; return false }
     }
 
+    /// Pull-to-refresh rereads our local atomic file, without Bluetooth or a server.
+    /// Decode and validate first; a failed read never replaces the visible records.
+    @MainActor func refreshFromDisk() {
+        guard let file, FileManager.default.fileExists(atPath: file.path) else { return }
+        do {
+            let refreshed = try JSONDecoder().decode(CompanionData.self, from: Data(contentsOf: file))
+            try refreshed.validate()
+            data = refreshed
+            readable = true
+            error = nil
+            scheduleReminders()
+        } catch {
+            self.error = "Не удалось перечитать данные мотоцикла: \(error.localizedDescription). Текущие записи сохранены."
+        }
+    }
+
     func enableReminders() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             DispatchQueue.main.async {
@@ -107,6 +123,30 @@ private func numberText(_ value: Double?) -> String {
     value.map { String($0) } ?? ""
 }
 
+private func fuelAmountText(_ entry: FuelEntry) -> String {
+    entry.liters.map { String(format: "%.1f л", $0) } ?? "объём не указан"
+}
+
+private func serviceStatusColor(_ task: ServiceTask, odometerKm: Double?) -> Color {
+    if task.isDue(odometerKm: odometerKm) { return .red }
+    if task.isDueSoon(odometerKm: odometerKm) {
+        let progress: Double
+        if let start = task.rangeStartOdometerKm, let end = task.dueOdometerKm,
+           let odometerKm, end > start {
+            progress = min(1, max(0, (odometerKm - start) / (end - start)))
+        } else { progress = 0 }
+        // Keep light-theme text dark enough while the selected range moves
+        // from amber toward red. The written mileage remains the primary cue.
+        return Color(UIColor { traits in
+            let p = CGFloat(progress)
+            return traits.userInterfaceStyle == .dark
+                ? UIColor(red: 1, green: 0.82 - 0.59 * p, blue: 0.2 - 0.01 * p, alpha: 1)
+                : UIColor(red: 0.49 + 0.31 * p, green: 0.35 - 0.2 * p, blue: 0.1 * p, alpha: 1)
+        })
+    }
+    return MotoTheme.secondary
+}
+
 
 /// Reusable idle reminder; all readings come from the user's garage entries.
 struct ServiceReminderCard: View {
@@ -146,6 +186,7 @@ struct ServiceReminderCard: View {
                           ? "Скоро обслуживание" : "Следующее обслуживание"),
                           systemImage: "wrench.and.screwdriver")
                         .font(MotoTheme.font(.subheadline))
+                        .foregroundStyle(serviceStatusColor(task, odometerKm: store.data.currentOdometerKm))
                     Text(task.title).font(MotoTheme.font(.headline))
                     ServiceScheduleText(task: task, odometerKm: store.data.currentOdometerKm)
                 }
@@ -164,14 +205,28 @@ private struct ServiceScheduleText: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if let next = task.dueOdometerKm {
-                Text(String(format: "Следующее — на %.0f км", next))
+                Text(task.rangeStartOdometerKm.map { String(format: "Обслужить на %.0f–%.0f км", $0, next) }
+                     ?? String(format: "Следующее — на %.0f км", next))
                     .font(MotoTheme.font(.subheadline))
+            }
+            if let start = task.rangeStartOdometerKm, let odometerKm, odometerKm >= start,
+               !task.isDue(odometerKm: odometerKm) {
+                Text("Можно обслужить · выбранный диапазон начался")
+                    .font(MotoTheme.font(.caption))
+                    .foregroundStyle(serviceStatusColor(task, odometerKm: odometerKm))
             }
             if let remaining = task.kilometersRemaining(odometerKm: odometerKm) {
                 Text(remaining > 0
-                     ? String(format: "Осталось %.0f км по последнему пробегу", remaining)
+                     ? String(format: task.intervalStartKm == nil
+                         ? "Осталось %.0f км по последнему пробегу" : "До конца диапазона — %.0f км", remaining)
                      : (remaining < 0 ? String(format: "Срок пройден на %.0f км", -remaining) : "Пробег для обслуживания достигнут"))
-                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    .font(MotoTheme.font(.caption)).foregroundStyle(serviceStatusColor(task, odometerKm: odometerKm))
+            }
+            if let progress = task.mileageProgress(odometerKm: odometerKm) {
+                ProgressView(value: progress)
+                    .tint(serviceStatusColor(task, odometerKm: odometerKm))
+                    .accessibilityLabel("Пробег до обслуживания")
+                    .accessibilityValue(String(format: "%.0f процентов интервала", progress * 100))
             }
             if let date = task.dueDate() {
                 Text("По дате — до " + date.formatted(date: .abbreviated, time: .omitted))
@@ -218,8 +273,7 @@ struct CompanionView: View {
                         Button { editingBike = true } label: { Image(systemName: "pencil") }
                             .accessibilityLabel("Изменить название и пробег")
                     }
-                    Image("BikeSpriteDetail").resizable().interpolation(.none).scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: 150).accessibilityHidden(true)
+                    BikeArtworkView()
                     Text(store.data.currentOdometerKm.map { String(format: "%.0f км", $0) } ?? "Пробег пока не указан")
                         .font(MotoTheme.font(.title2))
                     Text("Последний известный пробег с приборки")
@@ -258,19 +312,23 @@ struct CompanionView: View {
             }
             PixelSection("Заправки") {
                 Button { newFuel = true } label: { Label("Добавить заправку", systemImage: "fuelpump") }
-                if let consumption = store.data.fuelConsumptions.last {
+                if let consumption = store.data.latestFullTankConsumption {
                     LabeledContent("Расход между полными баками",
                                    value: String(format: "%.2f л/100 км", consumption.litersPer100Km))
                         .monospacedDigit()
                 }
                 if let fuel = store.data.fuelEntries.max(by: { $0.date < $1.date }) {
                     Text("Последняя — " + fuel.date.formatted(date: .abbreviated, time: .omitted)
-                         + String(format: " · %.1f л", fuel.liters))
+                         + " · " + fuelAmountText(fuel))
                         .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                     NavigationLink("Все заправки") { FuelHistoryView(store: store) }
                 } else {
-                    Text("После двух полных баков появится расход. Для точности записывай каждую заправку, включая доливы.")
+                    Text("Полный бак можно сохранить без литров. Для расчёта расхода записывай объём каждой заправки между полными баками.")
                         .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
+                }
+                if !store.data.fuelEntries.isEmpty, store.data.latestFullTankConsumption == nil {
+                    Text("Для последнего полного бака расход пока не рассчитан. Нужен полный бак в начале и известный объём всех следующих заправок до нового полного бака.")
+                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }
             }
             if let error = store.error { Section { Text(error).foregroundStyle(MotoTheme.accent) } }
@@ -279,6 +337,7 @@ struct CompanionView: View {
         .scrollContentBackground(.hidden).background(MotoTheme.background)
         .navigationTitle("Гараж")
         .navigationBarTitleDisplayMode(.inline)
+        .refreshable { await store.refreshFromDisk() }
         .sheet(isPresented: $editingBike) { BikeProfileEditor(store: store) }
         .sheet(isPresented: $newFuel) { FuelEditor(store: store, entry: nil) }
         .sheet(isPresented: $newService) { ServiceEditor(store: store, task: nil) }
@@ -361,7 +420,7 @@ private struct FuelHistoryView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(fuel.date.formatted(date: .abbreviated, time: .shortened))
                             .font(MotoTheme.font(.body))
-                        Text(String(format: "%.1f л · %.0f км", fuel.liters, fuel.odometerKm)
+                        Text(fuelAmountText(fuel) + String(format: " · %.0f км", fuel.odometerKm)
                              + (fuel.fullTank ? " · полный бак" : " · долив"))
                             .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                         if let cost = fuel.cost { Text(String(format: "%.0f ₽", cost)).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary) }
@@ -393,10 +452,12 @@ struct FuelEditor: View {
             Form {
                 PixelDateField(title: "Дата", selection: $date, includesTime: true)
                 CompanionNumberField(title: "Одометр, км", value: $odometer)
-                CompanionNumberField(title: "Залито, л", value: $liters)
-                CompanionNumberField(title: "Стоимость, ₽ · необязательно", value: $cost)
                 Toggle("До полного бака", isOn: $full)
-                Text("Для расчёта расхода нужны все заправки между двумя полными баками.")
+                CompanionNumberField(title: full ? "Залито, л · необязательно" : "Залито, л", value: $liters)
+                CompanionNumberField(title: "Стоимость, ₽ · необязательно", value: $cost)
+                Text(full
+                     ? "Не помнишь литры — оставь поле пустым. Сохраним полный бак и пробег. Объём бака не подставляем: он не равен количеству залитого топлива."
+                     : "Для долива укажи залитые литры. Для расхода нужны все заправки между двумя полными баками.")
                     .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 if entry != nil { Button("Удалить заправку", role: .destructive) { delete = true } }
                 if let error = store.error { Text(error).foregroundStyle(MotoTheme.accent) }
@@ -404,12 +465,13 @@ struct FuelEditor: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.font(MotoTheme.font(.body)) }
                     ToolbarItem(placement: .confirmationAction) { Button("Сохранить") {
-                        guard let km = decimal(odometer), let l = decimal(liters),
+                        guard let km = decimal(odometer),
+                              (full && liters.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || decimal(liters) != nil,
                               cost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || decimal(cost) != nil else {
                             store.error = "Проверь пробег, литры и стоимость: нужны числа."; return
                         }
                         let fuel = FuelEntry(id: entry?.id ?? UUID(), date: date, odometerKm: km,
-                                             liters: l, cost: decimal(cost), fullTank: full)
+                                             liters: decimal(liters), cost: decimal(cost), fullTank: full)
                         if store.save({ data in
                             data.fuelEntries.removeAll { $0.id == fuel.id }; data.fuelEntries.append(fuel)
                         }) { dismiss() }
@@ -439,14 +501,18 @@ struct ServiceEditor: View {
     @State private var calendarInterval = false
     @State private var odometer = ""
     @State private var km = ""
+    @State private var usesRange = false
+    @State private var startKm = ""
     @State private var months = ""
     @State private var delete = false
     @State private var prepared = false
 
     private var preview: ServiceTask? {
-        guard let reading = decimal(odometer) else { return nil }
+        guard let reading = decimal(odometer),
+              !usesRange || (decimal(startKm) != nil && decimal(km) != nil) else { return nil }
         return ServiceTask(title: title, lastDoneAt: knowsDate ? date : nil,
                            lastDoneOdometerKm: reading, intervalKm: decimal(km),
+                           intervalStartKm: usesRange ? decimal(startKm) : nil,
                            intervalMonths: calendarInterval ? Int(months) : nil)
     }
 
@@ -471,7 +537,15 @@ struct ServiceEditor: View {
                     }
                 }
                 PixelSection("Как часто повторять") {
-                    CompanionNumberField(title: "Интервал, км", example: "Например, 3 000", value: $km)
+                    Toggle("Диапазон пробега", isOn: $usesRange)
+                    if usesRange {
+                        CompanionNumberField(title: "От, км после обслуживания", example: "Например, 3 000", value: $startKm)
+                        CompanionNumberField(title: "До, км после обслуживания", example: "Например, 4 000", value: $km)
+                        Text("Жёлтое напоминание — с начала диапазона, красное — когда достигнут конец. Интервал отсчитывается от последнего обслуживания.")
+                            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    } else {
+                        CompanionNumberField(title: "Интервал, км", example: "Например, 3 000", value: $km)
+                    }
                     Toggle("Учитывать срок в месяцах", isOn: $calendarInterval)
                     if calendarInterval {
                         CompanionNumberField(title: "Интервал, месяцев", example: "Например, 12", value: $months, wholeNumber: true)
@@ -497,6 +571,7 @@ struct ServiceEditor: View {
                     knowsDate = task?.lastDoneAt != nil; calendarInterval = task?.intervalMonths != nil
                     odometer = numberText(task?.lastDoneOdometerKm)
                     km = numberText(task?.intervalKm); months = task?.intervalMonths.map(String.init) ?? ""
+                    usesRange = task?.intervalStartKm != nil; startKm = numberText(task?.intervalStartKm)
                 }
                 .pixelConfirmationDialog("Удалить это обслуживание?", isPresented: $delete, titleVisibility: .visible) {
                     Button("Удалить", role: .destructive) {
@@ -509,12 +584,14 @@ struct ServiceEditor: View {
     private func save() {
         guard let odo = decimal(odometer),
               km.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || decimal(km) != nil,
+              !usesRange || (decimal(startKm) != nil && decimal(km) != nil),
               !calendarInterval || Int(months) != nil else {
             store.error = "Проверь пробег и интервалы."; return
         }
         let value = ServiceTask(id: task?.id ?? UUID(), title: title.trimmingCharacters(in: .whitespacesAndNewlines),
                                 lastDoneAt: knowsDate ? date : nil, lastDoneOdometerKm: odo,
-                                intervalKm: decimal(km), intervalMonths: calendarInterval ? Int(months) : nil)
+                                intervalKm: decimal(km), intervalStartKm: usesRange ? decimal(startKm) : nil,
+                                intervalMonths: calendarInterval ? Int(months) : nil)
         if store.save({ data in
             if let i = data.serviceTasks.firstIndex(where: { $0.id == value.id }) { data.serviceTasks[i] = value }
             else { data.serviceTasks.append(value) }
@@ -554,6 +631,7 @@ struct RideStatisticsView: View {
             }
             Text("Расстояние рассчитано по принятым точкам GPS. Пропуски не входят в километраж; это не одометр мотоцикла.").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
         }.font(MotoTheme.font(.body)).scrollContentBackground(.hidden).background(MotoTheme.background).navigationTitle("Сводка поездок")
+        .refreshable { await rides.refreshHistory() }
     }
     private func summary(_ title: String, _ group: [RideSummary]) -> some View {
         PixelSection(title) {

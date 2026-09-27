@@ -323,4 +323,197 @@ final class MotorcycleCompanionTests: XCTestCase {
         XCTAssertFalse(task.isDueSoon(odometerKm: nil, on: due, calendar: calendar))
         XCTAssertTrue(task.isDue(odometerKm: nil, on: due, calendar: calendar))
     }
+
+    func testLegacyFuelNumbersAndFixedServiceIntervalDecodeUnchanged() throws {
+        let json = Data("""
+        {"id":"A0587EA3-CB3F-443A-81E2-9BA4CB4D32BD","bikeName":"Тахиро",
+         "odometerKm":25000,"fuelEntries":[
+          {"id":"0593799B-F04D-4DE3-A32A-6D1F504ED061","date":721692800,
+           "odometerKm":25000,"liters":9.25,"cost":650,"fullTank":true}],
+         "serviceTasks":[{"id":"023C064C-2CA3-45CB-8F03-D6E8C8D8E177",
+          "title":"Масло","lastDoneOdometerKm":23000,"intervalKm":3000}]}
+        """.utf8)
+        let restored = try JSONDecoder().decode(CompanionData.self, from: json)
+        try restored.validate()
+        let fuel = try XCTUnwrap(restored.fuelEntries.first)
+        XCTAssertEqual(fuel.liters, 9.25)
+        XCTAssertEqual(fuel.cost, 650)
+        XCTAssertEqual(fuel.date, epoch)
+        let task = try XCTUnwrap(restored.serviceTasks.first)
+        XCTAssertNil(task.intervalStartKm)
+        XCTAssertEqual(task.dueOdometerKm, 26_000)
+        XCTAssertFalse(task.isDueSoon(odometerKm: 25_699, on: epoch))
+        XCTAssertTrue(task.isDueSoon(odometerKm: 25_700, on: epoch))
+        XCTAssertEqual(try JSONDecoder().decode(CompanionData.self, from: JSONEncoder().encode(restored)), restored)
+    }
+
+    func testUnknownFullTankRoundTripsWithoutInventingLitersOrCost() throws {
+        for cost in [nil, 900.0] as [Double?] {
+            let entry = FuelEntry(date: epoch, odometerKm: 25_000, cost: cost)
+            try entry.validate()
+            let encoded = try JSONEncoder().encode(entry)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            XCTAssertNil(object["liters"])
+            XCTAssertEqual(try JSONDecoder().decode(FuelEntry.self, from: encoded), entry)
+        }
+        for litersField in ["", "\"liters\":null,"] {
+            let json = Data("""
+            {"id":"0593799B-F04D-4DE3-A32A-6D1F504ED061","date":721692800,
+             "odometerKm":25000,\(litersField)"fullTank":true}
+            """.utf8)
+            let entry = try JSONDecoder().decode(FuelEntry.self, from: json)
+            try entry.validate()
+            XCTAssertNil(entry.liters)
+            XCTAssertNil(entry.cost)
+        }
+    }
+
+    func testUnknownLitersRequireFullTankButKnownPartialIsValid() {
+        XCTAssertThrowsError(try FuelEntry(date: epoch, odometerKm: 1, fullTank: false).validate()) {
+            XCTAssertEqual($0 as? CompanionValidationError, .invalidLiters)
+        }
+        XCTAssertNoThrow(try FuelEntry(date: epoch, odometerKm: 1, liters: 2.5, fullTank: false).validate())
+        for invalid in [0.0, -1, .nan, .infinity] {
+            XCTAssertThrowsError(try FuelEntry(date: epoch, odometerKm: 1, liters: invalid).validate())
+        }
+        for invalidCost in [-1.0, .nan, .infinity] {
+            XCTAssertThrowsError(try FuelEntry(date: epoch, odometerKm: 1, cost: invalidCost).validate())
+        }
+    }
+
+    func testUnknownStartingFullTankStillProvidesConsumptionBaseline() throws {
+        let start = FuelEntry(date: epoch, odometerKm: 1000)
+        let data = CompanionData(fuelEntries: [start, fill(1, 1100, 3, full: false), fill(2, 1300, 6)])
+        try data.validate()
+        let consumption = try XCTUnwrap(data.latestFullTankConsumption)
+        XCTAssertEqual(consumption.fromEntryID, start.id)
+        XCTAssertEqual(consumption.liters, 9)
+        XCTAssertEqual(consumption.litersPer100Km, 3, accuracy: 0.00001)
+    }
+
+    func testUnknownFullFillBreaksCalculationAndRestartsAtItsFullLevel() throws {
+        let first = fill(0, 1000, 10)
+        let knownFull = fill(1, 1200, 6)
+        let unknownFull = FuelEntry(date: epoch.addingTimeInterval(3 * 86_400), odometerKm: 1500)
+        var data = CompanionData(fuelEntries: [first, knownFull, fill(2, 1300, 4, full: false), unknownFull])
+        try data.validate()
+        XCTAssertEqual(data.fuelConsumptions.count, 1)
+        XCTAssertEqual(data.fuelConsumptions.first?.toEntryID, knownFull.id)
+        XCTAssertNil(data.latestFullTankConsumption, "Older valid consumption must not appear to describe the unknown ending fill")
+        try data.addFuelEntry(fill(4, 1600, 3, full: false))
+        XCTAssertNil(data.latestFullTankConsumption)
+        let nextFull = fill(5, 1800, 9)
+        try data.addFuelEntry(nextFull)
+        let latest = try XCTUnwrap(data.latestFullTankConsumption)
+        XCTAssertEqual(data.fuelConsumptions.count, 2)
+        XCTAssertEqual(latest.fromEntryID, unknownFull.id)
+        XCTAssertEqual(latest.toEntryID, nextFull.id)
+        XCTAssertEqual(latest.distanceKm, 300)
+        XCTAssertEqual(latest.liters, 12, "Liters before the unknown full fill must not cross its boundary")
+    }
+
+    func testEditingUnknownAmountRecalculatesWithoutChangingManualOdometer() throws {
+        let unknown = FuelEntry(date: epoch.addingTimeInterval(86_400), odometerKm: 1300)
+        var data = CompanionData(odometerKm: 1400, fuelEntries: [fill(0, 1000, 12), unknown])
+        XCTAssertNil(data.latestFullTankConsumption)
+        data.fuelEntries[1].liters = 9
+        try data.validate()
+        XCTAssertEqual(data.latestFullTankConsumption?.litersPer100Km, 3)
+        data.fuelEntries[1].liters = nil
+        try data.validate()
+        XCTAssertNil(data.latestFullTankConsumption)
+        XCTAssertEqual(data.currentOdometerKm, 1400)
+        XCTAssertEqual(data.fuelEntries[1].id, unknown.id)
+    }
+
+    func testServiceRangeWarnsAtMinimumAndIsDueAtMaximumWithoutDate() throws {
+        let task = ServiceTask(title: "Масло", lastDoneOdometerKm: 23_000,
+                               intervalKm: 4_000, intervalStartKm: 3_000)
+        try task.validate()
+        XCTAssertNil(task.lastDoneAt)
+        XCTAssertNil(task.dueDate())
+        XCTAssertEqual(task.rangeStartOdometerKm, 26_000)
+        XCTAssertEqual(task.dueOdometerKm, 27_000)
+        for reading in [23_000.0, 25_700, 25_999] {
+            XCTAssertFalse(task.isDueSoon(odometerKm: reading, on: epoch))
+            XCTAssertFalse(task.isDue(odometerKm: reading, on: epoch))
+        }
+        for reading in [26_000.0, 26_999] {
+            XCTAssertTrue(task.isDueSoon(odometerKm: reading, on: epoch))
+            XCTAssertFalse(task.isDue(odometerKm: reading, on: epoch))
+        }
+        for reading in [27_000.0, 28_000] {
+            XCTAssertFalse(task.isDueSoon(odometerKm: reading, on: epoch))
+            XCTAssertTrue(task.isDue(odometerKm: reading, on: epoch))
+        }
+        XCTAssertEqual(task.kilometersRemaining(odometerKm: 26_500), 500)
+        XCTAssertFalse(task.isDueSoon(odometerKm: nil, on: epoch))
+    }
+
+    func testServiceRangeMileageProgressClampsAndRequiresKnownReading() throws {
+        let task = ServiceTask(title: "Масло", lastDoneOdometerKm: 23_000,
+                               intervalKm: 4_000, intervalStartKm: 3_000)
+        XCTAssertEqual(task.mileageProgress(odometerKm: 22_000), 0)
+        XCTAssertEqual(task.mileageProgress(odometerKm: 23_000), 0)
+        XCTAssertEqual(task.mileageProgress(odometerKm: 26_000), 0.75)
+        XCTAssertEqual(task.mileageProgress(odometerKm: 27_000), 1)
+        XCTAssertEqual(task.mileageProgress(odometerKm: 28_000), 1)
+        for invalid in [nil, Double.nan, Double.infinity, -1] as [Double?] {
+            XCTAssertNil(task.mileageProgress(odometerKm: invalid))
+        }
+        let calendarOnly = ServiceTask(title: "Осмотр", lastDoneAt: epoch, lastDoneOdometerKm: 0, intervalMonths: 1)
+        XCTAssertNil(calendarOnly.mileageProgress(odometerKm: 1000))
+    }
+
+    func testMalformedServiceRangeIsRejectedInsteadOfBecomingFixedInterval() {
+        for lower in [0.0, -1, 4_000, 5_000, .nan, .infinity] {
+            let task = ServiceTask(title: "Масло", lastDoneOdometerKm: 23_000,
+                                   intervalKm: 4_000, intervalStartKm: lower)
+            XCTAssertThrowsError(try task.validate()) {
+                XCTAssertEqual($0 as? CompanionValidationError, .invalidIntervalRange)
+            }
+            XCTAssertFalse(task.isDue(odometerKm: 50_000, on: epoch))
+            XCTAssertFalse(task.isDueSoon(odometerKm: 26_000, on: epoch))
+            XCTAssertNil(task.rangeStartOdometerKm)
+            XCTAssertNil(task.mileageProgress(odometerKm: 26_000))
+        }
+        let missingUpper = ServiceTask(title: "Масло", lastDoneAt: epoch, lastDoneOdometerKm: 23_000,
+                                       intervalStartKm: 3_000, intervalMonths: 12)
+        XCTAssertThrowsError(try missingUpper.validate()) {
+            XCTAssertEqual($0 as? CompanionValidationError, .invalidIntervalRange)
+        }
+        let overflowing = ServiceTask(title: "Осмотр", lastDoneOdometerKm: .greatestFiniteMagnitude,
+                                       intervalKm: .greatestFiniteMagnitude, intervalStartKm: 3_000)
+        XCTAssertThrowsError(try overflowing.validate())
+    }
+
+    func testServiceRangeAndOptionalDateRoundTripAndMoveAfterCompletion() throws {
+        var task = ServiceTask(title: "Масло", lastDoneOdometerKm: 23_000,
+                               intervalKm: 4_000, intervalStartKm: 3_000)
+        let decoded = try JSONDecoder().decode(ServiceTask.self, from: JSONEncoder().encode(task))
+        XCTAssertEqual(decoded, task)
+        task.lastDoneOdometerKm = 26_500
+        try task.validate()
+        XCTAssertEqual(task.rangeStartOdometerKm, 29_500)
+        XCTAssertEqual(task.dueOdometerKm, 30_500)
+        XCTAssertNil(task.lastDoneAt)
+        XCTAssertEqual(task.id, decoded.id)
+        task.intervalStartKm = nil
+        try task.validate()
+        XCTAssertNil(task.rangeStartOdometerKm)
+        XCTAssertFalse(task.isDueSoon(odometerKm: 29_500, on: epoch))
+        XCTAssertTrue(task.isDueSoon(odometerKm: 30_100, on: epoch))
+    }
+
+    func testCalendarDeadlineStillWinsOverMileageRange() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let task = ServiceTask(title: "Масло", lastDoneAt: epoch, lastDoneOdometerKm: 23_000,
+                               intervalKm: 4_000, intervalStartKm: 3_000, intervalMonths: 1)
+        let deadline = try XCTUnwrap(task.dueDate(calendar: calendar))
+        let warning = try XCTUnwrap(calendar.date(byAdding: .day, value: -7, to: deadline))
+        XCTAssertTrue(task.isDueSoon(odometerKm: 24_000, on: warning, calendar: calendar))
+        XCTAssertFalse(task.isDue(odometerKm: 24_000, on: warning, calendar: calendar))
+        XCTAssertTrue(task.isDue(odometerKm: 24_000, on: deadline, calendar: calendar))
+    }
 }

@@ -155,6 +155,9 @@ struct RideHistoryView: View {
                 }
                 if rides.changingHistory { ProgressView("Обновляем историю…") }
                 if let failure = rides.historyError { Text(failure).font(MotoTheme.font(.caption)).foregroundStyle(.orange) }
+                else if let status = rides.historyRefreshStatus {
+                    Text(status).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                }
             }.listRowBackground(MotoTheme.background)
             ForEach(months) { group in
                 Section {
@@ -190,6 +193,7 @@ struct RideHistoryView: View {
         .font(MotoTheme.font(.body))
         .scrollContentBackground(.hidden).background(MotoTheme.background)
         .navigationTitle("Мои поездки")
+        .refreshable { await rides.refreshHistory() }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {

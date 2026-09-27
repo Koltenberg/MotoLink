@@ -57,13 +57,14 @@ struct MotorcycleDashboardView: View, Equatable {
             }
             .transaction { $0.animation = nil }
         }
-        .onAppear { visible = true; updateRefreshTimer() }
+        .onAppear { visible = true; updateRefreshTimer(for: scenePhase) }
         .onDisappear { visible = false; stopRefreshTimer() }
-        .onChange(of: scenePhase) { _ in updateRefreshTimer() }
+        .onChange(of: scenePhase) { phase in updateRefreshTimer(for: phase) }
     }
 
-    private func sample() {
+    private func sample(fromTimer: Bool = false) {
         #if targetEnvironment(simulator)
+        defer { ProductVisualRefreshProbe.sample(panel: "telemetry", fromTimer: fromTimer) }
         if preview { catalogue = ProductVisualData.catalogue(); connected = true; ready = true; sampledAt = Date(); return }
         #endif
         catalogue = bluetooth.dashboardTelemetry
@@ -77,12 +78,15 @@ struct MotorcycleDashboardView: View, Equatable {
         refreshTimer = nil
     }
 
-    private func updateRefreshTimer() {
+    private func updateRefreshTimer(for phase: ScenePhase) {
         stopRefreshTimer()
         guard visible else { return }
         sample()
-        guard scenePhase == .active else { return }
-        let timer = Timer(timeInterval: 1, repeats: true) { _ in sample() }
+        // Legacy onChange captures the previous View state. Its argument is
+        // the new phase: reading self.scenePhase here can leave the timer off
+        // after returning to the foreground until this view appears again.
+        guard phase == .active else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { _ in sample(fromTimer: true) }
         refreshTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }

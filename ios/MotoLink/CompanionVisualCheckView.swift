@@ -8,6 +8,7 @@ struct CompanionVisualCheckView: View {
     @ObservedObject var rides: RideRecorder
     @State private var prepared = false
     @State private var showServiceEditor = false
+    @State private var showFuelEditor = false
 
     var body: some View {
         NavigationStack {
@@ -16,11 +17,18 @@ struct CompanionVisualCheckView: View {
         .sheet(isPresented: $showServiceEditor) {
             ServiceEditor(store: store, task: store.data.serviceTasks.last)
         }
+        .sheet(isPresented: $showFuelEditor) {
+            // The real new-entry defaults: full tank, no liters or price, and
+            // the fixture profile's odometer. Do not manufacture form values.
+            FuelEditor(store: store, entry: nil)
+        }
         .onAppear {
             guard !prepared else { return }
             prepared = true
             if ProcessInfo.processInfo.arguments.contains("--review-service-editor") {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { showServiceEditor = true }
+            } else if ProcessInfo.processInfo.arguments.contains("--review-fuel-editor") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { showFuelEditor = true }
             }
             // Even a manually invoked simulator check must preserve existing
             // records. Normal app launch never enters this view.
@@ -35,13 +43,13 @@ struct CompanionVisualCheckView: View {
                 data.odometerKm = 12_480
                 data.fuelEntries = [
                     FuelEntry(date: earlier, odometerKm: 12_100, liters: 10.24, cost: 840.50, fullTank: true),
-                    FuelEntry(date: recent, odometerKm: 12_420, liters: 11.36, cost: 931.52, fullTank: true)
+                    FuelEntry(date: recent, odometerKm: 12_420, liters: nil, cost: nil, fullTank: true)
                 ]
                 data.serviceTasks = [
                     ServiceTask(title: "Проверка и смазка цепи", lastDoneAt: nil,
                                 lastDoneOdometerKm: 12_000, intervalKm: 500),
                     ServiceTask(title: "Масло и фильтр", lastDoneAt: earlier,
-                                lastDoneOdometerKm: 12_000, intervalKm: 6_000, intervalMonths: 12)
+                                lastDoneOdometerKm: 9_000, intervalKm: 4_000, intervalStartKm: 3_000, intervalMonths: 12)
                 ]
             }
         }

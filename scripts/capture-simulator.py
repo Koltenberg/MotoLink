@@ -20,10 +20,11 @@ SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
                     "simulator-companion.png", "simulator-companion-large-text.png",
                     "simulator-garage-light.png", "simulator-ride.png",
                     "simulator-ride-light.png", "simulator-settings.png",
-                    "simulator-service-editor.png", "simulator-history.png",
+                    "simulator-service-editor.png", "simulator-fuel-editor.png", "simulator-history.png",
                     "simulator-ride-landscape.png")
 ORIENTATION_EVIDENCE = "MotoLinkVisualOrientation.json"
 READY_EVIDENCE = "MotoLinkVisualReady.json"
+REFRESH_EVIDENCE = "MotoLinkRefreshLifecycle.json"
 READY_NAMES = tuple(Path(name).with_suffix(".ready.json").name for name in SCREENSHOT_NAMES)
 
 
@@ -286,7 +287,7 @@ def preserve_failed_attempt(temporary, output, attempt, error):
         except (CaptureError, OSError) as validation_error:
             record.update(valid_png=False, error=str(validation_error))
         screenshots.append(record)
-    for name in (*READY_NAMES, ORIENTATION_EVIDENCE):
+    for name in (*READY_NAMES, ORIENTATION_EVIDENCE, REFRESH_EVIDENCE):
         evidence = temporary / name
         if evidence.is_file():
             shutil.copyfile(evidence, debug / name)
@@ -345,6 +346,8 @@ def wait_for_orientation_evidence(path, deadline):
 def launch_for_capture(device, bundle_id, flags, container, output, name, deadline):
     source = container / "Documents" / READY_EVIDENCE
     source.unlink(missing_ok=True)
+    if "--review-ride" in flags:
+        (container / "Documents" / REFRESH_EVIDENCE).unlink(missing_ok=True)
     token = str(uuid.uuid4())
     started = time.time()
     launched = run("launch", device, bundle_id, *flags, "--visual-review-token", token,
@@ -387,6 +390,103 @@ def validate_visual_ready(path, token, mode, theme, launched_at):
             or min(values[:2]) <= 0 or values[3] < 2
             or not launched_at <= values[2] <= time.time() + 5):
         raise CaptureError(f"Visual readiness does not match this visible app launch: {evidence}")
+
+
+def read_refresh_evidence(path, token, launched_at, identity=None):
+    """Only genuine timer callbacks from this process may prove a resume."""
+    try:
+        if path.stat().st_size > 131072:
+            raise CaptureError("Refresh lifecycle evidence is unexpectedly large")
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise CaptureError(f"Invalid refresh lifecycle evidence: {error}") from error
+    def finite(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if (not isinstance(evidence, dict) or evidence.get("launchToken") != token
+            or not isinstance(evidence.get("instanceToken"), str) or not evidence["instanceToken"]
+            or type(evidence.get("processID")) is not int or evidence["processID"] <= 0
+            or not finite(evidence.get("capturedAt"))
+            or not launched_at <= evidence["capturedAt"] <= time.time() + 5
+            or not isinstance(evidence.get("events"), list) or not evidence["events"]):
+        raise CaptureError("Refresh evidence does not belong to this app launch")
+    if identity is not None and identity != (evidence["processID"], evidence["instanceToken"]):
+        raise CaptureError("App restarted during lifecycle check; this cannot prove timer resumption")
+    previous_sequence, previous_uptime = 0, -1
+    for event in evidence["events"]:
+        if (not isinstance(event, dict) or type(event.get("sequence")) is not int
+                or event["sequence"] <= previous_sequence
+                or event.get("kind") not in ("timer", "sample", "background", "active")
+                or type(event.get("appState")) is not int or event["appState"] not in (0, 1, 2)
+                or not finite(event.get("at")) or not launched_at <= event["at"] <= evidence["capturedAt"]
+                or not finite(event.get("uptime")) or event["uptime"] < previous_uptime
+                or (event["kind"] in ("timer", "sample") and event.get("panel") not in ("telemetry", "speed"))):
+            raise CaptureError("Invalid or stale refresh lifecycle event")
+        previous_sequence, previous_uptime = event["sequence"], event["uptime"]
+    return evidence
+
+
+def panels_are_ticking(evidence, after_sequence=0):
+    for panel in ("telemetry", "speed"):
+        ticks = [event for event in evidence["events"] if event["sequence"] > after_sequence
+                 and event["kind"] == "timer" and event.get("panel") == panel and event["appState"] == 0]
+        if len(ticks) < 2 or ticks[-1]["uptime"] - ticks[0]["uptime"] < 0.5:
+            return False
+    return True
+
+
+def resumed_panels_are_ticking(evidence, background_sequence):
+    active = next((event for event in evidence["events"] if event["sequence"] > background_sequence
+                   and event["kind"] == "active" and event["appState"] == 0), None)
+    return active is not None and panels_are_ticking(evidence, active["sequence"])
+
+
+def wait_for_refresh(path, token, launched_at, predicate, description, deadline, identity=None):
+    until = min(deadline, time.monotonic() + 12)
+    for poll in range(25):
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            break
+        if path.is_file():
+            evidence = read_refresh_evidence(path, token, launched_at, identity)
+            if predicate(evidence):
+                return evidence
+        if poll < 24:
+            time.sleep(min(0.5, remaining))
+    raise CaptureError("Refresh lifecycle check failed: " + description + " within 12s")
+
+
+def verify_refresh_lifecycle(device, bundle_id, container, output, launched_at, deadline):
+    source = container / "Documents" / REFRESH_EVIDENCE
+    ready = json.loads((output / "simulator-ride.ready.json").read_text(encoding="utf-8"))
+    token = ready["launchToken"]
+    try:
+        initial = wait_for_refresh(source, token, launched_at, panels_are_ticking,
+                                   "both real panel timers must tick before background", deadline)
+        identity = (initial["processID"], initial["instanceToken"])
+        baseline_sequence = initial["events"][-1]["sequence"]
+        # Open a real second app. Do not terminate MotoLink: a fresh onAppear in
+        # a new process would hide the exact foreground timer regression.
+        run("launch", device, "com.apple.Preferences", timeout=30, deadline=deadline)
+        background = wait_for_refresh(source, token, launched_at,
+            lambda value: any(event["sequence"] > baseline_sequence and event["kind"] == "background"
+                              and event["appState"] == 2 for event in value["events"]),
+            "UIKit must confirm background", deadline, identity)
+        boundary = next(event["sequence"] for event in background["events"]
+                        if event["sequence"] > baseline_sequence and event["kind"] == "background"
+                        and event["appState"] == 2)
+        resumed = run("launch", device, bundle_id, timeout=30, deadline=deadline)
+        match = re.search(r":\s*([1-9][0-9]*)\s*$", resumed)
+        if match is None or int(match.group(1)) != identity[0]:
+            raise CaptureError("Foreground launch did not preserve the original MotoLink process")
+        final = wait_for_refresh(source, token, launched_at,
+            lambda value: resumed_panels_are_ticking(value, boundary),
+            "both real panel timers must tick twice after foreground", deadline, identity)
+        print("Foreground regression passed: same process, confirmed background/active, "
+              "two fresh timer samples per dashboard panel", flush=True)
+        return final
+    finally:
+        if source.is_file():
+            shutil.copyfile(source, output / REFRESH_EVIDENCE)
 
 
 def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadline, seed=None):
@@ -447,6 +547,7 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
             ("simulator-ride-light.png", ("--review-ride", "--review-light"), False),
             ("simulator-settings.png", ("--review-settings", "--review-light"), False),
             ("simulator-service-editor.png", ("--companion-visual-check", "--review-service-editor", "--review-light"), False),
+            ("simulator-fuel-editor.png", ("--companion-visual-check", "--review-fuel-editor", "--review-light"), False),
             ("simulator-history.png", ("--review-history", "--review-light"), False),
             ("simulator-ride-landscape.png", ("--review-ride", "--review-landscape"), True),
         )
@@ -459,6 +560,8 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
                 # so stale geometry cannot validate the next app launch.
                 orientation_source.unlink(missing_ok=True)
             launched_at = launch_for_capture(device, bundle_id, flags, container, output, name, deadline)
+            if name == "simulator-ride.png":
+                verify_refresh_lifecycle(device, bundle_id, container, output, launched_at, deadline)
             if landscape:
                 wait_for_orientation_evidence(orientation_source, deadline)
             image = output / name
@@ -492,12 +595,13 @@ def capture(app, output):
     output.mkdir(parents=True, exist_ok=True)
     for name in (*SCREENSHOT_NAMES, *READY_NAMES):
         (output / name).unlink(missing_ok=True)
-    (output / ORIENTATION_EVIDENCE).unlink(missing_ok=True)
+    for name in (ORIENTATION_EVIDENCE, REFRESH_EVIDENCE):
+        (output / name).unlink(missing_ok=True)
     # Clear only files owned by this capture script, never a directory tree.
     # A rerun must not mistake an old failed attempt for the current evidence.
     for attempt in range(1, 3):
         debug = output / f"debug-attempt{attempt}"
-        for name in (*SCREENSHOT_NAMES, *READY_NAMES, ORIENTATION_EVIDENCE, "failure.json"):
+        for name in (*SCREENSHOT_NAMES, *READY_NAMES, ORIENTATION_EVIDENCE, REFRESH_EVIDENCE, "failure.json"):
             (debug / name).unlink(missing_ok=True)
     deadline = time.monotonic() + 900
     runtimes = json.loads(run("list", "runtimes", "-j", deadline=deadline))["runtimes"]
@@ -532,7 +636,8 @@ def capture(app, output):
                 shutil.copyfile(image, output / image.name)
                 shutil.copyfile(image.with_suffix(".ready.json"), output / image.with_suffix(".ready.json").name)
             shutil.copyfile(Path(temporary) / ORIENTATION_EVIDENCE, output / ORIENTATION_EVIDENCE)
-            print(f"Simulator capture passed on attempt {attempt}: home, companion and ride states launched; all eight PNGs validated", flush=True)
+            shutil.copyfile(Path(temporary) / REFRESH_EVIDENCE, output / REFRESH_EVIDENCE)
+            print(f"Simulator capture passed on attempt {attempt}: home, companion and ride states launched; all {len(images)} PNGs validated", flush=True)
             return
     raise CaptureError("Simulator visual validation failed: " + "; ".join(failures))
 

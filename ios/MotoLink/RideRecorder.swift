@@ -140,6 +140,21 @@ final class RideArchive {
             .sorted { $0.startedAt > $1.startedAt }
     }
 
+    /// Read only the small manifests, ordered after earlier archive writes.
+    /// A locked or unreadable file fails the refresh instead of hiding a ride.
+    func completedSummaries(completion: @escaping @MainActor (Result<[RideSummary], Error>) -> Void) {
+        queue.async { [self] in
+            let result = Result { () throws -> [RideSummary] in
+                try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+                    .filter { $0.pathExtension == "json" }
+                    .map { try Self.decoder.decode(RideSummary.self, from: Data(contentsOf: $0)) }
+                    .filter { $0.endedAt != nil }
+                    .sorted { $0.startedAt > $1.startedAt }
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
     func records(_ id: UUID) throws -> [RideRecord] {
         var records: [RideRecord] = []
         // Raw diagnostics stay on disk; loading the map must not load hours of packets.
@@ -394,11 +409,13 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     @Published private(set) var finishRequested = false
     @Published private(set) var changingHistory = false
     @Published private(set) var historyError: String?
+    @Published private(set) var historyRefreshStatus: String?
     /// Synchronous boundary for a genuinely new ride; restoration/resume never invokes it.
     var onNewRideStarted: ((UUID) -> Void)?
 
     private let location = CLLocationManager()
     private var archive: RideArchive?
+    private var historyRevision: UInt64 = 0
     private var bluetoothConnected = false
     private static let automaticFinishKey = "MotoLink.autoRecordFinishedPeripheral"
     private var automation = RideAutomationPolicy(stoppedPeripheralID:
@@ -558,6 +575,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             switch result {
             case .success:
                 self.gaps.append(contentsOf: pendingFinish.gaps)
+                self.historyRevision &+= 1
+                self.historyRefreshStatus = nil
                 self.history.insert(finished, at: 0)
                 self.active = nil
                 self.pendingFinish = nil
@@ -705,6 +724,37 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         stop { [weak self] summary in self?.export(summary) }
     }
 
+    /// Pull-to-refresh stays local and never scans a raw ride journal. The same
+    /// gate serializes edits/deletes/exports; finishing a live ride stays allowed.
+    @MainActor func refreshHistory() async {
+        guard !changingHistory, !exporting, !finishRequested, !finishingRide else { return }
+        guard let archive else {
+            historyError = "Не удалось открыть хранилище поездок. Текущая история сохранена."
+            return
+        }
+        changingHistory = true
+        historyError = nil
+        historyRefreshStatus = nil
+        let revision = historyRevision
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            archive.completedSummaries { [self] result in
+                // Release the gate inside the main-queue callback, before a
+                // later Finish callback can immediately request its export.
+                defer { changingHistory = false; continuation.resume() }
+                // Finish is allowed while the read is queued. Never replace
+                // its new in-memory entry or an in-progress finish with a snapshot.
+                guard historyRevision == revision, !finishRequested, !finishingRide else { return }
+                switch result {
+                case .success(let summaries):
+                    history = summaries.filter { $0.id != active?.id }
+                    historyRefreshStatus = "История обновлена"
+                case .failure(let failure):
+                    historyError = "Не удалось обновить историю: \(failure.localizedDescription). Текущий список сохранён."
+                }
+            }
+        }
+    }
+
     func updateRideMetadata(_ ride: RideSummary, title: String, note: String,
                             completion: @escaping (Bool) -> Void) {
         guard !changingHistory, !exporting, let archive else {
@@ -714,12 +764,14 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             historyError = "Сначала завершите эту поездку."; completion(false); return
         }
         historyError = nil
+        historyRefreshStatus = nil
         changingHistory = true
         archive.updateMetadata(ride.id, title: title, note: note, activeID: active?.id) { [weak self] result in
             guard let self else { return }
             self.changingHistory = false
             switch result {
             case .success(let updated):
+                self.historyRevision &+= 1
                 if let index = self.history.firstIndex(where: { $0.id == updated.id }) { self.history[index] = updated }
                 completion(true)
             case .failure(let failure): self.historyError = failure.localizedDescription; completion(false)
@@ -739,11 +791,13 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             historyError = "Поездка уже удалена или ещё не завершена."; completion?(false); return
         }
         historyError = nil
+        historyRefreshStatus = nil
         changingHistory = true
         archive.deleteCompleted(Array(requested), activeID: active?.id) { [weak self] deleted, failure in
             guard let self else { return }
             self.changingHistory = false
             let removed = Set(deleted)
+            if !removed.isEmpty { self.historyRevision &+= 1 }
             self.history.removeAll { removed.contains($0.id) }
             self.historyError = failure
             completion?(failure == nil)

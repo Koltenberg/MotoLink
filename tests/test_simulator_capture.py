@@ -106,8 +106,13 @@ class SimulatorCaptureTests(unittest.TestCase):
         return ""
 
     def execute(self):
+        # Existing capture orchestration tests mock the independent lifecycle
+        # gate; its strict evidence checks and resume flow are tested below.
+        def lifecycle(*args):
+            (args[3] / CAPTURE.REFRESH_EVIDENCE).write_text('{"mockedByUnitTest": true}', encoding="utf-8")
         with patch.object(CAPTURE, "run", side_effect=self.fake_run), \
              patch.object(CAPTURE.time, "sleep"), patch.object(CAPTURE, "reject_blank_png"), \
+             patch.object(CAPTURE, "verify_refresh_lifecycle", side_effect=lifecycle), \
              patch.dict(CAPTURE.os.environ, self.runner_env, clear=True):
             CAPTURE.capture(self.app, self.output)
 
@@ -187,6 +192,7 @@ class SimulatorCaptureTests(unittest.TestCase):
             ("simulator-ride-light.png", "ride", "light", False),
             ("simulator-settings.png", "home", "light", False),
             ("simulator-service-editor.png", "companion", "light", False),
+            ("simulator-fuel-editor.png", "companion", "light", False),
             ("simulator-history.png", "home", "light", False),
             ("simulator-ride-landscape.png", "ride", "default", True),
         ]
@@ -205,7 +211,7 @@ class SimulatorCaptureTests(unittest.TestCase):
             elif call[0] == "terminate":
                 process_running = False
 
-    def test_settings_service_editor_and_history_use_their_own_launch_flags_before_landscape(self):
+    def test_settings_editors_and_history_use_their_own_launch_flags_before_landscape(self):
         self.execute()
         launches = {}
         flags = ()
@@ -221,6 +227,8 @@ class SimulatorCaptureTests(unittest.TestCase):
             ("simulator-settings.png", ("--review-settings", "--review-light"), "garage"),
             ("simulator-service-editor.png",
              ("--companion-visual-check", "--review-service-editor", "--review-light"), "companion"),
+            ("simulator-fuel-editor.png",
+             ("--companion-visual-check", "--review-fuel-editor", "--review-light"), "companion"),
             ("simulator-history.png", ("--review-history", "--review-light"), "garage"),
         ]:
             with self.subTest(name=name):
@@ -248,7 +256,7 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.assertEqual(list(self.output.glob("*.png")), [])
         for attempt in (1, 2):
             debug = self.output / f"debug-attempt{attempt}"
-            self.assertEqual(len(list(debug.glob("*.png"))), 11)
+            self.assertEqual(len(list(debug.glob("*.png"))), len(CAPTURE.SCREENSHOT_NAMES))
             manifest = json.loads((debug / "failure.json").read_text())
             self.assertEqual(manifest["status"], "failed")
             self.assertIn("Landscape rotation was not applied", manifest["error"])
@@ -256,7 +264,7 @@ class SimulatorCaptureTests(unittest.TestCase):
         for device in self.devices:
             self.assertIn(("delete", device), self.calls)
 
-    def test_last_ride_launch_failure_does_not_publish_earlier_ten_views(self):
+    def test_last_ride_launch_failure_does_not_publish_earlier_views(self):
         def fail(args):
             if args[0] == "launch" and "--review-landscape" in args:
                 raise CAPTURE.CaptureError("ride landscape launch failed")
@@ -266,7 +274,7 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.assertEqual(list(self.output.glob("*.png")), [])
         for attempt in (1, 2):
             debug = self.output / f"debug-attempt{attempt}"
-            self.assertEqual(len(list(debug.glob("*.png"))), 10)
+            self.assertEqual(len(list(debug.glob("*.png"))), len(CAPTURE.SCREENSHOT_NAMES) - 1)
             self.assertEqual(json.loads((debug / "failure.json").read_text())["status"], "failed")
         self.assertFalse(any(args[0] == "io" and
                              Path(args[-1]).name == "simulator-ride-landscape.png"
@@ -308,7 +316,7 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.execute()
         tokens = [call[call.index("--visual-review-token") + 1] for call in self.calls if call[0] == "launch"]
         self.assertEqual(len(tokens), len(set(tokens)))
-        self.assertEqual(len(list(self.output.glob("*.ready.json"))), 11)
+        self.assertEqual(len(list(self.output.glob("*.ready.json"))), len(CAPTURE.SCREENSHOT_NAMES))
         dark = json.loads((self.output / "simulator-ride.ready.json").read_text())
         light = json.loads((self.output / "simulator-ride-light.ready.json").read_text())
         self.assertEqual(dark["appearance"], "dark")
@@ -498,6 +506,106 @@ class BlankScreenshotTests(unittest.TestCase):
                 with self.subTest(method=method):
                     self.png(image, method)
                     CAPTURE.reject_blank_png(image)
+
+
+class RefreshLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.source = self.directory / "evidence.json"
+        self.token = "unique-launch-token"
+        self.launched = time.time() - 5
+
+    def event(self, sequence, kind, panel=None, app_state=0):
+        event = {"sequence": sequence, "kind": kind, "uptime": 100 + sequence,
+                 "at": self.launched + sequence / 20, "appState": app_state}
+        if panel is not None:
+            event["panel"] = panel
+        return event
+
+    def evidence(self):
+        events = [self.event(1, "timer", "speed"), self.event(2, "timer", "telemetry"),
+                  self.event(3, "timer", "speed"), self.event(4, "timer", "telemetry"),
+                  self.event(5, "background", app_state=2), self.event(6, "active"),
+                  self.event(7, "sample", "speed"), self.event(8, "sample", "telemetry"),
+                  self.event(9, "timer", "speed"), self.event(10, "timer", "telemetry"),
+                  self.event(11, "timer", "speed"), self.event(12, "timer", "telemetry")]
+        return {"launchToken": self.token, "instanceToken": "original-process-instance", "processID": 1234,
+                "capturedAt": time.time(), "events": events}
+
+    def load(self, evidence, identity=None):
+        self.source.write_text(json.dumps(evidence), encoding="utf-8")
+        return CAPTURE.read_refresh_evidence(self.source, self.token, self.launched, identity)
+
+    def test_real_timer_ticks_after_active_are_required_for_both_panels(self):
+        evidence = self.load(self.evidence())
+        self.assertTrue(CAPTURE.resumed_panels_are_ticking(evidence, 5))
+        for retained in (8, 10, 11):
+            with self.subTest(last_sequence=retained):
+                failed = {**evidence, "events": evidence["events"][:retained]}
+                self.assertFalse(CAPTURE.resumed_panels_are_ticking(failed, 5))
+        immediate = {**evidence, "events": [{**event, "kind": "sample"}
+            if event["kind"] == "timer" and event["sequence"] > 6 else event for event in evidence["events"]]}
+        self.assertFalse(CAPTURE.resumed_panels_are_ticking(immediate, 5))
+
+    def test_stale_launch_restart_or_replayed_event_cannot_pass(self):
+        for replacement in ({"launchToken": "old"}, {"capturedAt": self.launched - 1},
+                            {"processID": 5678}, {"instanceToken": "new-process"}):
+            with self.subTest(replacement=replacement), self.assertRaises(CAPTURE.CaptureError):
+                self.load({**self.evidence(), **replacement}, (1234, "original-process-instance"))
+        duplicate = self.evidence()
+        duplicate["events"].append(duplicate["events"][-1])
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "stale refresh"):
+            self.load(duplicate)
+
+    def test_background_ticks_or_one_shot_updates_do_not_prove_foreground_resume(self):
+        evidence = self.evidence()
+        evidence["events"] = [event for event in evidence["events"] if event["kind"] != "active"]
+        self.assertFalse(CAPTURE.resumed_panels_are_ticking(evidence, 5))
+        evidence = self.evidence()
+        for event in evidence["events"]:
+            if event["sequence"] > 6:
+                event["appState"] = 2
+        self.assertFalse(CAPTURE.resumed_panels_are_ticking(evidence, 5))
+
+    def test_lifecycle_runner_changes_apps_without_terminating_original_process(self):
+        container = self.directory / "container"
+        (container / "Documents").mkdir(parents=True)
+        source = container / "Documents" / CAPTURE.REFRESH_EVIDENCE
+        (self.directory / "simulator-ride.ready.json").write_text(
+            json.dumps({"launchToken": self.token}), encoding="utf-8")
+        def write(length):
+            evidence = self.evidence()
+            evidence["events"] = evidence["events"][:length]
+            source.write_text(json.dumps(evidence), encoding="utf-8")
+        write(4)
+        def command(*args, **kwargs):
+            self.assertEqual(args[0], "launch")
+            write(5 if args[2] == "com.apple.Preferences" else 12)
+            return args[2] + ": 1234"
+        with patch.object(CAPTURE, "run", side_effect=command) as run:
+            result = CAPTURE.verify_refresh_lifecycle("simulator", "app.motolink", container,
+                self.directory, self.launched, time.monotonic() + 60)
+        self.assertEqual([call.args[2] for call in run.call_args_list], ["com.apple.Preferences", "app.motolink"])
+        self.assertTrue(CAPTURE.resumed_panels_are_ticking(result, 5))
+        self.assertTrue((self.directory / CAPTURE.REFRESH_EVIDENCE).is_file())
+
+    def test_no_observed_background_fails_instead_of_accepting_continued_ticks(self):
+        container = self.directory / "container"
+        (container / "Documents").mkdir(parents=True)
+        source = container / "Documents" / CAPTURE.REFRESH_EVIDENCE
+        evidence = self.evidence()
+        evidence["events"] = evidence["events"][:4]
+        source.write_text(json.dumps(evidence), encoding="utf-8")
+        (self.directory / "simulator-ride.ready.json").write_text(
+            json.dumps({"launchToken": self.token}), encoding="utf-8")
+        with patch.object(CAPTURE, "run", return_value="com.apple.Preferences: 9876") as run, \
+             patch.object(CAPTURE.time, "sleep"), \
+             self.assertRaisesRegex(CAPTURE.CaptureError, "UIKit must confirm background"):
+            CAPTURE.verify_refresh_lifecycle("simulator", "app.motolink", container,
+                self.directory, self.launched, time.monotonic() + 60)
+        self.assertEqual(run.call_count, 1)
 
 
 class OrientationEvidenceWaitTests(unittest.TestCase):

@@ -174,6 +174,32 @@ extension View {
     }
 }
 
+/// Shared portrait dimensions keep the bike stable between Garage and Ride.
+/// The landscape panel shrinks to its available column; no new artwork is loaded.
+struct BikeArtworkFrame<Content: View>: View {
+    var compact = false
+    let content: Content
+    init(compact: Bool = false, @ViewBuilder content: () -> Content) {
+        self.compact = compact
+        self.content = content()
+    }
+    var body: some View {
+        GeometryReader { geometry in
+            let width = min(280, max(0, min(geometry.size.width, geometry.size.height * 2)))
+            content.frame(width: width, height: width / 2)
+                .frame(width: geometry.size.width, height: geometry.size.height)
+        }.frame(height: compact ? 110 : 156)
+    }
+}
+
+struct BikeArtworkView: View {
+    var body: some View {
+        BikeArtworkFrame {
+            Image("BikeSpriteDetail").resizable().interpolation(.none).scaledToFit()
+        }.accessibilityHidden(true)
+    }
+}
+
 struct PixelButtonStyle: ButtonStyle {
     var prominent = false
     @Environment(\.isEnabled) private var isEnabled

@@ -65,6 +65,57 @@ struct ProductVisualReadyProbe: UIViewRepresentable {
     func updateUIView(_ uiView: ProductVisualReadyView, context: Context) {}
 }
 
+/// Evidence from the real panel timers, not a parallel test timer. Excluded from
+/// physical-device builds and enabled only by a tokenized ride review launch.
+enum ProductVisualRefreshProbe {
+    private static let instanceToken = UUID().uuidString
+    private static var observers: [NSObjectProtocol] = []
+    private static var events: [[String: Any]] = []
+    private static var nextSequence = 0
+
+    private static var launchToken: String? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard arguments.contains("--review-ride"),
+              let index = arguments.firstIndex(of: "--visual-review-token"),
+              arguments.indices.contains(index + 1) else { return nil }
+        return arguments[index + 1]
+    }
+
+    static func sample(panel: String, fromTimer: Bool) {
+        guard launchToken != nil else { return }
+        if observers.isEmpty {
+            for (name, kind) in [(UIApplication.didEnterBackgroundNotification, "background"),
+                                 (UIApplication.didBecomeActiveNotification, "active")] {
+                observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+                    append(kind: kind)
+                })
+            }
+        }
+        append(kind: fromTimer ? "timer" : "sample", panel: panel)
+    }
+
+    private static func append(kind: String, panel: String? = nil) {
+        guard let launchToken else { return }
+        assert(Thread.isMainThread)
+        nextSequence += 1
+        var event: [String: Any] = ["sequence": nextSequence, "kind": kind,
+            "at": Date().timeIntervalSince1970, "uptime": ProcessInfo.processInfo.systemUptime,
+            "appState": UIApplication.shared.applicationState.rawValue]
+        if let panel { event["panel"] = panel }
+        events.append(event)
+        if events.count > 120 { events.removeFirst(events.count - 120) }
+        let evidence: [String: Any] = ["launchToken": launchToken, "instanceToken": instanceToken,
+            "processID": ProcessInfo.processInfo.processIdentifier,
+            "capturedAt": Date().timeIntervalSince1970, "events": events]
+        do {
+            let directory = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
+                                                        appropriateFor: nil, create: true)
+            try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys])
+                .write(to: directory.appendingPathComponent("MotoLinkRefreshLifecycle.json"), options: .atomic)
+        } catch { print("Visual refresh evidence failed: \(error)") }
+    }
+}
+
 final class ProductVisualReadyView: UIView {
     private var timer: Timer?
     private var visibleSince: TimeInterval?
