@@ -12,7 +12,7 @@ struct RidePanel: View {
                     Label("История", systemImage: "clock.arrow.circlepath")
                 }
             }
-            Text(rides.status).font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
+            Text(rides.status).font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
             if let ride = rides.active {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     VStack(alignment: .leading, spacing: 10) {
@@ -30,13 +30,13 @@ struct RidePanel: View {
                 }
                 if !rides.gaps.isEmpty {
                     Text("Пропусков GPS: \(rides.gaps.count). Неизвестный путь не входит в расстояние GPS. Запись данных байка от GPS не зависит.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(MotoTheme.secondary)
                 }
                 if !rides.points.isEmpty {
                     LocalRouteOverview(points: rides.points).frame(height: 200).clipShape(PixelFrame())
                 } else {
                     Text("Ожидаем точную геопозицию. Маршрут и скорость поступают с iPhone.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(MotoTheme.secondary)
                 }
                 HStack {
                     Button("Завершить поездку", role: .destructive) { rides.stop() }.buttonStyle(PixelButtonStyle())
@@ -47,17 +47,17 @@ struct RidePanel: View {
                     Label("Начать поездку", systemImage: "record.circle").frame(maxWidth: .infinity)
                 }.buttonStyle(PixelButtonStyle(prominent: true))
                 Text("Ручная запись GPS работает и без связи с байком.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(MotoTheme.secondary)
             }
             Toggle("Записывать при подключении", isOn: Binding(get: { rides.autoRecord }, set: rides.setAutoRecord))
                 .font(MotoTheme.font(.subheadline))
             Text("Для автозаписи включи также автоподключение к байку. Начало — появление BLE-связи; это не датчик зажигания. Завершение — через 2 минуты без связи, когда приложение выполняется. После смахивания приложения открой его снова.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(MotoTheme.secondary)
             if rides.autoRecord && rides.authorization != .authorizedAlways {
                 Button("Разрешить геопозицию для автозаписи") { rides.requestBackgroundPermission() }
                     .font(MotoTheme.font(.subheadline))
                 Text("В системных настройках нужен доступ «Всегда». Уже начатую вручную поездку можно записывать с доступом «При использовании».")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(MotoTheme.secondary)
             }
             if let error = rides.error {
                 Text("Ошибка сохранения: \(error)").font(.caption).foregroundStyle(.orange)
@@ -73,7 +73,7 @@ struct RidePanel: View {
     }
     private func value(_ label: String, _ text: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label).font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+            Text(label).font(.system(size: 9, weight: .semibold)).foregroundStyle(MotoTheme.secondary)
             Text(text).font(.system(.headline, design: .rounded).monospacedDigit())
         }
     }
@@ -86,7 +86,7 @@ struct MotorcycleMeasurementsView: View {
             Text("Данные мотоцикла").font(MotoTheme.font(.title2).bold())
             if bluetooth.measurements.isEmpty {
                 Text("Значения появятся после ответа байка. Наличие показателя в списке возможностей не означает, что его значение уже получено.")
-                    .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
+                    .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
             }
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 VStack(alignment: .leading, spacing: 12) {
@@ -101,15 +101,15 @@ struct MotorcycleMeasurementsView: View {
                             HStack {
                                 Text(context.date.timeIntervalSince(measurement.timestamp) > 15 ? "Последний замер" : "Получено")
                                 Text(measurement.timestamp, style: .time).monospacedDigit()
-                            }.font(.caption).foregroundStyle(.secondary)
-                            Text(measurement.source).font(.caption2).foregroundStyle(.secondary)
+                            }.font(.caption).foregroundStyle(MotoTheme.secondary)
+                            Text(measurement.source).font(.caption2).foregroundStyle(MotoTheme.secondary)
                         }
                     }
                 }
             }
             if !bluetooth.capabilities.isEmpty {
                 Text("Поддерживается: " + bluetooth.capabilities.filter(\.supported).map(\.label).joined(separator: ", "))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(MotoTheme.secondary)
             }
         }
         .padding(18)
@@ -144,14 +144,14 @@ struct RideHistoryView: View {
         List {
             Section {
                 Text(rides.history.isEmpty ? "Завершённые поездки появятся здесь." : "Все поездки хранятся на этом iPhone. Для просмотра и экспорта интернет не нужен.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(MotoTheme.secondary)
                 if !rides.history.isEmpty {
                     Text(String(format: "Поездок: %d · %.1f км", rides.history.count, totalDistance / 1000))
                         .font(.system(.headline, design: .rounded).monospacedDigit())
                     Text("По записям GPS, без неизвестных участков. Это не одометр мотоцикла.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(MotoTheme.secondary)
                     Text("Показано \(min(visibleLimit, rides.history.count)) из \(rides.history.count)")
-                        .font(.system(.caption).monospacedDigit()).foregroundStyle(.secondary)
+                        .font(.system(.caption).monospacedDigit()).foregroundStyle(MotoTheme.secondary)
                 }
                 if rides.changingHistory { ProgressView("Обновляем историю…") }
                 if let failure = rides.historyError { Text(failure).font(.caption).foregroundStyle(.orange) }
@@ -165,7 +165,7 @@ struct RideHistoryView: View {
                                 Text(ride.startedAt, format: .dateTime.day().month().hour().minute())
                                     .font(.system(.headline, design: .rounded).monospacedDigit())
                                 Text(String(format: "GPS %.2f км · %@", ride.distanceMeters / 1000, duration(ride.elapsed)))
-                                    .font(.system(.subheadline).monospacedDigit()).foregroundStyle(.secondary)
+                                    .font(.system(.subheadline).monospacedDigit()).foregroundStyle(MotoTheme.secondary)
                             }
                             .padding(.vertical, 5)
                         }
@@ -259,21 +259,21 @@ struct RideDetailView: View {
                     .monospacedDigit()
                 if ride.gpsSpeedQualityVersion == nil {
                     Text("Старая запись: скорость GPS могла содержать выбросы. Исходный журнал сохранён.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(MotoTheme.secondary)
                 }
                 if let coverage = ride.streamCoverage {
                     Text("Данные байка: \(duration(coverage.observedSeconds)) из \(duration(ride.elapsed))")
                         .font(.system(.headline, design: .rounded).monospacedDigit())
                     Text(coverage.frameCount == 0 ? "За эту поездку данные движения не поступали."
                          : "Время, когда поступали данные движения. Пропуски связи не учитываются.")
-                        .font(.caption).foregroundStyle(coverage.frameCount == 0 ? Color.orange : Color.secondary)
+                        .font(.caption).foregroundStyle(coverage.frameCount == 0 ? Color.orange : MotoTheme.secondary)
                 }
                 if !points.isEmpty {
                     Text("Схема маршрута").font(MotoTheme.font(.title3).bold())
                     LocalRouteOverview(points: points, showGapBoundaries: showGapBoundaries)
                         .frame(height: 280).clipShape(PixelFrame())
                     Text("Схема по записанным точкам, без загрузки карт. Красный — GPS; белая точка — конец записи.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(MotoTheme.secondary)
                     if gaps.contains(where: { $0.from != nil && $0.to != nil }) {
                         Toggle("Соединить границы пропусков", isOn: $showGapBoundaries)
                             .font(.subheadline)
@@ -284,7 +284,7 @@ struct RideDetailView: View {
                     }
                 } else if !loading && error == nil {
                     Text("Точек GPS нет. Данные мотоцикла и журнал доступны отдельно.")
-                        .font(.subheadline).foregroundStyle(.secondary)
+                        .font(.subheadline).foregroundStyle(MotoTheme.secondary)
                 }
                 if !gaps.isEmpty {
                     DisclosureGroup {
@@ -295,7 +295,7 @@ struct RideDetailView: View {
                     }
                 }
                 Text("Расстояние и скорость здесь — по GPS iPhone. Неизвестные участки не входят в расстояние. Данные байка сохраняются независимо от GPS.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(MotoTheme.secondary)
                 if !ranges.isEmpty {
                     Text("Показатели за поездку").font(MotoTheme.font(.title3).bold())
                     ForEach(ranges) { range in
@@ -310,12 +310,12 @@ struct RideDetailView: View {
                 DisclosureGroup("Подробности записи") {
                     if let version = ride.recordedAppVersion {
                         Text("Записано в Moto Link \(version) · сборка \(ride.recordedAppBuild ?? "—")")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(MotoTheme.secondary)
                     }
                     Text("Точек GPS: \(points.count). Измерений байка: \(ride.telemetryCount). Разрывов процесса: \(ride.interruptionCount).")
-                        .font(.system(.caption).monospacedDigit()).foregroundStyle(.secondary)
+                        .font(.system(.caption).monospacedDigit()).foregroundStyle(MotoTheme.secondary)
                     Text("Автостарт означает подключение Bluetooth, а не включение зажигания. Просмотр этой поездки не включает GPS и не отправляет координаты в интернет.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(MotoTheme.secondary)
                 }.font(.system(.subheadline, design: .rounded))
                 Button { rides.export(ride) } label: { Label("Сохранить единый журнал", systemImage: "square.and.arrow.up") }
                     .buttonStyle(PixelButtonStyle()).disabled(rides.exporting || rides.changingHistory || loading || error != nil)
@@ -392,11 +392,11 @@ private struct RideMetadataEditor: View {
                 Section("Заметка") {
                     TextEditor(text: $note).frame(minHeight: 150)
                         .onChange(of: note) { value in if value.count > 4000 { note = String(value.prefix(4000)) } }
-                    Text("\(note.count) / 4000").font(.caption).foregroundStyle(.secondary)
+                    Text("\(note.count) / 4000").font(.caption).foregroundStyle(MotoTheme.secondary)
                 }
                 Section {
                     Text("Название и заметка не меняют маршрут, показатели и исходный журнал.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(MotoTheme.secondary)
                     if let failure = rides.historyError { Text(failure).font(.caption).foregroundStyle(.orange) }
                     if rides.changingHistory { ProgressView("Сохраняем…") }
                 }
@@ -450,12 +450,12 @@ private struct GPSGapCard: View {
             Text("Без GPS: \(duration(gap.duration))")
                 .font(.system(.headline, design: .rounded).monospacedDigit())
             Text("\(gap.startedAt.formatted(date: .abbreviated, time: .standard)) — \(gap.endedAt.formatted(date: .abbreviated, time: .standard))")
-                .font(.system(.caption).monospacedDigit()).foregroundStyle(.secondary)
+                .font(.system(.caption).monospacedDigit()).foregroundStyle(MotoTheme.secondary)
             Text(gap.reason).font(.caption)
             Text(gap.from != nil && gap.to != nil
                 ? "Границы известны; дорога между ними не записана."
                 : "Начало или конец пропуска без точной координаты.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(MotoTheme.secondary)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -475,7 +475,7 @@ private struct LocalRouteOverview: View {
             .background(MotoTheme.panel)
             .overlay(alignment: .topTrailing) {
                 Text("СЕВЕР ↑").font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary).padding(12)
+                    .foregroundStyle(MotoTheme.secondary).padding(12)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Схема записанных точек GPS. Север сверху. Пропуски не входят в расстояние.")

@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
+import zlib
 from pathlib import Path
 
 
@@ -19,6 +21,8 @@ SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
                     "simulator-garage-light.png", "simulator-ride.png",
                     "simulator-ride-light.png", "simulator-ride-landscape.png")
 ORIENTATION_EVIDENCE = "MotoLinkVisualOrientation.json"
+READY_EVIDENCE = "MotoLinkVisualReady.json"
+READY_NAMES = tuple(Path(name).with_suffix(".ready.json").name for name in SCREENSHOT_NAMES)
 
 
 class CaptureError(RuntimeError):
@@ -192,6 +196,77 @@ def validate_png(path):
     return width, height
 
 
+def reject_blank_png(path):
+    """Reject a launch-screen buffer using the central image, without Pillow."""
+    data = path.read_bytes()
+    width, height, depth, color, compression, filtering, interlace = struct.unpack(">IIBBBBB", data[16:29])
+    channels = {2: 3, 6: 4}.get(color)
+    if depth != 8 or channels is None or compression or filtering or interlace:
+        raise CaptureError(f"Unsupported screenshot pixel format: {path.name}")
+    stride = width * channels
+    expected = (stride + 1) * height
+    if expected > 128 * 1024 * 1024:
+        raise CaptureError("Screenshot dimensions exceed the visual check budget")
+    compressed = bytearray()
+    offset = 8
+    while offset + 12 <= len(data):
+        length = struct.unpack(">I", data[offset:offset + 4])[0]
+        kind = data[offset + 4:offset + 8]
+        if offset + 12 + length > len(data):
+            raise CaptureError(f"Truncated PNG chunk: {path.name}")
+        if kind == b"IDAT":
+            compressed.extend(data[offset + 8:offset + 8 + length])
+        offset += 12 + length
+    try:
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(compressed, expected + 1)
+        if len(raw) != expected or not decoder.eof:
+            raise CaptureError(f"Incomplete PNG pixels: {path.name}")
+    except zlib.error as error:
+        raise CaptureError(f"Invalid PNG pixels: {path.name}: {error}") from error
+    previous = bytearray(stride)
+    palette = set()
+    for y in range(height):
+        start = y * (stride + 1)
+        method = raw[start]
+        row = bytearray(raw[start + 1:start + 1 + stride])
+        if method == 1:
+            for x in range(channels, stride):
+                row[x] = (row[x] + row[x - channels]) & 255
+        elif method == 2:
+            row = bytearray((value + up) & 255 for value, up in zip(row, previous))
+        elif method in (3, 4):
+            for x in range(stride):
+                left = row[x - channels] if x >= channels else 0
+                up = previous[x]
+                corner = previous[x - channels] if x >= channels else 0
+                if method == 3:
+                    predictor = (left + up) // 2
+                else:
+                    estimate = left + up - corner
+                    a, b, c = abs(estimate - left), abs(estimate - up), abs(estimate - corner)
+                    predictor = left if a <= b and a <= c else up if b <= c else corner
+                row[x] = (row[x] + predictor) & 255
+        elif method != 0:
+            raise CaptureError(f"Invalid PNG filter: {path.name}")
+        previous = row
+        # Exclude the status bar, Dynamic Island and home indicator: those can
+        # be visible while the entire app is still an empty launch snapshot.
+        if height * 0.15 < y < height * 0.85 and y % max(1, height // 80) == 0:
+            for x in range(width // 10, width * 9 // 10, max(1, width // 80)):
+                index = x * channels
+                palette.add(tuple(value // 16 for value in row[index:index + 3]))
+                if len(palette) >= 6:
+                    return
+    raise CaptureError(f"Blank or near-uniform app screenshot: {path.name}")
+
+
+def validate_capture(path):
+    dimensions = validate_png(path)
+    reject_blank_png(path)
+    return dimensions
+
+
 def preserve_failed_attempt(temporary, output, attempt, error):
     """Keep raw evidence separate from the complete, validated capture set."""
     debug = output / f"debug-attempt{attempt}"
@@ -209,9 +284,10 @@ def preserve_failed_attempt(temporary, output, attempt, error):
         except (CaptureError, OSError) as validation_error:
             record.update(valid_png=False, error=str(validation_error))
         screenshots.append(record)
-    evidence = temporary / ORIENTATION_EVIDENCE
-    if evidence.is_file():
-        shutil.copyfile(evidence, debug / ORIENTATION_EVIDENCE)
+    for name in (*READY_NAMES, ORIENTATION_EVIDENCE):
+        evidence = temporary / name
+        if evidence.is_file():
+            shutil.copyfile(evidence, debug / name)
     (debug / "failure.json").write_text(json.dumps({
         "status": "failed", "attempt": attempt, "error": str(error),
         "note": "Diagnostic captures only; this is not a passed visual validation set.",
@@ -264,6 +340,53 @@ def wait_for_orientation_evidence(path, deadline):
     raise CaptureError("Missing landscape geometry evidence after bounded wait (up to 10s)")
 
 
+def launch_for_capture(device, bundle_id, flags, container, output, name, deadline):
+    source = container / "Documents" / READY_EVIDENCE
+    source.unlink(missing_ok=True)
+    token = str(uuid.uuid4())
+    started = time.time()
+    launched = run("launch", device, bundle_id, *flags, "--visual-review-token", token,
+                   timeout=45, deadline=deadline)
+    if not re.search(r":\s*[1-9][0-9]*\s*$", launched):
+        raise CaptureError(f"App launch did not return a process ID: {launched}")
+    mode = "ride" if "--review-ride" in flags else "companion" if "--companion-visual-check" in flags else "garage"
+    theme = "light" if "--review-light" in flags else "dark" if "--review-ride" in flags else None
+    until = min(deadline, time.monotonic() + 20)
+    for poll in range(41):
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            break
+        if source.is_file():
+            destination = output / Path(name).with_suffix(".ready.json").name
+            shutil.copyfile(source, destination)
+            validate_visual_ready(destination, token, mode, theme, started)
+            print(f"Visible app ready: {name}: {launched}", flush=True)
+            return started
+        if poll < 40:
+            time.sleep(min(0.5, remaining))
+    raise CaptureError(f"Visible app readiness was not confirmed within 20s: {name}")
+
+
+def validate_visual_ready(path, token, mode, theme, launched_at):
+    try:
+        if path.stat().st_size > 65536:
+            raise CaptureError("Visual readiness evidence is unexpectedly large")
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise CaptureError(f"Invalid visual readiness evidence: {error}") from error
+    if not isinstance(evidence, dict):
+        raise CaptureError("Visual readiness evidence must be an object")
+    values = [evidence.get(key) for key in ("windowWidth", "windowHeight", "capturedAt", "visibleSeconds")]
+    if (evidence.get("ready") is not True or evidence.get("launchToken") != token
+            or evidence.get("mode") != mode or evidence.get("appearance") not in ("dark", "light")
+            or (theme is not None and evidence.get("appearance") != theme)
+            or not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                       and math.isfinite(value) for value in values)
+            or min(values[:2]) <= 0 or values[3] < 2
+            or not launched_at <= values[2] <= time.time() + 5):
+        raise CaptureError(f"Visual readiness does not match this visible app launch: {evidence}")
+
+
 def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadline, seed=None):
     device = None
     try:
@@ -282,38 +405,36 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
         # settings: global appearance/status-bar decoration has hung on
         # otherwise booted GitHub runners. Exercise the app's own theme.
         run("install", device, app, timeout=60, deadline=deadline)
-        launched = run("launch", device, bundle_id, timeout=45, deadline=deadline)
-        if not re.search(r":\s*[1-9][0-9]*\s*$", launched):
-            raise CaptureError(f"App launch did not return a process ID: {launched}")
-        print(f"App launched: {launched}", flush=True)
-        time.sleep(5)
+        container = Path(run("get_app_container", device, bundle_id, "data", timeout=30, deadline=deadline))
+        if not container.is_absolute() or not container.is_dir():
+            raise CaptureError("simctl did not return an existing absolute app data container")
+        launch_for_capture(device, bundle_id, (), container, output, "simulator-home.png", deadline)
         home = output / "simulator-home.png"
         large = output / "simulator-large-text.png"
         run("io", device, "screenshot", home, timeout=30, deadline=deadline)
-        validate_png(home)
+        validate_capture(home)
         # This UI command tests an actual requirement, unlike appearance: the
         # live app must render with large accessibility text before capture.
         run("ui", device, "content_size", "accessibility-large", timeout=30, deadline=deadline)
         time.sleep(2)
         run("io", device, "screenshot", large, timeout=30, deadline=deadline)
-        validate_png(large)
+        validate_capture(large)
+        shutil.copyfile(home.with_suffix(".ready.json"), large.with_suffix(".ready.json"))
         # Launch arguments only take effect in a new process. Reset Dynamic Type
         # so the companion's first image really checks the ordinary text size.
         run("terminate", device, bundle_id, timeout=30, deadline=deadline)
         run("ui", device, "content_size", "large", timeout=30, deadline=deadline)
-        launched = run("launch", device, bundle_id, "--companion-visual-check", timeout=45, deadline=deadline)
-        if not re.search(r":\s*[1-9][0-9]*\s*$", launched):
-            raise CaptureError(f"Companion launch did not return a process ID: {launched}")
-        print(f"Companion launched: {launched}", flush=True)
-        time.sleep(5)
+        launch_for_capture(device, bundle_id, ("--companion-visual-check",), container, output,
+                           "simulator-companion.png", deadline)
         companion = output / "simulator-companion.png"
         companion_large = output / "simulator-companion-large-text.png"
         run("io", device, "screenshot", companion, timeout=30, deadline=deadline)
-        validate_png(companion)
+        validate_capture(companion)
         run("ui", device, "content_size", "accessibility-large", timeout=30, deadline=deadline)
         time.sleep(2)
         run("io", device, "screenshot", companion_large, timeout=30, deadline=deadline)
-        validate_png(companion_large)
+        validate_capture(companion_large)
+        shutil.copyfile(companion.with_suffix(".ready.json"), companion_large.with_suffix(".ready.json"))
         images = [home, large, companion, companion_large]
         # Relaunch each product state in the same disposable simulator. Fixture
         # switches exist only in simulator builds; no hardware BLE is involved.
@@ -328,24 +449,16 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
             run("terminate", device, bundle_id, timeout=30, deadline=deadline)
             run("ui", device, "content_size", "large", timeout=30, deadline=deadline)
             if landscape:
-                container = Path(run("get_app_container", device, bundle_id, "data", timeout=30, deadline=deadline))
-                if not container.is_absolute() or not container.is_dir():
-                    raise CaptureError("simctl did not return an existing absolute app data container")
                 orientation_source = container / "Documents" / ORIENTATION_EVIDENCE
                 # The prior process is terminated. Delete only our fixture file,
                 # so stale geometry cannot validate the next app launch.
                 orientation_source.unlink(missing_ok=True)
-            launched_at = time.time()
-            launched = run("launch", device, bundle_id, *flags, timeout=45, deadline=deadline)
-            if not re.search(r":\s*[1-9][0-9]*\s*$", launched):
-                raise CaptureError(f"{name} launch did not return a process ID: {launched}")
-            print(f"Visual state launched: {name}: {launched}", flush=True)
-            time.sleep(5)
+            launched_at = launch_for_capture(device, bundle_id, flags, container, output, name, deadline)
             if landscape:
                 wait_for_orientation_evidence(orientation_source, deadline)
             image = output / name
             run("io", device, "screenshot", image, timeout=30, deadline=deadline)
-            width, height = validate_png(image)
+            width, height = validate_capture(image)
             if landscape:
                 evidence = output / ORIENTATION_EVIDENCE
                 try:
@@ -372,14 +485,14 @@ def capture(app, output):
         app_info = plistlib.load(info)
     bundle_id = app_info["CFBundleIdentifier"]
     output.mkdir(parents=True, exist_ok=True)
-    for name in SCREENSHOT_NAMES:
+    for name in (*SCREENSHOT_NAMES, *READY_NAMES):
         (output / name).unlink(missing_ok=True)
     (output / ORIENTATION_EVIDENCE).unlink(missing_ok=True)
     # Clear only files owned by this capture script, never a directory tree.
     # A rerun must not mistake an old failed attempt for the current evidence.
     for attempt in range(1, 3):
         debug = output / f"debug-attempt{attempt}"
-        for name in (*SCREENSHOT_NAMES, ORIENTATION_EVIDENCE, "failure.json"):
+        for name in (*SCREENSHOT_NAMES, *READY_NAMES, ORIENTATION_EVIDENCE, "failure.json"):
             (debug / name).unlink(missing_ok=True)
     deadline = time.monotonic() + 900
     runtimes = json.loads(run("list", "runtimes", "-j", deadline=deadline))["runtimes"]
@@ -412,6 +525,7 @@ def capture(app, output):
                 continue
             for image in images:
                 shutil.copyfile(image, output / image.name)
+                shutil.copyfile(image.with_suffix(".ready.json"), output / image.with_suffix(".ready.json").name)
             shutil.copyfile(Path(temporary) / ORIENTATION_EVIDENCE, output / ORIENTATION_EVIDENCE)
             print(f"Simulator capture passed on attempt {attempt}: home, companion and ride states launched; all eight PNGs validated", flush=True)
             return

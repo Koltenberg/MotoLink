@@ -1,6 +1,7 @@
 #if targetEnvironment(simulator)
 import Foundation
 import UIKit
+import SwiftUI
 
 /// Fictional visual fixtures, excluded from every device build. Never sent to BLE
 /// or written to a user's ride journal. Used by the actual dashboard renderers.
@@ -37,22 +38,88 @@ enum ProductVisualData {
         }
     }
 
-    static func measurements() -> [MotoProtocol.Measurement] {
+    static func measurements(at now: Date = Date()) -> [MotoProtocol.Measurement] {
         [("wheel_speed", "Скорость", 68.0, "км/ч"),
          ("gear_position", "Передача", 3.0, ""),
          ("engine_speed", "Обороты", 5300.0, "об/мин"),
          ("engine_water_temperature", "Температура", 92.0, "°C")].map {
             MotoProtocol.Measurement(id: $0.0, label: $0.1, value: $0.2, unit: $0.3,
-                                     timestamp: Date(), source: "Simulator example")
+                                     timestamp: now, source: "Simulator example")
         }
     }
-    static func catalogue() -> TelemetryPresentation {
+    static func catalogue(at now: Date = Date()) -> TelemetryPresentation {
+        let readings = measurements(at: now)
         var value = TelemetryPresentation()
-        value.configure(measurements().map {
+        value.configure(readings.map {
             MotoProtocol.Capability(id: $0.id, label: $0.label, mode: $0.id == "engine_speed" ? 0 : 1)
         })
-        value.receive(Data(), decoded: measurements())
+        value.receive(Data(), decoded: readings)
         return value
+    }
+}
+
+/// A capture handshake from the mounted application view, not merely its PID.
+/// This type and its files do not exist in iPhone builds.
+struct ProductVisualReadyProbe: UIViewRepresentable {
+    func makeUIView(context: Context) -> ProductVisualReadyView { ProductVisualReadyView() }
+    func updateUIView(_ uiView: ProductVisualReadyView, context: Context) {}
+}
+
+final class ProductVisualReadyView: UIView {
+    private var timer: Timer?
+    private var visibleSince: TimeInterval?
+    private var hasLayout = false
+
+    override func layoutSubviews() { super.layoutSubviews(); hasLayout = true }
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        timer?.invalidate(); timer = nil; visibleSince = nil
+        guard window != nil, token != nil else { return }
+        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in self?.checkReady() }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+    private var token: String? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "--visual-review-token"), arguments.indices.contains(index + 1) else { return nil }
+        return arguments[index + 1]
+    }
+    private func checkReady() {
+        guard let token, hasLayout, let window, window.isKeyWindow, !window.isHidden,
+              window.alpha > 0, window.bounds.width > 0, window.bounds.height > 0,
+              window.windowScene?.activationState == .foregroundActive,
+              window.rootViewController?.viewIfLoaded?.window === window else {
+            visibleSince = nil; return
+        }
+        let arguments = ProcessInfo.processInfo.arguments
+        let expected: UIUserInterfaceStyle = arguments.contains("--review-light") ? .light
+            : arguments.contains("--review-ride") ? .dark : .unspecified
+        // Simulator-only capture preference. Never changes the user's stored theme.
+        if expected != .unspecified && window.overrideUserInterfaceStyle != expected {
+            window.overrideUserInterfaceStyle = expected
+            visibleSince = nil; return
+        }
+        guard expected == .unspecified || window.traitCollection.userInterfaceStyle == expected else {
+            visibleSince = nil; return
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard let since = visibleSince else { visibleSince = now; return }
+        guard now - since >= 2 else { return }
+        let mode = arguments.contains("--review-ride") ? "ride"
+            : arguments.contains("--companion-visual-check") ? "companion" : "garage"
+        let evidence: [String: Any] = [
+            "ready": true, "launchToken": token, "mode": mode,
+            "appearance": window.traitCollection.userInterfaceStyle == .dark ? "dark" : "light",
+            "windowWidth": Double(window.bounds.width), "windowHeight": Double(window.bounds.height),
+            "capturedAt": Date().timeIntervalSince1970, "visibleSeconds": now - since
+        ]
+        do {
+            let directory = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
+                                                        appropriateFor: nil, create: true)
+            try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys])
+                .write(to: directory.appendingPathComponent("MotoLinkVisualReady.json"), options: .atomic)
+            timer?.invalidate(); timer = nil
+        } catch { print("Visual readiness evidence failed: \(error)") }
     }
 }
 #endif

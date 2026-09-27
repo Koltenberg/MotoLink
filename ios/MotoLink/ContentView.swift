@@ -87,17 +87,22 @@ struct ContentView: View {
 
     private var rideScreen: some View {
         GeometryReader { geometry in
+            let compact = geometry.size.width > 600 && !typeSize.isAccessibilitySize
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    connectionStatus
+                VStack(alignment: .leading, spacing: compact ? 8 : 16) {
+                    if compact && hasRideDisplay { compactConnectionStatus }
+                    else { connectionStatus }
                     if hasRideDisplay {
-                        if geometry.size.width > 600 && !typeSize.isAccessibilitySize {
+                        if compact {
                             HStack(alignment: .top, spacing: 18) {
-                                instrumentPanel.frame(maxWidth: .infinity)
-                                VStack(spacing: 12) {
-                                    BikeActivityView(bluetooth: bluetooth, preview: previewRide).equatable()
+                                VStack(spacing: 8) {
+                                    SpeedComparisonView(bluetooth: bluetooth, rides: rides, preview: previewRide, compact: true).equatable()
+                                    MotorcycleDashboardView(bluetooth: bluetooth, preview: previewRide, compact: true).equatable()
+                                }.frame(maxWidth: .infinity)
+                                VStack(spacing: 4) {
+                                    BikeActivityView(bluetooth: bluetooth, preview: previewRide, compact: true).equatable()
                                     rideStatus
-                                }.frame(width: geometry.size.width * 0.32)
+                                }.frame(width: geometry.size.width * 0.26)
                             }
                         } else {
                             instrumentPanel
@@ -116,7 +121,7 @@ struct ContentView: View {
                                 ? "Включи зажигание. Подключимся к твоему мотоциклу."
                                 : "Включи зажигание и нажми «Подключиться».")
                              : "Включи зажигание и один раз выбери свой мотоцикл.")
-                            .font(.body).foregroundStyle(.secondary)
+                            .font(.body).foregroundStyle(MotoTheme.secondary)
                         if !occupied {
                             Button {
                                 if bluetooth.hasRememberedDevice { bluetooth.connectRemembered() }
@@ -129,14 +134,14 @@ struct ContentView: View {
                         }
                         if rides.autoRecord {
                             Label("Автозапись включена", systemImage: "record.circle")
-                                .font(.subheadline).foregroundStyle(.secondary)
+                                .font(.subheadline).foregroundStyle(MotoTheme.secondary)
                         }
                     }
                     if let error = bluetooth.storageError {
                         Label("Журнал не сохраняется: " + error, systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.red)
                     }
-                }.padding(18)
+                }.padding(.horizontal, compact ? 12 : 18).padding(.vertical, compact ? 8 : 18)
             }
             .background(MotoTheme.background)
             .safeAreaInset(edge: .bottom) {
@@ -155,11 +160,35 @@ struct ContentView: View {
         }
     }
 
+    private var compactConnectionStatus: some View {
+        HStack(spacing: 8) {
+            Image(systemName: bluetooth.ready || previewRide ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+            Text(previewRide ? "Связь с байком · пример" : bluetooth.ready ? "Связь с байком" : bluetooth.connected ? "Готовим соединение" : "Ждём связь")
+                .font(.subheadline.weight(.semibold))
+            if rides.active != nil && !bluetooth.connected && !previewRide {
+                Text("Запись продолжается").font(.caption).foregroundStyle(MotoTheme.secondary)
+            }
+            Spacer()
+            if let reason = bluetooth.reconnectBlockedReason, !previewRide {
+                Menu { Text(reason) } label: { Image(systemName: "info.circle") }
+                    .accessibilityLabel("Почему ожидаем подключение")
+            }
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                if bluetooth.canRequestUserRescan(at: context.date) && !previewRide {
+                    Button("Повторить поиск") { bluetooth.requestUserRescan() }.font(.caption)
+                }
+            }
+            if occupied && rides.active == nil && !previewRide {
+                Button("Отменить") { bluetooth.pauseConnection() }.font(.subheadline)
+            }
+        }.padding(.horizontal, 8).padding(.vertical, 4)
+    }
+
     private var connectionStatus: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: bluetooth.connected ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
-                    .foregroundStyle(bluetooth.connected ? Color.primary : Color.secondary)
+                    .foregroundStyle(bluetooth.connected ? Color.primary : MotoTheme.secondary)
                 Text(previewRide ? "Связь с байком · пример" : bluetooth.ready ? "Связь с байком" : bluetooth.connected ? "Готовим соединение" :
                     bluetooth.connecting ? "Ожидаем подключения" : "Байк не подключён")
                     .font(.subheadline.weight(.semibold))
@@ -169,14 +198,14 @@ struct ContentView: View {
                     Button("Отменить") { bluetooth.pauseConnection() }.font(.subheadline)
                 }
             }
-            if !bluetooth.bluetoothPowered {
-                Text(bluetooth.status).font(.subheadline).foregroundStyle(.secondary)
+            if !bluetooth.bluetoothPowered && !previewRide {
+                Text(bluetooth.status).font(.subheadline).foregroundStyle(MotoTheme.secondary)
             } else if let reason = bluetooth.reconnectBlockedReason {
-                Text(reason).font(.subheadline).foregroundStyle(.secondary)
+                Text(reason).font(.subheadline).foregroundStyle(MotoTheme.secondary)
             }
             if rides.active != nil && !bluetooth.connected {
                 Label("Ждём связь · запись продолжается", systemImage: "arrow.triangle.2.circlepath")
-                    .font(.subheadline).foregroundStyle(.secondary)
+                    .font(.subheadline).foregroundStyle(MotoTheme.secondary)
             }
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 if bluetooth.canRequestUserRescan(at: context.date) {
@@ -197,7 +226,7 @@ struct ContentView: View {
                         metric("Путь GPS", value: String(format: "%.1f км", ride.distanceMeters / 1000))
                     }
                     if rides.gpsStatus(at: context.date) != nil {
-                        Label("GPS временно недоступен", systemImage: "location.slash").font(.caption).foregroundStyle(.secondary)
+                        Label("GPS временно недоступен", systemImage: "location.slash").font(.caption).foregroundStyle(MotoTheme.secondary)
                     }
                 }
             }
@@ -210,7 +239,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     Text("Включи зажигание").font(MotoTheme.font(.title2))
                     Text("Держи iPhone рядом с байком. Выбери его в списке — повторно выбирать не понадобится.")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(MotoTheme.secondary)
                     if bluetooth.scanning {
                         TimelineView(.periodic(from: .now, by: 1)) { context in
                             HStack { ProgressView(); Text(bluetooth.scanProgress(at: context.date)) }
@@ -224,7 +253,7 @@ struct ContentView: View {
                             .buttonStyle(PixelButtonStyle(prominent: true)).disabled(!bluetooth.bluetoothPowered)
                     }
                     Toggle("Записывать поездки автоматически", isOn: $recordAfterPairing)
-                    Text("Начнём запись при подключении. Сохраняем на iPhone без интернета.").font(.caption).foregroundStyle(.secondary)
+                    Text("Начнём запись при подключении. Сохраняем на iPhone без интернета.").font(.caption).foregroundStyle(MotoTheme.secondary)
                     ForEach(bluetooth.nearby) { device in
                         Button {
                             bluetooth.connect(to: device.id)
@@ -246,7 +275,7 @@ struct ContentView: View {
                     DisclosureGroup("Не видишь свой байк?") {
                         Text("На Ninja / Z500 подключись до движения, в первые минуты после включения зажигания. Если окно поиска закрылось, повтори после выключения и включения зажигания на стоянке. Закрой другие приложения, подключённые к мотоциклу.")
                             .font(.subheadline).padding(.top, 8)
-                    }.foregroundStyle(.secondary)
+                    }.foregroundStyle(MotoTheme.secondary)
                 }.padding(20)
             }.background(MotoTheme.background).navigationTitle("Выбрать мотоцикл")
                 .navigationBarTitleDisplayMode(.inline)
@@ -273,7 +302,7 @@ struct ContentView: View {
                         if value { bluetooth.setAutoReconnect(true) }
                         rides.setAutoRecord(value)
                     })).disabled(!bluetooth.hasRememberedDevice)
-                    if !bluetooth.hasRememberedDevice { Text("Сначала выбери мотоцикл в разделе «Поездка».").font(.caption).foregroundStyle(.secondary) }
+                    if !bluetooth.hasRememberedDevice { Text("Сначала выбери мотоцикл в разделе «Поездка».").font(.caption).foregroundStyle(MotoTheme.secondary) }
                     if rides.autoRecord && rides.authorization != .authorizedAlways {
                         Button("Разрешить GPS в фоне") { rides.requestBackgroundPermission() }
                     }
@@ -287,7 +316,7 @@ struct ContentView: View {
                     }
                     Toggle("Не гасить экран при записи", isOn: $keepScreenOn)
                     Text("Светлая тема удобнее на солнце. Экран остаётся включённым только пока Moto Link открыт.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(MotoTheme.secondary)
                 }
                 Section {
                     Button("Начать за минуту") {
@@ -303,7 +332,7 @@ struct ContentView: View {
                     Text("Всё для твоего байка — на телефоне.")
                     LabeledContent("Версия", value: AppBuild.version)
                     Text("Гараж, запись и история работают без интернета. Показатели байка пока экспериментальные. Анимация иллюстрирует данные; свет фар — оформление. Скорость не корректируется автоматически.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(MotoTheme.secondary)
                 }
             }.font(.system(.body)).scrollContentBackground(.hidden).background(MotoTheme.background)
                 .navigationTitle("Настройки").navigationBarTitleDisplayMode(.inline)
@@ -333,22 +362,22 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Проверка каналов").font(MotoTheme.font(.title3).weight(.semibold))
             Text("Событий в поездке: \(rides.active?.rawEventCount ?? 0)")
-                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                .font(.caption.monospacedDigit()).foregroundStyle(MotoTheme.secondary)
             if let last = bluetooth.lastPacketAt {
                 Text("Последние данные: \(last.formatted(date: .omitted, time: .standard))")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(MotoTheme.secondary)
             }
             Text("Соберём сведения, возможности, напряжение, температуры и попробуем запустить поток. Если поток не появится, автоматически применим один резервный профиль совместимости. Он передаёт мотоциклу имя телефона MotoLink.")
-                .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
+                .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
             Button { bluetooth.runFullDiagnostic() } label: {
                 Label("Проверить всё", systemImage: "bolt.shield").frame(maxWidth: .infinity).padding(.vertical, 8)
             }.buttonStyle(PixelButtonStyle(prominent: true)).foregroundStyle(.white)
                 .disabled(!bluetooth.ready || bluetooth.busy || bluetooth.diagnosticRunning)
             if bluetooth.diagnosticRunning {
                 HStack { ProgressView(); Text(bluetooth.diagnosticStatus).font(.caption) }
-            } else { Text(bluetooth.diagnosticStatus).font(.caption).foregroundStyle(.secondary) }
+            } else { Text(bluetooth.diagnosticStatus).font(.caption).foregroundStyle(MotoTheme.secondary) }
             Text("Показатели остаются экспериментальными. Поле впрыска сохраняется без единиц: его смысл и масштаб ещё проверяем. Все пакеты сохраняются даже без расшифровки.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(MotoTheme.secondary)
             DisclosureGroup("Отдельные запросы") {
                 requestButton("Модель и версия", subtitle: "Информация из ответа", icon: "bolt.circle", commands: [0x03])
                 requestButton("Возможности", subtitle: "Поддерживаемые показатели", icon: "list.bullet.rectangle", commands: [0x40])
@@ -373,7 +402,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity).padding(.vertical, 5)
                 }.buttonStyle(PixelButtonStyle(prominent: true))
                     .disabled(!bluetooth.ready || rides.finishingRide)
-                if justSaved { Text("Сохранено в истории").font(.caption).foregroundStyle(.secondary) }
+                if justSaved { Text("Сохранено в истории").font(.caption).foregroundStyle(MotoTheme.secondary) }
             } else {
                 if rides.finishingRide {
                     HStack { ProgressView(); Text("Сохраняем поездку…") }.font(.subheadline)
@@ -412,23 +441,23 @@ struct ContentView: View {
                     .font(.caption).foregroundStyle(.orange)
             }
             Text("Локальный JSONL: время, каналы и исходные байты. Экспорт может содержать идентификаторы мотоцикла. Последние 5 файлов, до 10 МБ каждый; сведения подключения сохраняются отдельно.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(MotoTheme.secondary)
             LazyVStack(alignment: .leading, spacing: 14) {
                 ForEach(Array(bluetooth.events.suffix(40).reversed())) { event in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text(event.kind.uppercased())
-                                .foregroundStyle(event.kind == "rx" ? accent : Color.secondary)
+                                .foregroundStyle(event.kind == "rx" ? accent : MotoTheme.secondary)
                             Spacer()
                             Text(String(event.timestamp.dropFirst(11).prefix(12)))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(MotoTheme.secondary)
                         }
                         .font(.caption2.monospaced())
                         Text(event.detail).font(.caption).textSelection(.enabled)
                         if let hex = event.hex {
                             Text(hex.isEmpty ? "∅ (пустой пакет)" : hex)
                                 .font(.caption2.monospaced())
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(MotoTheme.secondary)
                                 .textSelection(.enabled)
                         }
                         Divider()
@@ -447,7 +476,7 @@ struct ContentView: View {
 
     private func metric(_ label: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(label).font(.caption.weight(.semibold)).foregroundStyle(MotoTheme.secondary)
             Text(value).font(.system(.title2, design: .monospaced).weight(.semibold)).monospacedDigit()
         }
     }
@@ -458,7 +487,7 @@ struct ContentView: View {
                 Image(systemName: icon).frame(width: 24)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title).font(MotoTheme.font(.subheadline).weight(.semibold))
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                    Text(subtitle).font(.caption).foregroundStyle(MotoTheme.secondary)
                 }
                 Spacer(minLength: 0)
             }
@@ -530,14 +559,25 @@ struct ShareSheet: UIViewControllerRepresentable {
 struct BikeActivityView: View, Equatable {
     let bluetooth: MotorcycleBluetooth
     var preview = false
+    var compact = false
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var snapshot = BikeActivitySnapshot()
+    @State private var sampledSnapshot = BikeActivitySnapshot()
     @State private var lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
     @State private var visible = false
     @State private var refreshTimer: Timer?
 
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth && lhs.preview == rhs.preview }
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth && lhs.preview == rhs.preview && lhs.compact == rhs.compact }
+
+    private var snapshot: BikeActivitySnapshot {
+        #if targetEnvironment(simulator)
+        if preview {
+            let now = Date()
+            return BikeActivitySnapshot.sample(connected: true, ready: true, measurements: ProductVisualData.measurements(at: now), now: now)
+        }
+        #endif
+        return sampledSnapshot
+    }
 
     private var animating: Bool {
         visible && scenePhase == .active && !reduceMotion && !lowPower && snapshot.live
@@ -569,18 +609,19 @@ struct BikeActivityView: View, Equatable {
             }
             .frame(maxWidth: 360)
             .accessibilityHidden(true)
-            Text(snapshot.label).font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 4) {
+            Text(snapshot.label).font(.caption).foregroundStyle(MotoTheme.secondary)
+            if !compact { HStack(spacing: 4) {
                 ForEach(0..<4) { index in
                     Rectangle().fill(snapshot.live && index < (snapshot.engineLevel ?? 0)
                         ? MotoTheme.accent : Color.primary.opacity(0.12))
                         .frame(width: 12, height: CGFloat(4 + index * 3))
                 }
                 Text(snapshot.live ? "Живые данные" : "Ожидаем данные")
-                    .font(MotoTheme.font(.caption)).foregroundStyle(.secondary)
+                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(snapshot.live ? "Свежие данные мотоцикла" : "Нет свежих данных мотоцикла")
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear { visible = true; updateRefreshTimer() }
@@ -595,18 +636,18 @@ struct BikeActivityView: View, Equatable {
 
     private func updateRefreshTimer() {
         stopRefreshTimer()
-        guard visible && scenePhase == .active else { return }
         sample()
+        guard visible && scenePhase == .active else { return }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in sample() }
     }
 
     private func sample() {
         #if targetEnvironment(simulator)
-        if preview { snapshot = BikeActivitySnapshot.sample(connected: true, ready: true, measurements: ProductVisualData.measurements(), now: Date()); return }
+        if preview { return }
         #endif
         let next = BikeActivitySnapshot.sample(connected: bluetooth.connected, ready: bluetooth.ready,
             measurements: bluetooth.measurements, now: Date())
-        if snapshot != next { snapshot = next }
+        if sampledSnapshot != next { sampledSnapshot = next }
         lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
     }
 

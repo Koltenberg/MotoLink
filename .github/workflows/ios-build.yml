@@ -38,6 +38,7 @@ jobs:
           path: |
             build-artifacts/ios/**/*.png
             build-artifacts/ios/**/MotoLinkVisualOrientation.json
+            build-artifacts/ios/**/*.ready.json
           if-no-files-found: warn
           retention-days: 3
       - name: Upload unsigned IPA and package report

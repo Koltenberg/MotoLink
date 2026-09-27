@@ -4,6 +4,7 @@ struct SpeedComparisonView: View, Equatable {
     let bluetooth: MotorcycleBluetooth
     let rides: RideRecorder
     var preview = false
+    var compact = false
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var gps: Double?
@@ -11,31 +12,53 @@ struct SpeedComparisonView: View, Equatable {
     @State private var difference: Double?
     @State private var timer: Timer?
     @State private var visible = false
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth && lhs.rides === rhs.rides && lhs.preview == rhs.preview }
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.bluetooth === rhs.bluetooth && lhs.rides === rhs.rides
+            && lhs.preview == rhs.preview && lhs.compact == rhs.compact
+    }
+    private var display: (gps: Double?, bike: Double?, difference: Double?) {
+        #if targetEnvironment(simulator)
+        if preview { return (64, 68, 4) }
+        #endif
+        return (gps, bike, difference)
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if typeSize.isAccessibilitySize {
-                VStack(alignment: .leading, spacing: 10) { reading("GPS", gps); reading("Байк", bike) }
+                VStack(alignment: .leading, spacing: 10) { reading("GPS", display.gps); reading("Байк", display.bike) }
             } else {
-                HStack(alignment: .top, spacing: 12) { reading("GPS", gps); reading("Байк", bike) }
+                HStack(alignment: .top, spacing: 12) { reading("GPS", display.gps); reading("Байк", display.bike) }
             }
-            if let difference {
+            if !compact, let difference = display.difference {
                 Text(String(format: "Разница %+.0f км/ч", difference))
-                    .font(.system(.caption).monospacedDigit()).foregroundStyle(.secondary)
+                    .font(.system(.caption).monospacedDigit()).foregroundStyle(MotoTheme.secondary)
             }
         }
         .onAppear { visible = true; updateTimer() }
         .onDisappear { visible = false; timer?.invalidate(); timer = nil }
         .onChange(of: scenePhase) { _ in updateTimer() }
     }
-    private func reading(_ title: String, _ speed: Double?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.system(.caption)).foregroundStyle(.secondary)
-            Text(speed.map { String(format: "%.0f", $0) } ?? "—")
-                .font(.system(size: 60, weight: .bold, design: .rounded).monospacedDigit())
-                .lineLimit(1).minimumScaleFactor(0.6)
-            Text("км/ч").font(.system(.caption)).foregroundStyle(.secondary)
-        }.frame(maxWidth: .infinity, alignment: .leading).padding(12).pixelPanel(accent: true)
+    @ViewBuilder private func reading(_ title: String, _ speed: Double?) -> some View {
+        if compact {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(title).font(.system(.caption)).foregroundStyle(MotoTheme.secondary)
+                Spacer(minLength: 0)
+                Text(speed.map { String(format: "%.0f", $0) } ?? "—")
+                    .font(.system(size: 42, weight: .bold, design: .rounded).monospacedDigit())
+                    .lineLimit(1).minimumScaleFactor(0.6)
+                Text("км/ч").font(.system(.caption)).foregroundStyle(MotoTheme.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+            .padding(.horizontal, 12).padding(.vertical, 7).pixelPanel(accent: true)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(.caption)).foregroundStyle(MotoTheme.secondary)
+                Text(speed.map { String(format: "%.0f", $0) } ?? "—")
+                    .font(.system(size: 60, weight: .bold, design: .rounded).monospacedDigit())
+                    .lineLimit(1).minimumScaleFactor(0.6)
+                Text("км/ч").font(.system(.caption)).foregroundStyle(MotoTheme.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(12).pixelPanel(accent: true)
+        }
     }
     private func sample() {
         #if targetEnvironment(simulator)
@@ -57,8 +80,9 @@ struct SpeedComparisonView: View, Equatable {
     }
     private func updateTimer() {
         timer?.invalidate(); timer = nil
-        guard visible, scenePhase == .active else { return }
+        guard visible else { return }
         sample()
+        guard scenePhase == .active else { return }
         let refresh = Timer(timeInterval: 1, repeats: true) { _ in sample() }
         timer = refresh; RunLoop.main.add(refresh, forMode: .common)
     }
@@ -91,11 +115,11 @@ struct ConnectionTestSettingsView: View {
                 Text("50S · SP75").tag("SP75")
             }
             if variant == "SP113" {
-                Text("SP113 — аппаратный вариант 50S с веткой прошивки 2.x. Наклейка не показывает установленную версию; её можно посмотреть в приложении Sena.").font(.caption).foregroundStyle(.secondary)
+                Text("SP113 — аппаратный вариант 50S с веткой прошивки 2.x. Наклейка не показывает установленную версию; её можно посмотреть в приложении Sena.").font(.caption).foregroundStyle(MotoTheme.secondary)
             }
             TextField("Версия Sena, если известна", text: $firmware).textFieldStyle(.roundedBorder)
             Text("Это твои отметки, а не обнаруженные устройства. Условия сбросятся после начала записи; вариант и версия сохранятся. Системная диагностика Apple в этот журнал не входит.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(MotoTheme.secondary)
         }.font(.system(.subheadline))
     }
     static func capture() -> String {

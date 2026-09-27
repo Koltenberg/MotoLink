@@ -9,6 +9,11 @@ struct MotoLinkApp: App {
     var body: some Scene {
         WindowGroup {
             appContent
+                .background {
+                    #if targetEnvironment(simulator)
+                    ProductVisualReadyProbe()
+                    #endif
+                }
                 .preferredColorScheme(selectedScheme)
                 .tint(MotoTheme.accent)
                 .font(.system(.body))
@@ -58,6 +63,9 @@ enum MotoTheme {
         ? UIColor(red: 1, green: 0.34, blue: 0.38, alpha: 1)
         : UIColor(red: 0.70, green: 0.06, blue: 0.13, alpha: 1) })
     static let button = Color(red: 0.69, green: 0.06, blue: 0.12)
+    static let secondary = Color(UIColor { $0.userInterfaceStyle == .dark
+        ? UIColor(red: 0.70, green: 0.70, blue: 0.73, alpha: 1)
+        : UIColor(red: 0.34, green: 0.34, blue: 0.37, alpha: 1) })
     static let border = Color.primary.opacity(0.18)
     static func font(_ style: Font.TextStyle) -> Font {
         let size: CGFloat

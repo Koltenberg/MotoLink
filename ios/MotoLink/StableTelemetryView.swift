@@ -5,6 +5,7 @@ import SwiftUI
 struct MotorcycleDashboardView: View, Equatable {
     let bluetooth: MotorcycleBluetooth
     var preview = false
+    var compact = false
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.scenePhase) private var scenePhase
     @ScaledMetric(relativeTo: .largeTitle) private var speedSize = 54.0
@@ -15,25 +16,38 @@ struct MotorcycleDashboardView: View, Equatable {
     @State private var refreshTimer: Timer?
     @State private var visible = false
 
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth && lhs.preview == rhs.preview }
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.bluetooth === rhs.bluetooth && lhs.preview == rhs.preview && lhs.compact == rhs.compact
+    }
 
     private var columns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), alignment: .topLeading), count: typeSize.isAccessibilitySize ? 1 : 3)
+        Array(repeating: GridItem(.flexible(), alignment: .topLeading), count: compact ? 3 : typeSize.isAccessibilitySize ? 1 : 3)
+    }
+
+    private var display: (catalogue: TelemetryPresentation, connected: Bool, ready: Bool, at: Date) {
+        #if targetEnvironment(simulator)
+        if preview {
+            let now = Date()
+            return (ProductVisualData.catalogue(at: now), true, true, now)
+        }
+        #endif
+        return (catalogue, connected, ready, sampledAt)
     }
 
     var body: some View {
         Group {
+            let snapshot = display
             let primary = ["gear_position", "engine_water_temperature", "engine_speed"].map { id in
-                catalogue.row(catalogue.fields.first(where: { $0.id == id }) ?? TelemetryPresentation.placeholder(id),
-                    connected: connected, ready: ready, now: sampledAt)
+                snapshot.catalogue.row(snapshot.catalogue.fields.first(where: { $0.id == id }) ?? TelemetryPresentation.placeholder(id),
+                    connected: snapshot.connected, ready: snapshot.ready, now: snapshot.at)
             }
-            let additional = catalogue.rows(connected: connected, ready: ready, now: sampledAt)
+            let additional = snapshot.catalogue.rows(connected: snapshot.connected, ready: snapshot.ready, now: snapshot.at)
                 .filter { !TelemetryPresentation.primaryIDs.contains($0.id) && $0.id != "fuel_injection_raw" && $0.field.decoded }
             VStack(alignment: .leading, spacing: 10) {
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
                     ForEach(primary) { row in card(row) }
                 }
-                if !additional.isEmpty {
+                if !compact && !additional.isEmpty {
                     DisclosureGroup("Другие показатели") {
                         LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
                             ForEach(additional) { row in card(row) }
@@ -65,29 +79,49 @@ struct MotorcycleDashboardView: View, Equatable {
 
     private func updateRefreshTimer() {
         stopRefreshTimer()
-        guard visible, scenePhase == .active else { return }
+        guard visible else { return }
         sample()
+        guard scenePhase == .active else { return }
         let timer = Timer(timeInterval: 1, repeats: true) { _ in sample() }
         refreshTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 
-    private func card(_ row: TelemetryPresentation.Row, prominent: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(row.id == "engine_water_temperature" ? "Температура" : row.id == "engine_speed" ? "Обороты" : row.field.label).font(.system(.caption))
-                .fixedSize(horizontal: false, vertical: true)
-            Text(number(row)).font(.system(.title, design: .rounded).weight(.semibold).monospacedDigit())
-                .lineLimit(1).minimumScaleFactor(0.75)
-                .foregroundStyle(row.value == nil ? Color.secondary : Color.primary)
-            // Units get their own line so a three-digit speed or five-digit RPM
-            // does not wrap on an iPhone SE beside the fixed gear card.
-            Text(row.field.unit.isEmpty ? " " : row.field.unit).font(.system(.caption)).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+    @ViewBuilder private func card(_ row: TelemetryPresentation.Row, prominent: Bool = false) -> some View {
+        if compact {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.id == "engine_water_temperature" ? "Температура" : row.id == "engine_speed" ? "Обороты" : row.field.label)
+                    .font(.system(.caption)).lineLimit(1).minimumScaleFactor(0.8)
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(number(row)).font(.system(size: 24, weight: .semibold, design: .rounded).monospacedDigit())
+                        .lineLimit(1).minimumScaleFactor(0.75)
+                        .foregroundStyle(row.value == nil ? MotoTheme.secondary : Color.primary)
+                    if !row.field.unit.isEmpty {
+                        Text(row.field.unit).font(.system(.caption)).foregroundStyle(MotoTheme.secondary).lineLimit(1)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .pixelPanel(accent: prominent)
+            .accessibilityElement(children: .combine)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(row.id == "engine_water_temperature" ? "Температура" : row.id == "engine_speed" ? "Обороты" : row.field.label).font(.system(.caption))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(number(row)).font(.system(.title, design: .rounded).weight(.semibold).monospacedDigit())
+                    .lineLimit(1).minimumScaleFactor(0.75)
+                    .foregroundStyle(row.value == nil ? MotoTheme.secondary : Color.primary)
+                // Units get their own line so a three-digit speed or five-digit RPM
+                // does not wrap on an iPhone SE beside the fixed gear card.
+                Text(row.field.unit.isEmpty ? " " : row.field.unit).font(.system(.caption)).foregroundStyle(MotoTheme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .pixelPanel(accent: prominent)
+            .accessibilityElement(children: .combine)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .pixelPanel(accent: prominent)
-        .accessibilityElement(children: .combine)
     }
 
     private func number(_ row: TelemetryPresentation.Row) -> String {

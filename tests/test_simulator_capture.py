@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import zlib
 from unittest.mock import Mock, patch
 
 SPEC = importlib.util.spec_from_file_location("capture_simulator",
@@ -50,6 +51,8 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.orientation_file = self.container / "Documents" / CAPTURE.ORIENTATION_EVIDENCE
         self.write_orientation = True
         self.orientation_override = {}
+        self.write_ready = True
+        self.ready_override = {}
 
     def fake_run(self, *args, **kwargs):
         self.calls.append(args)
@@ -74,6 +77,16 @@ class SimulatorCaptureTests(unittest.TestCase):
                                 "companion" if "--companion-visual-check" in args else "home")
             self.theme = "light" if "--review-light" in args else "default"
             self.landscape = "--review-landscape" in args
+            if self.write_ready:
+                token = args[args.index("--visual-review-token") + 1]
+                (self.container / "Documents" / CAPTURE.READY_EVIDENCE).write_text(json.dumps({
+                    "ready": True, "launchToken": token,
+                    "mode": "garage" if self.active_mode == "home" else self.active_mode,
+                    "appearance": "light" if "--review-light" in args else "dark" if "--review-ride" in args else "light",
+                    "windowWidth": 844 if self.landscape else 390,
+                    "windowHeight": 390 if self.landscape else 844,
+                    "capturedAt": time.time(), "visibleSeconds": 2.1, **self.ready_override,
+                }), encoding="utf-8")
             if self.landscape and self.write_orientation:
                 self.orientation_file.write_text(json.dumps({
                     "interfaceLandscape": True, "interfaceOrientation": 3,
@@ -94,7 +107,8 @@ class SimulatorCaptureTests(unittest.TestCase):
 
     def execute(self):
         with patch.object(CAPTURE, "run", side_effect=self.fake_run), \
-             patch.object(CAPTURE.time, "sleep"), patch.dict(CAPTURE.os.environ, self.runner_env, clear=True):
+             patch.object(CAPTURE.time, "sleep"), patch.object(CAPTURE, "reject_blank_png"), \
+             patch.dict(CAPTURE.os.environ, self.runner_env, clear=True):
             CAPTURE.capture(self.app, self.output)
 
     def set_hosted_seed(self):
@@ -153,7 +167,8 @@ class SimulatorCaptureTests(unittest.TestCase):
         device = self.devices[0]
         terminate = self.calls.index(("terminate", device, "org.koltenberg.MotoLink"))
         reset = self.calls.index(("ui", device, "content_size", "large"))
-        launch = self.calls.index(("launch", device, "org.koltenberg.MotoLink", "--companion-visual-check"))
+        launch = next(index for index, call in enumerate(self.calls)
+                      if call[:4] == ("launch", device, "org.koltenberg.MotoLink", "--companion-visual-check"))
         self.assertLess(terminate, reset)
         self.assertLess(reset, launch)
         for name, mode, size in [
@@ -239,6 +254,38 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.assertTrue(evidence["interfaceLandscape"])
         self.assertGreater(evidence["windowWidth"], evidence["windowHeight"])
 
+    def test_missing_readiness_never_captures_the_launch_screen(self):
+        self.write_ready = False
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "readiness was not confirmed"):
+            self.execute()
+        self.assertFalse(any(call[0] == "io" for call in self.calls))
+
+    def test_stale_token_wrong_theme_or_invisible_window_cannot_pass_readiness(self):
+        for override in ({"launchToken": "previous-process"}, {"windowWidth": 0},
+                         {"visibleSeconds": 0}, {"capturedAt": time.time() - 3600}):
+            with self.subTest(override=override):
+                self.calls = []
+                self.ready_override = override
+                with self.assertRaisesRegex(CAPTURE.CaptureError, "Visual readiness does not match"):
+                    self.execute()
+                self.assertFalse(any(call[0] == "io" for call in self.calls))
+        self.ready_override = {"appearance": "light"}
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "Visual readiness does not match"):
+            self.execute()
+        self.assertFalse(any(call[0] == "io" and Path(call[-1]).name == "simulator-ride.png"
+                             for call in self.calls))
+
+    def test_every_launch_has_unique_readiness_and_keeps_evidence_with_screenshots(self):
+        self.execute()
+        tokens = [call[call.index("--visual-review-token") + 1] for call in self.calls if call[0] == "launch"]
+        self.assertEqual(len(tokens), len(set(tokens)))
+        self.assertEqual(len(list(self.output.glob("*.ready.json"))), 8)
+        dark = json.loads((self.output / "simulator-ride.ready.json").read_text())
+        light = json.loads((self.output / "simulator-ride-light.ready.json").read_text())
+        self.assertEqual(dark["appearance"], "dark")
+        self.assertEqual(light["appearance"], "light")
+        self.assertNotEqual(dark["launchToken"], light["launchToken"])
+
     def test_previous_geometry_is_deleted_and_missing_new_evidence_fails(self):
         self.orientation_file.write_text('{"interfaceLandscape":true}', encoding="utf-8")
         self.write_orientation = False
@@ -293,7 +340,7 @@ class SimulatorCaptureTests(unittest.TestCase):
             elif args[0] == "launch":
                 self.launch_result = "org.koltenberg.MotoLink: 1234"
         self.failure = fail
-        with self.assertRaisesRegex(CAPTURE.CaptureError, "Companion launch did not return a process ID"):
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "App launch did not return a process ID"):
             self.execute()
         self.assertFalse(any(args[0] == "io" and "companion" in Path(args[-1]).name for args in self.calls))
         self.assertEqual(list(self.output.glob("*.png")), [])
@@ -370,6 +417,58 @@ class SimulatorCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(CAPTURE.CaptureError, "budget exhausted"):
                 CAPTURE.run("boot", "simulator", deadline=99)
             process.assert_not_called()
+
+
+class BlankScreenshotTests(unittest.TestCase):
+    @staticmethod
+    def png(path, method, blank=None):
+        width, height, channels = 160, 320, 4
+        prior = bytearray(width * channels)
+        encoded = bytearray()
+        for y in range(height):
+            row = bytearray()
+            for x in range(width):
+                if blank is None:
+                    row.extend(((x // 20) * 30, (y // 40) * 30, 120, 255))
+                else:
+                    shade = 0 if y < 30 and 50 < x < 110 else blank
+                    row.extend((shade, shade, shade, 255))
+            encoded.append(method)
+            for x, value in enumerate(row):
+                left = row[x - channels] if x >= channels else 0
+                up = prior[x]
+                corner = prior[x - channels] if x >= channels else 0
+                if method == 4:
+                    estimate = left + up - corner
+                    a, b, c = abs(estimate - left), abs(estimate - up), abs(estimate - corner)
+                    predictor = left if a <= b and a <= c else up if b <= c else corner
+                else:
+                    predictor = (0, left, up, (left + up) // 2)[method]
+                encoded.append((value - predictor) & 255)
+            prior = row
+        def chunk(kind, payload):
+            return (struct.pack(">I", len(payload)) + kind + payload
+                    + struct.pack(">I", zlib.crc32(kind + payload)))
+        path.write_bytes(b"\x89PNG\r\n\x1a\n"
+                         + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+                         + chunk(b"IDAT", zlib.compress(encoded)) + chunk(b"IEND", b""))
+
+    def test_white_or_black_launch_snapshot_does_not_pass_due_to_status_bar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "blank.png"
+            for shade in (0, 255):
+                with self.subTest(shade=shade):
+                    self.png(image, 1, blank=shade)
+                    with self.assertRaisesRegex(CAPTURE.CaptureError, "Blank or near-uniform"):
+                        CAPTURE.reject_blank_png(image)
+
+    def test_real_content_is_recognized_for_each_standard_png_filter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "content.png"
+            for method in range(5):
+                with self.subTest(method=method):
+                    self.png(image, method)
+                    CAPTURE.reject_blank_png(image)
 
 
 class OrientationEvidenceWaitTests(unittest.TestCase):
