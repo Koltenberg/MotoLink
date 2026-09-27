@@ -19,9 +19,10 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     header
                     rideStatus
+                    if rides.active == nil { CompanionHomeCard(store: companion, rides: rides) }
                     if !occupied { discovery }
                     connectionCard
-                    CompanionHomeCard(store: companion, rides: rides)
+                    if rides.active != nil { CompanionHomeCard(store: companion, rides: rides) }
                     NavigationLink { RideStatisticsView(rides: rides) } label: {
                         Label("Неделя и месяц", systemImage: "chart.bar")
                             .frame(maxWidth: .infinity, alignment: .leading).padding(18).pixelPanel()
@@ -100,7 +101,9 @@ struct ContentView: View {
                 Spacer(minLength: 0)
                 if bluetooth.connecting { ProgressView() }
             }
-            SpeedComparisonView(bluetooth: bluetooth, rides: rides).equatable()
+            if occupied || rides.active != nil {
+                SpeedComparisonView(bluetooth: bluetooth, rides: rides).equatable()
+            }
             DisclosureGroup("Приборы и мотоцикл") {
                 MotorcycleDashboardView(bluetooth: bluetooth).equatable()
                 BikeActivityView(bluetooth: bluetooth).equatable()
