@@ -372,6 +372,30 @@ class SimulatorCaptureTests(unittest.TestCase):
             process.assert_not_called()
 
 
+class OrientationEvidenceWaitTests(unittest.TestCase):
+    def test_late_file_is_accepted_once_without_waiting_for_contents_to_improve(self):
+        path = Mock()
+        path.is_file.side_effect = [False, False, True]
+        with patch.object(CAPTURE.time, "monotonic", side_effect=[100, 100, 100.5, 101]), \
+             patch.object(CAPTURE.time, "sleep") as sleep:
+            CAPTURE.wait_for_orientation_evidence(path, deadline=200)
+        self.assertEqual(path.is_file.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [unittest.mock.call(0.5), unittest.mock.call(0.5)])
+        path.read_text.assert_not_called()
+
+    def test_missing_file_cannot_wait_past_the_global_or_ten_second_budget(self):
+        for deadline, clock in [(100.2, [100, 100, 100.2]), (200, [100, 100, 110])]:
+            with self.subTest(deadline=deadline):
+                path = Mock()
+                path.is_file.return_value = False
+                with patch.object(CAPTURE.time, "monotonic", side_effect=clock), \
+                     patch.object(CAPTURE.time, "sleep") as sleep:
+                    with self.assertRaisesRegex(CAPTURE.CaptureError, "bounded wait"):
+                        CAPTURE.wait_for_orientation_evidence(path, deadline)
+                self.assertEqual(path.is_file.call_count, 1)
+                self.assertLessEqual(sleep.call_args.args[0], min(0.5, deadline - 100))
+
+
 class RunnerSeedSelectionTests(unittest.TestCase):
     device_type = {"name": "iPhone 17", "identifier": "iphone17"}
     valid = {"name": "iPhone 17", "deviceTypeIdentifier": "iphone17",

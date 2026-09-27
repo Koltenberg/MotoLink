@@ -249,6 +249,21 @@ def validate_landscape_evidence(path, launched_at):
           f"scene {dimensions[2]}x{dimensions[3]}", flush=True)
 
 
+def wait_for_orientation_evidence(path, deadline):
+    # The process ID can arrive before SwiftUI appears. Wait only for the
+    # atomic fixture file; invalid contents are never polled until they pass.
+    until = min(deadline, time.monotonic() + 10)
+    for poll in range(21):
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            break
+        if path.is_file():
+            return
+        if poll < 20:
+            time.sleep(min(0.5, remaining))
+    raise CaptureError("Missing landscape geometry evidence after bounded wait (up to 10s)")
+
+
 def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadline, seed=None):
     device = None
     try:
@@ -326,6 +341,8 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
                 raise CaptureError(f"{name} launch did not return a process ID: {launched}")
             print(f"Visual state launched: {name}: {launched}", flush=True)
             time.sleep(5)
+            if landscape:
+                wait_for_orientation_evidence(orientation_source, deadline)
             image = output / name
             run("io", device, "screenshot", image, timeout=30, deadline=deadline)
             width, height = validate_png(image)
