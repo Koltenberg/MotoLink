@@ -82,7 +82,14 @@ struct ConnectionTestSettingsView: View {
                 Text("Не указано").tag("unknown"); Text("На креплении").tag("mount")
                 Text("В кармане").tag("pocket"); Text("В сумке").tag("bag")
             }
-            TextField("Вариант Sena, если известен (SP75 / SP113)", text: $variant).textFieldStyle(.roundedBorder)
+            Picker("Модель с наклейки Sena", selection: $variant) {
+                Text("Не указана").tag("")
+                Text("50S · SP113").tag("SP113")
+                Text("50S · SP75").tag("SP75")
+            }
+            if variant == "SP113" {
+                Text("SP113 — аппаратный вариант 50S с веткой прошивки 2.x. Наклейка не показывает установленную версию; её можно посмотреть в приложении Sena.").font(.caption).foregroundStyle(.secondary)
+            }
             TextField("Версия Sena, если известна", text: $firmware).textFieldStyle(.roundedBorder)
             Text("Это твои отметки, а не обнаруженные устройства. Условия сбросятся после начала записи; вариант и версия сохранятся. Системная диагностика Apple в этот журнал не входит.")
                 .font(.caption).foregroundStyle(.secondary)
