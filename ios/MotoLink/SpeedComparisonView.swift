@@ -3,6 +3,7 @@ import SwiftUI
 struct SpeedComparisonView: View, Equatable {
     let bluetooth: MotorcycleBluetooth
     let rides: RideRecorder
+    var preview = false
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var gps: Double?
@@ -10,19 +11,18 @@ struct SpeedComparisonView: View, Equatable {
     @State private var difference: Double?
     @State private var timer: Timer?
     @State private var visible = false
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth && lhs.rides === rhs.rides }
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth && lhs.rides === rhs.rides && lhs.preview == rhs.preview }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if typeSize.isAccessibilitySize {
-                VStack(alignment: .leading, spacing: 10) { reading("GPS", gps); reading("Байк · проверяем", bike) }
+                VStack(alignment: .leading, spacing: 10) { reading("GPS", gps); reading("Байк", bike) }
             } else {
-                HStack(alignment: .top, spacing: 12) { reading("GPS", gps); reading("Байк · проверяем", bike) }
+                HStack(alignment: .top, spacing: 12) { reading("GPS", gps); reading("Байк", bike) }
             }
             if let difference {
-                Text(String(format: "Байк − GPS: %+.0f км/ч", difference)).font(.system(.subheadline).monospacedDigit())
-            } else { Text("Разница появится при свежих данных обоих источников.").font(.system(.caption)).foregroundStyle(.secondary) }
-            Text("GPS зависит от приёма. Скорость из Bluetooth ещё сверяем с приборкой; поправка автоматически не применяется.")
-                .font(.system(.caption)).foregroundStyle(.secondary)
+                Text(String(format: "Разница %+.0f км/ч", difference))
+                    .font(.system(.caption).monospacedDigit()).foregroundStyle(.secondary)
+            }
         }
         .onAppear { visible = true; updateTimer() }
         .onDisappear { visible = false; timer?.invalidate(); timer = nil }
@@ -32,12 +32,15 @@ struct SpeedComparisonView: View, Equatable {
         VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.system(.caption)).foregroundStyle(.secondary)
             Text(speed.map { String(format: "%.0f", $0) } ?? "—")
-                .font(.system(size: 48, weight: .semibold, design: .rounded).monospacedDigit())
+                .font(.system(size: 60, weight: .bold, design: .rounded).monospacedDigit())
                 .lineLimit(1).minimumScaleFactor(0.6)
             Text("км/ч").font(.system(.caption)).foregroundStyle(.secondary)
         }.frame(maxWidth: .infinity, alignment: .leading).padding(12).pixelPanel(accent: true)
     }
     private func sample() {
+        #if targetEnvironment(simulator)
+        if preview { gps = 64; bike = 68; difference = 4; return }
+        #endif
         let now = Date()
         let gpsTime = rides.lastLocationAt
         gps = gpsTime.flatMap { time in

@@ -24,14 +24,14 @@ struct CompanionVisualCheckView: View {
             let earlier = calendar.date(byAdding: .day, value: -8, to: day) ?? day
             let recent = calendar.date(byAdding: .day, value: -2, to: day) ?? day
             store.save { data in
-                data.bikeName = "Kawasaki Ninja 500 · пример"
+                data.bikeName = "Мой Ninja 500"
                 data.odometerKm = 12_480
                 data.fuelEntries = [
                     FuelEntry(date: earlier, odometerKm: 12_100, liters: 10.24, cost: 840.50, fullTank: true),
                     FuelEntry(date: recent, odometerKm: 12_420, liters: 11.36, cost: 931.52, fullTank: true)
                 ]
                 data.serviceTasks = [
-                    ServiceTask(title: "Проверка и смазка цепи", lastDoneAt: earlier,
+                    ServiceTask(title: "Проверка и смазка цепи", lastDoneAt: nil,
                                 lastDoneOdometerKm: 12_000, intervalKm: 500),
                     ServiceTask(title: "Масло и фильтр", lastDoneAt: earlier,
                                 lastDoneOdometerKm: 12_000, intervalKm: 6_000, intervalMonths: 12)

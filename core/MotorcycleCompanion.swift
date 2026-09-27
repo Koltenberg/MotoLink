@@ -2,7 +2,7 @@ import Foundation
 
 enum CompanionValidationError: Error, LocalizedError, Equatable {
     case missingName, invalidDate, invalidOdometer, invalidLiters, invalidCost
-    case nonIncreasingOdometer, duplicateIdentifier, invalidInterval
+    case nonIncreasingOdometer, duplicateIdentifier, invalidInterval, missingServiceDate
 
     var errorDescription: String? {
         switch self {
@@ -14,6 +14,7 @@ enum CompanionValidationError: Error, LocalizedError, Equatable {
         case .nonIncreasingOdometer: return "Пробег заправок должен увеличиваться по датам. Проверьте одинаковые и меньшие значения."
         case .duplicateIdentifier: return "Такая запись уже существует."
         case .invalidInterval: return "Укажите хотя бы один интервал обслуживания больше нуля."
+        case .missingServiceDate: return "Для интервала в месяцах нужна дата последнего обслуживания. Для пробега дата не обязательна."
         }
     }
 }
@@ -56,12 +57,14 @@ struct FuelConsumption: Identifiable, Equatable {
 struct ServiceTask: Codable, Identifiable, Equatable {
     var id: UUID
     var title: String
-    var lastDoneAt: Date
+    /// Unknown is preserved as nil; a mileage record must not acquire today's date.
+    /// Synthesized Codable accepts the dates stored by 0.4.9 and missing/null dates.
+    var lastDoneAt: Date?
     var lastDoneOdometerKm: Double
     var intervalKm: Double?
     var intervalMonths: Int?
 
-    init(id: UUID = UUID(), title: String, lastDoneAt: Date = Date(),
+    init(id: UUID = UUID(), title: String, lastDoneAt: Date? = nil,
          lastDoneOdometerKm: Double, intervalKm: Double? = nil, intervalMonths: Int? = nil) {
         self.id = id
         self.title = title
@@ -75,7 +78,9 @@ struct ServiceTask: Codable, Identifiable, Equatable {
         guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw CompanionValidationError.missingName
         }
-        guard lastDoneAt.timeIntervalSince1970.isFinite else { throw CompanionValidationError.invalidDate }
+        if let lastDoneAt, !lastDoneAt.timeIntervalSince1970.isFinite {
+            throw CompanionValidationError.invalidDate
+        }
         guard lastDoneOdometerKm.isFinite, lastDoneOdometerKm >= 0 else {
             throw CompanionValidationError.invalidOdometer
         }
@@ -85,8 +90,10 @@ struct ServiceTask: Codable, Identifiable, Equatable {
         if let intervalKm, !intervalKm.isFinite || intervalKm <= 0 || !(lastDoneOdometerKm + intervalKm).isFinite {
             throw CompanionValidationError.invalidInterval
         }
-        if let intervalMonths, intervalMonths <= 0 || dueDate() == nil {
-            throw CompanionValidationError.invalidInterval
+        if let intervalMonths {
+            guard intervalMonths > 0 else { throw CompanionValidationError.invalidInterval }
+            guard lastDoneAt != nil else { throw CompanionValidationError.missingServiceDate }
+            guard dueDate() != nil else { throw CompanionValidationError.invalidInterval }
         }
     }
 
@@ -98,7 +105,7 @@ struct ServiceTask: Codable, Identifiable, Equatable {
     }
 
     func dueDate(calendar: Calendar = .current) -> Date? {
-        guard lastDoneAt.timeIntervalSince1970.isFinite,
+        guard let lastDoneAt, lastDoneAt.timeIntervalSince1970.isFinite,
               let intervalMonths, intervalMonths > 0,
               let date = calendar.date(byAdding: .month, value: intervalMonths, to: lastDoneAt),
               date.timeIntervalSince1970.isFinite else { return nil }
@@ -111,6 +118,28 @@ struct ServiceTask: Codable, Identifiable, Equatable {
         if let odometerKm, odometerKm.isFinite, let dueOdometerKm, odometerKm >= dueOdometerKm { return true }
         if let due = dueDate(calendar: calendar) {
             return calendar.startOfDay(for: date) >= calendar.startOfDay(for: due)
+        }
+        return false
+    }
+
+    /// Difference from the last manually entered odometer, never GPS distance.
+    func kilometersRemaining(odometerKm: Double?) -> Double? {
+        guard let odometerKm, odometerKm.isFinite, odometerKm >= 0,
+              let dueOdometerKm else { return nil }
+        return dueOdometerKm - odometerKm
+    }
+
+    /// A quiet reminder in the garage: last 10% of the interval (at most 500 km),
+    /// or seven calendar days. Overdue items have their own more direct status.
+    func isDueSoon(odometerKm: Double?, on date: Date = Date(), calendar: Calendar = .current) -> Bool {
+        guard (try? validate()) != nil, date.timeIntervalSince1970.isFinite,
+              !isDue(odometerKm: odometerKm, on: date, calendar: calendar) else { return false }
+        if let remaining = kilometersRemaining(odometerKm: odometerKm), let intervalKm,
+           remaining > 0, remaining <= min(500, intervalKm * 0.1) { return true }
+        if let due = dueDate(calendar: calendar),
+           let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date),
+                                              to: calendar.startOfDay(for: due)).day {
+            return (1...7).contains(days)
         }
         return false
     }

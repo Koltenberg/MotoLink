@@ -6,199 +6,327 @@ struct ContentView: View {
     @ObservedObject var bluetooth: MotorcycleBluetooth
     @ObservedObject var rides: RideRecorder
     @StateObject private var companion = CompanionStore()
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @AppStorage("MotoLink.appearance") private var appearance = "system"
+    @AppStorage("MotoLink.keepScreenOn") private var keepScreenOn = false
+    @State private var selectedTab = 0
+    @State private var showSettings = false
+    @State private var showProfile = false
     @State private var showHelp = false
     @State private var showDiagnostics = false
+    @State private var showDiscovery = false
     @State private var justSaved = false
-
+    @State private var recordAfterPairing = true
     private let accent = MotoTheme.accent
     private var occupied: Bool { bluetooth.connecting || bluetooth.connected }
+    private var bikeName: String { companion.data.bikeName }
+    private var hasRideDisplay: Bool { bluetooth.connected || rides.active != nil || previewRide }
+    private var previewRide: Bool {
+        #if targetEnvironment(simulator)
+        return ProcessInfo.processInfo.arguments.contains("--review-ride")
+        #else
+        return false
+        #endif
+    }
 
     var body: some View {
-        NavigationStack {
+        TabView(selection: $selectedTab) {
+            NavigationStack {
+                CompanionView(store: companion, rides: rides)
+                    .safeAreaInset(edge: .bottom) {
+                        if !bluetooth.hasRememberedDevice {
+                            Button { showDiscovery = true; bluetooth.scan() } label: {
+                                Label("Добавить мотоцикл", systemImage: "plus").frame(maxWidth: .infinity)
+                            }.buttonStyle(PixelButtonStyle(prominent: true)).padding(14).background(MotoTheme.background)
+                        }
+                    }
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar { settingsButton }
+            }.tabItem { Label("Гараж", systemImage: "house") }.tag(0)
+            NavigationStack {
+                rideScreen
+                    .navigationTitle(bikeName)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar { settingsButton }
+            }.tabItem { Label("Поездка", systemImage: "speedometer") }.tag(1)
+            NavigationStack {
+                HistoryHubView(rides: rides)
+                    .navigationBarTitleDisplayMode(.inline)
+            }.tabItem { Label("История", systemImage: "clock.arrow.circlepath") }.tag(2)
+        }
+        .sheet(isPresented: $showSettings) { settings }
+        .sheet(isPresented: $showProfile) { BikeProfileEditor(store: companion) }
+        .sheet(isPresented: $showHelp) { help }
+        .sheet(isPresented: $showDiscovery) { discoverySheet }
+        .sheet(isPresented: $showDiagnostics) { diagnostics }
+        .sheet(item: $rides.exportedFiles) { files in ShareSheet(items: files.urls) }
+        .onAppear {
+            if rides.active != nil || bluetooth.connected { selectedTab = 1 }
+            #if targetEnvironment(simulator)
+            if ProcessInfo.processInfo.arguments.contains("--review-ride") { selectedTab = 1 }
+            #endif
+            updateScreenAwake()
+        }
+        .onChange(of: rides.active?.id) { id in
+            if id != nil { selectedTab = 1 }
+            updateScreenAwake()
+        }
+        .onChange(of: bluetooth.connected) { connected in if connected { selectedTab = 1 } }
+        .onChange(of: scenePhase) { _ in updateScreenAwake() }
+        .onChange(of: keepScreenOn) { _ in updateScreenAwake() }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+
+    @ToolbarContentBuilder private var settingsButton: some ToolbarContent {
+        ToolbarItem(placement: .navigationBarTrailing) {
+            Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                .accessibilityLabel("Настройки")
+        }
+    }
+
+    private var rideScreen: some View {
+        GeometryReader { geometry in
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    header
-                    rideStatus
-                    if rides.active == nil { CompanionHomeCard(store: companion, rides: rides) }
-                    if !occupied { discovery }
-                    connectionCard
-                    if rides.active != nil { CompanionHomeCard(store: companion, rides: rides) }
-                    NavigationLink { RideStatisticsView(rides: rides) } label: {
-                        Label("Неделя и месяц", systemImage: "chart.bar")
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(18).pixelPanel()
-                    }.buttonStyle(.plain)
-                    NavigationLink { RideHistoryView(rides: rides) } label: {
-                        Label("Мои поездки", systemImage: "clock.arrow.circlepath")
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(18)
-                            .pixelPanel()
-                    }.buttonStyle(.plain)
-                }
-                .padding(20)
+                VStack(alignment: .leading, spacing: 16) {
+                    connectionStatus
+                    if hasRideDisplay {
+                        if geometry.size.width > 600 && !typeSize.isAccessibilitySize {
+                            HStack(alignment: .top, spacing: 18) {
+                                instrumentPanel.frame(maxWidth: .infinity)
+                                VStack(spacing: 12) {
+                                    BikeActivityView(bluetooth: bluetooth, preview: previewRide).equatable()
+                                    rideStatus
+                                }.frame(width: geometry.size.width * 0.32)
+                            }
+                        } else {
+                            instrumentPanel
+                            BikeActivityView(bluetooth: bluetooth, preview: previewRide).equatable()
+                            rideStatus
+                        }
+                    } else {
+                        Image("BikeSpriteDetail").resizable().interpolation(.none).scaledToFit()
+                            .frame(maxWidth: .infinity, maxHeight: 185).accessibilityHidden(true)
+                        Text(bluetooth.connecting ? "Ждём твой байк" : "Поехали?")
+                            .font(MotoTheme.font(.title)).foregroundStyle(.primary)
+                        Text(bluetooth.connecting
+                             ? "Включи зажигание и держи iPhone рядом. Ожидание можно оставить или отменить."
+                             : bluetooth.hasRememberedDevice
+                             ? (bluetooth.autoReconnect && !bluetooth.connectionPaused
+                                ? "Включи зажигание. Подключимся к твоему мотоциклу."
+                                : "Включи зажигание и нажми «Подключиться».")
+                             : "Включи зажигание и один раз выбери свой мотоцикл.")
+                            .font(.body).foregroundStyle(.secondary)
+                        if !occupied {
+                            Button {
+                                if bluetooth.hasRememberedDevice { bluetooth.connectRemembered() }
+                                else { showDiscovery = true; bluetooth.scan() }
+                            } label: {
+                                Label(bluetooth.hasRememberedDevice ? "Подключиться" : "Выбрать мотоцикл",
+                                      systemImage: "link").frame(maxWidth: .infinity)
+                            }.buttonStyle(PixelButtonStyle(prominent: true))
+                                .disabled(!bluetooth.bluetoothPowered)
+                        }
+                        if rides.autoRecord {
+                            Label("Автозапись включена", systemImage: "record.circle")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
+                    if let error = bluetooth.storageError {
+                        Label("Журнал не сохраняется: " + error, systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.red)
+                    }
+                }.padding(18)
             }
             .background(MotoTheme.background)
-            .navigationTitle("Moto Link")
-            .navigationBarTitleDisplayMode(.inline)
             .safeAreaInset(edge: .bottom) {
-                captureControls.padding(.horizontal, 16).padding(.vertical, 10)
-                    .background(MotoTheme.background)
-            }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Menu {
-                        Button { showHelp = true } label: { Label("Как пользоваться", systemImage: "questionmark.circle") }
-                        Button { showDiagnostics = true } label: { Label("Диагностика", systemImage: "wrench.and.screwdriver") }
-                    } label: { Image(systemName: "ellipsis.circle") }
-                    .accessibilityLabel("Помощь и дополнительные действия")
-                }
-            }
-            .sheet(isPresented: $showHelp) { help }
-            .sheet(isPresented: $showDiagnostics) {
-                NavigationStack {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 20) {
-                            ConnectionTestSettingsView()
-                            diagnosticControls
-                            logSection
-                        }.padding(20)
-                    }.background(MotoTheme.background)
-                        .navigationTitle("Диагностика")
-                        .toolbar { ToolbarItem(placement: .confirmationAction) {
-                            Button("Готово") { showDiagnostics = false }
-                        } }
-                        .sheet(item: $bluetooth.exportedFiles) { files in ShareSheet(items: files.urls) }
+                if hasRideDisplay {
+                    captureControls.padding(.horizontal, 16).padding(.vertical, 8)
+                        .background(MotoTheme.background)
                 }
             }
         }
-        .sheet(item: $rides.exportedFiles) { files in ShareSheet(items: files.urls) }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private var instrumentPanel: some View {
+        VStack(spacing: 12) {
+            SpeedComparisonView(bluetooth: bluetooth, rides: rides, preview: previewRide).equatable()
+            MotorcycleDashboardView(bluetooth: bluetooth, preview: previewRide).equatable()
+        }
+    }
+
+    private var connectionStatus: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                HStack(spacing: 5) {
-                    Rectangle().fill(accent).frame(width: 7, height: 7)
-                    Rectangle().fill(accent.opacity(0.4)).frame(width: 7, height: 7)
-                    Text("MOTO LINK").font(MotoTheme.font(.headline)).tracking(2)
-                }.foregroundStyle(accent)
+                Image(systemName: bluetooth.connected ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                    .foregroundStyle(bluetooth.connected ? Color.primary : Color.secondary)
+                Text(previewRide ? "Связь с байком · пример" : bluetooth.ready ? "Связь с байком" : bluetooth.connected ? "Готовим соединение" :
+                    bluetooth.connecting ? "Ожидаем подключения" : "Байк не подключён")
+                    .font(.subheadline.weight(.semibold))
                 Spacer()
-                Text(AppBuild.version).font(.caption.monospaced()).foregroundStyle(.secondary)
-            }
-            Label("Всё на iPhone · без интернета", systemImage: "iphone")
-                .font(.subheadline).foregroundStyle(.secondary)
-        }
-    }
-
-    private var connectionCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Image(systemName: bluetooth.connected ? "link" : "antenna.radiowaves.left.and.right")
-                    .font(MotoTheme.font(.title2)).foregroundStyle(accent)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(bluetooth.selectedName).font(MotoTheme.font(.headline))
-                    Text(bluetooth.ready ? "Bluetooth подключён" : bluetooth.connecting ? (bluetooth.reconnectAttempt > 0 ? "Восстанавливаем связь…" : "Подключаемся…") : bluetooth.connected ? "Готовим соединение…" : "Bluetooth не подключён")
-                        .font(MotoTheme.font(.subheadline)).foregroundStyle(.secondary)
+                if bluetooth.connecting { ProgressView().controlSize(.small) }
+                if occupied && rides.active == nil {
+                    Button("Отменить") { bluetooth.pauseConnection() }.font(.subheadline)
                 }
-                Spacer(minLength: 0)
-                if bluetooth.connecting { ProgressView() }
             }
-            if occupied || rides.active != nil {
-                SpeedComparisonView(bluetooth: bluetooth, rides: rides).equatable()
+            if !bluetooth.bluetoothPowered {
+                Text(bluetooth.status).font(.subheadline).foregroundStyle(.secondary)
+            } else if let reason = bluetooth.reconnectBlockedReason {
+                Text(reason).font(.subheadline).foregroundStyle(.secondary)
             }
-            DisclosureGroup("Приборы и мотоцикл") {
-                MotorcycleDashboardView(bluetooth: bluetooth).equatable()
-                BikeActivityView(bluetooth: bluetooth).equatable()
+            if rides.active != nil && !bluetooth.connected {
+                Label("Ждём связь · запись продолжается", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.subheadline).foregroundStyle(.secondary)
             }
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 if bluetooth.canRequestUserRescan(at: context.date) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Ожидаем мотоцикл. На остановке можно повторить поиск.").font(.caption).foregroundStyle(.secondary)
-                        Button("Повторить поиск") { bluetooth.requestUserRescan() }.buttonStyle(PixelButtonStyle())
-                    }
+                    Button("Повторить поиск рядом") { bluetooth.requestUserRescan() }
+                        .font(.subheadline)
                 }
             }
-            if rides.active != nil && !rides.finishRequested {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    let state = TelemetryFreshness.state(connected: bluetooth.connected,
-                        ready: bluetooth.ready, lastStreamAt: bluetooth.lastStreamAt, now: context.date)
-                    Text(state == .receiving ? "Данные байка поступают" : state == .disconnected
-                         ? "Данные байка не поступают" : state == .stale
-                         ? "Ждём новые данные" : "Ждём данные байка")
-                        .font(MotoTheme.font(.headline)).foregroundStyle(state == .receiving ? Color.green : Color.orange)
-                }
-            }
-            if rides.active != nil && !rides.finishRequested && !bluetooth.connected
-                && bluetooth.autoReconnect && bluetooth.bluetoothPowered && bluetooth.reconnectBlockedReason == nil {
-                Text("Связь пропала. Пробуем подключиться снова; поездка сохраняется.")
-                    .font(.caption).foregroundStyle(.orange)
-            }
-            if let reason = bluetooth.reconnectBlockedReason {
-                Text(reason).font(.caption).foregroundStyle(.orange)
-            }
-            if !occupied && bluetooth.hasRememberedDevice {
-                Button { bluetooth.connectRemembered() } label: {
-                    Label("Подключить мотоцикл", systemImage: "link").frame(maxWidth: .infinity).padding(.vertical, 7)
-                }.buttonStyle(PixelButtonStyle()).disabled(!bluetooth.bluetoothPowered)
-            }
-            if occupied && rides.active == nil {
-                Button("Отменить подключение") { bluetooth.stop() }.font(.caption)
-            }
-            if !bluetooth.bluetoothPowered {
-                Text("Включи Bluetooth и разреши доступ для Moto Link в настройках iPhone.")
-                    .font(.caption).foregroundStyle(.orange)
-            }
-        }.padding(18).pixelPanel()
+        }.padding(14).pixelPanel()
     }
 
     private var rideStatus: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             if let ride = rides.active {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
-                    HStack(alignment: .top) {
-                        metric("В ПУТИ", value: duration(context.date.timeIntervalSince(ride.startedAt)))
+                    HStack {
+                        metric("Время", value: duration(context.date.timeIntervalSince(ride.startedAt)))
                         Spacer()
-                        metric("ПО GPS", value: String(format: "%.1f км", ride.distanceMeters / 1000))
+                        metric("Путь GPS", value: String(format: "%.1f км", ride.distanceMeters / 1000))
                     }
-                    if let message = rides.gpsStatus(at: context.date) {
-                        Text(message).font(.caption).foregroundStyle(.orange)
+                    if rides.gpsStatus(at: context.date) != nil {
+                        Label("GPS временно недоступен", systemImage: "location.slash").font(.caption).foregroundStyle(.secondary)
                     }
                 }
-            }
-            if let error = bluetooth.storageError {
-                Text("Ошибка журнала Bluetooth: \(error)").font(.caption).foregroundStyle(.orange)
             }
         }
     }
 
-    private var discovery: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Button {
-                bluetooth.scanning ? bluetooth.stopScan() : bluetooth.scan()
-            } label: {
-                Label(bluetooth.scanning ? "Остановить поиск" : "Найти мотоцикл", systemImage: "magnifyingglass")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 5)
-            }
-            .buttonStyle(PixelButtonStyle())
-            .disabled(!bluetooth.bluetoothPowered || occupied)
-
-            ForEach(bluetooth.nearby) { device in
-                Button { bluetooth.connect(to: device.id) } label: {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(device.name).font(MotoTheme.font(.headline))
-                            Text("Доступен рядом")
-                                .font(.caption).foregroundStyle(.secondary)
+    private var discoverySheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Включи зажигание").font(MotoTheme.font(.title2))
+                    Text("Держи iPhone рядом с байком. Выбери его в списке — повторно выбирать не понадобится.")
+                        .foregroundStyle(.secondary)
+                    if bluetooth.scanning {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            HStack { ProgressView(); Text(bluetooth.scanProgress(at: context.date)) }
                         }
-                        Spacer()
-                        Image(systemName: "chevron.right")
+                        Button("Остановить поиск") { bluetooth.stopScan() }
+                    } else {
+                        if bluetooth.nearby.isEmpty {
+                            Text(bluetooth.scanFoundNothing ? "Мотоцикл не найден. Проверь зажигание и доступность Bluetooth на приборке." : "Готовы найти мотоцикл рядом.")
+                        }
+                        Button("Искать рядом") { bluetooth.scan() }
+                            .buttonStyle(PixelButtonStyle(prominent: true)).disabled(!bluetooth.bluetoothPowered)
                     }
-                    .padding(16)
-                    .pixelPanel()
+                    Toggle("Записывать поездки автоматически", isOn: $recordAfterPairing)
+                    Text("Начнём запись при подключении. Сохраняем на iPhone без интернета.").font(.caption).foregroundStyle(.secondary)
+                    ForEach(bluetooth.nearby) { device in
+                        Button {
+                            bluetooth.connect(to: device.id)
+                            bluetooth.setAutoReconnect(true)
+                            rides.setAutoRecord(recordAfterPairing)
+                            selectedTab = 1
+                            showDiscovery = false
+                        } label: {
+                            HStack {
+                                Image(systemName: "motorcycle")
+                                Text(device.name).font(.headline)
+                                Spacer(); Image(systemName: "chevron.right")
+                            }.padding(18).pixelPanel()
+                        }.buttonStyle(.plain)
+                    }
+                    if !bluetooth.bluetoothPowered {
+                        Text("Для поиска нужен Bluetooth. Разрешение можно изменить в настройках iPhone.")
+                    }
+                    DisclosureGroup("Не видишь свой байк?") {
+                        Text("На Ninja / Z500 подключись до движения, в первые минуты после включения зажигания. Если окно поиска закрылось, повтори после выключения и включения зажигания на стоянке. Закрой другие приложения, подключённые к мотоциклу.")
+                            .font(.subheadline).padding(.top, 8)
+                    }.foregroundStyle(.secondary)
+                }.padding(20)
+            }.background(MotoTheme.background).navigationTitle("Выбрать мотоцикл")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showDiscovery = false } } }
+        }.onAppear { if bluetooth.hasRememberedDevice { recordAfterPairing = rides.autoRecord } }
+        .onDisappear { bluetooth.stopScan() }
+    }
+
+    private var settings: some View {
+        NavigationStack {
+            List {
+                Section("Мой байк") {
+                    Button { showSettings = false; DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showProfile = true } } label: {
+                        Label("Имя и пробег", systemImage: "pencil")
+                    }
+                    Button("Выбрать другой мотоцикл") {
+                        showSettings = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showDiscovery = true; bluetooth.scan() }
+                    }.disabled(occupied || rides.active != nil)
                 }
-                .buttonStyle(.plain)
-                .disabled(occupied)
-            }
+                Section {
+                    Toggle("Подключаться автоматически", isOn: Binding(get: { bluetooth.autoReconnect }, set: bluetooth.setAutoReconnect)).disabled(!bluetooth.hasRememberedDevice)
+                    Toggle("Начинать запись при подключении", isOn: Binding(get: { rides.autoRecord }, set: { value in
+                        if value { bluetooth.setAutoReconnect(true) }
+                        rides.setAutoRecord(value)
+                    })).disabled(!bluetooth.hasRememberedDevice)
+                    if !bluetooth.hasRememberedDevice { Text("Сначала выбери мотоцикл в разделе «Поездка».").font(.caption).foregroundStyle(.secondary) }
+                    if rides.autoRecord && rides.authorization != .authorizedAlways {
+                        Button("Разрешить GPS в фоне") { rides.requestBackgroundPermission() }
+                    }
+                } header: { Text("Автоматические поездки") }
+                footer: { Text("После первого выбора ждём байк и сохраняем запись на iPhone. Заверши поездку кнопкой после остановки. Если смахнуть приложение, открой его снова. iOS может ограничить запуск в фоне.") }
+                Section("Экран") {
+                    Picker("Тема", selection: $appearance) {
+                        Text("Как на iPhone").tag("system")
+                        Text("Светлая").tag("light")
+                        Text("Тёмная").tag("dark")
+                    }
+                    Toggle("Не гасить экран при записи", isOn: $keepScreenOn)
+                    Text("Светлая тема удобнее на солнце. Экран остаётся включённым только пока Moto Link открыт.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section {
+                    Button("Начать за минуту") {
+                        showSettings = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showHelp = true }
+                    }
+                    Button("Диагностика для разработки") {
+                        showSettings = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showDiagnostics = true }
+                    }
+                }
+                Section("О Moto Link") {
+                    Text("Всё для твоего байка — на телефоне.")
+                    LabeledContent("Версия", value: AppBuild.version)
+                    Text("Гараж, запись и история работают без интернета. Показатели байка пока экспериментальные. Анимация иллюстрирует данные; свет фар — оформление. Скорость не корректируется автоматически.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }.font(.system(.body)).scrollContentBackground(.hidden).background(MotoTheme.background)
+                .navigationTitle("Настройки").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showSettings = false } } }
         }
+    }
+
+    private var diagnostics: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    ConnectionTestSettingsView()
+                    diagnosticControls
+                    logSection
+                }.padding(20)
+            }.background(MotoTheme.background).navigationTitle("Диагностика")
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showDiagnostics = false } } }
+                .sheet(item: $bluetooth.exportedFiles) { files in ShareSheet(items: files.urls) }
+        }
+    }
+
+    private func updateScreenAwake() {
+        UIApplication.shared.isIdleTimerDisabled = keepScreenOn && rides.active != nil && scenePhase == .active
     }
 
     private var diagnosticControls: some View {
@@ -230,55 +358,40 @@ struct ContentView: View {
     }
 
     private var captureControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             if rides.active == nil {
                 Button {
                     justSaved = false
-                    rides.setAutoRecord(false)
                     rides.startCapture()
                     if rides.active != nil {
                         for event in bluetooth.events { rides.recordDiagnostic(event) }
                         bluetooth.setAutoReconnect(true)
-                        bluetooth.runFullDiagnostic()
+                        bluetooth.startCaptureProfileIfNeeded()
                     }
                 } label: {
-                    Label("Начать запись", systemImage: "record.circle")
-                        .font(MotoTheme.font(.headline)).frame(maxWidth: .infinity).padding(.vertical, 12)
-                }.buttonStyle(PixelButtonStyle(prominent: true)).foregroundStyle(.white)
-                    .disabled(!bluetooth.ready || bluetooth.busy || bluetooth.diagnosticRunning || rides.finishingRide)
-                if justSaved {
-                    NavigationLink { RideHistoryView(rides: rides) } label: {
-                        Label("Поездка сохранена · открыть историю", systemImage: "checkmark.circle")
-                            .font(.caption).foregroundStyle(.green)
-                    }
-                } else {
-                    Text(bluetooth.ready ? "Поездка сохранится на этом iPhone." : "Подключись к мотоциклу перед движением.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                    Label("Начать поездку", systemImage: "record.circle")
+                        .frame(maxWidth: .infinity).padding(.vertical, 5)
+                }.buttonStyle(PixelButtonStyle(prominent: true))
+                    .disabled(!bluetooth.ready || rides.finishingRide)
+                if justSaved { Text("Сохранено в истории").font(.caption).foregroundStyle(.secondary) }
             } else {
                 if rides.finishingRide {
-                    HStack { ProgressView(); Text("Сохраняем на iPhone…").font(.subheadline) }
-                } else if rides.finishRequested {
-                    Label("Сохранение не завершено", systemImage: "exclamationmark.triangle")
-                        .font(.subheadline).foregroundStyle(.orange)
-                } else if bluetooth.diagnosticRunning {
-                    HStack { ProgressView(); Text("Готовим запись. Подожди перед выездом…").font(.subheadline) }
+                    HStack { ProgressView(); Text("Сохраняем поездку…") }.font(.subheadline)
                 } else {
-                    Label("Запись идёт", systemImage: "record.circle.fill")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(accent)
+                    HStack {
+                        Circle().fill(accent).frame(width: 7, height: 7)
+                        Text(rides.finishRequested ? "Повтори сохранение" : "Запись на iPhone")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Button(rides.finishRequested ? "Сохранить ещё раз" : "Завершить") {
+                            if !bluetooth.autoReconnect { bluetooth.pauseConnection() }
+                            rides.stop { _ in justSaved = true }
+                        }.buttonStyle(PixelButtonStyle())
+                    }
                 }
-                Button {
-                    bluetooth.stop()
-                    rides.stop { _ in justSaved = true }
-                } label: {
-                    Label(rides.finishingRide ? "Сохраняем…" : "Завершить поездку", systemImage: "stop.circle")
-                        .font(MotoTheme.font(.headline)).frame(maxWidth: .infinity).padding(.vertical, 12)
-                }.buttonStyle(PixelButtonStyle(prominent: true)).foregroundStyle(.white).disabled(rides.finishingRide)
             }
             if let error = rides.error {
-                Text("Не удалось сохранить: \(error)")
-                    .font(.caption).foregroundStyle(.orange)
-                    .accessibilityLabel("Ошибка сохранения. " + error)
+                Text("Не удалось сохранить: \(error)").font(.caption).foregroundStyle(.red)
             }
         }
     }
@@ -334,7 +447,7 @@ struct ContentView: View {
 
     private func metric(_ label: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label).font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+            Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             Text(value).font(.system(.title2, design: .monospaced).weight(.semibold)).monospacedDigit()
         }
     }
@@ -361,38 +474,38 @@ struct ContentView: View {
     private var help: some View {
         NavigationStack {
             List {
-                Section("Перед поездкой") {
-                    Text("Включи мотоцикл. Закрой Bluefy, RIDEOLOGY и другие приложения, использующие его Bluetooth.")
-                    Text("Нажми «Найти мотоцикл», выбери свой байк и дождись подключения. Затем нажми «Начать запись» и дождись окончания проверки.")
-                    Text("Разреши Bluetooth и геопозицию «Всегда». Не закрывай Moto Link смахиванием. Работу под блокировкой сначала проверь в короткой поездке.")
+                Section("1 · Выбери байк") {
+                    Text("Включи зажигание. В «Поездке» нажми «Выбрать мотоцикл» и выбери его рядом.")
                 }
-                Section("Ninja / Z500: окно подключения") {
-                    Text("Для EX500G / ER500E инструкция Kawasaki 2024 указывает: подключись до начала движения и в первые 3 минуты после включения зажигания. Если телефон не обнаружен вовремя, для нового поиска нужно выключить и включить зажигание — только после безопасной остановки.")
-                    Text("При проблемах обнаружения Kawasaki советует приблизить телефон к передней части сиденья. Радиомодуль не обязательно расположен в приборке. Это правило поиска, а не ограничение длительности уже начатой записи.")
+                Section("2 · Поехали") {
+                    Text("Нажми «Начать поездку» или включи автозапись в настройках. Запись остаётся на iPhone даже при потере связи.")
                 }
-                Section("В дороге") {
-                    Text("Записываем полученные пакеты, GPS и ошибки на iPhone. Интернет для записи не нужен. Восстановление Bluetooth включается вместе с записью, но мотоцикл может не принять повторное соединение.")
-                    Text("Потеря GPS или Bluetooth не завершает сеанс. Пропущенные данные не выдумываются; при остановке приложения системой возможны пробелы.")
+                Section("3 · Сохрани") {
+                    Text("После остановки нажми «Завершить». В «Истории» можно переименовать, удалить или поделиться поездкой.")
                 }
-                Section("После поездки") {
-                    Text("Остановись и нажми «Завершить поездку». Она сохранится на iPhone в разделе «Мои поездки». Там можно изменить название и заметку, выгрузить журнал или удалить запись.")
-                    Text("Журнал содержит маршрут. Передавай его лично, не публикуй в открытом репозитории.")
+                Section("Твой гараж") {
+                    Text("Укажи пробег с приборки, добавь заправку и интервалы обслуживания. Если дату замены не помнишь, достаточно пробега.")
                 }
-                Section("Показатели") {
-                    Text("Доступность и расшифровка показателей зависят от мотоцикла. Все полученные пакеты сохраняются даже без расшифровки. Скорость и расстояние GPS поступают с телефона.")
-                    Text("История и схема маршрута открываются без интернета. Пропуски GPS не превращаются в измеренный путь; пунктир показывает только границы неизвестного участка.")
-                    Text("Скорость на главном экране поступает от мотоцикла. Если данных нет, виден прочерк. Вращение колёс и выхлоп отражают движение и обороты; свет — оформление, а не датчик фар. Тепло показано по температуре охлаждающей жидкости.")
-                }
-                Section("Семейства Kawasaki") {
-                    Text("Начальная база: Ninja 500 / Z500 с Bluetooth (2024–2025), Ninja 650 / Z650 с совместимой TFT-приборкой (с 2020). Подключение RIDEOLOGY подтверждено документацией; полная совместимость Moto Link зависит от модели, рынка и комплектации.")
-                    Text("Сейчас реальные журналы Moto Link проверены на EX500G. Для 650 нужны собственные журналы: не переносим неизвестные байты и датчики с 500 автоматически. База сведений встроена, загрузка при поездке не нужна.")
-                }
-            }.font(.system(.body, design: .rounded)).scrollContentBackground(.hidden).background(MotoTheme.background)
-                .navigationTitle("Как записать поездку")
+            }.scrollContentBackground(.hidden).background(MotoTheme.background)
+                .navigationTitle("Начать за минуту").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showHelp = false } } }
         }
     }
+}
 
+private struct HistoryHubView: View {
+    @ObservedObject var rides: RideRecorder
+    @State private var section = 0
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("История", selection: $section) {
+                Text("Поездки").tag(0)
+                Text("Сводка").tag(1)
+            }.pickerStyle(.segmented).padding(.horizontal, 18).padding(.vertical, 10)
+            if section == 0 { RideHistoryView(rides: rides) }
+            else { RideStatisticsView(rides: rides) }
+        }.background(MotoTheme.background).navigationTitle("История")
+    }
 }
 
 struct ShareSheet: UIViewControllerRepresentable {
@@ -414,8 +527,9 @@ struct ShareSheet: UIViewControllerRepresentable {
 
 /// One static texture, at most four effect frames per second. Packet-rate updates do
 /// not redraw this child; background/reduced-motion/low-power mode pauses it.
-private struct BikeActivityView: View, Equatable {
+struct BikeActivityView: View, Equatable {
     let bluetooth: MotorcycleBluetooth
+    var preview = false
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var snapshot = BikeActivitySnapshot()
@@ -423,7 +537,7 @@ private struct BikeActivityView: View, Equatable {
     @State private var visible = false
     @State private var refreshTimer: Timer?
 
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth }
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth && lhs.preview == rhs.preview }
 
     private var animating: Bool {
         visible && scenePhase == .active && !reduceMotion && !lowPower && snapshot.live
@@ -440,13 +554,13 @@ private struct BikeActivityView: View, Equatable {
                         for index in 0..<14 {
                             let x = CGFloat(index) * size.width / 14
                             let rect = CGRect(x: x, y: size.height * 0.97, width: size.width / 20, height: 2)
-                            canvas.fill(Path(rect), with: .color(Color.white.opacity(0.08)))
+                            canvas.fill(Path(rect), with: .color(Color.primary.opacity(0.12)))
                         }
                     }
                     Image("BikeSpriteDetail")
                         .resizable().interpolation(.none).scaledToFit()
-                        .saturation(snapshot.live ? 1 : 0.15)
-                        .opacity(snapshot.live ? 1 : 0.70)
+                        .saturation(1)
+                        .opacity(1)
                         .offset(y: animating && snapshot.running && phase % 2 == 1 ? 1.0 : 0)
                     Canvas { canvas, size in
                         drawEffects(context: canvas, size: size, phase: phase)
@@ -455,11 +569,11 @@ private struct BikeActivityView: View, Equatable {
             }
             .frame(maxWidth: 360)
             .accessibilityHidden(true)
-            Text(snapshot.label).font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+            Text(snapshot.label).font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 4) {
                 ForEach(0..<4) { index in
                     Rectangle().fill(snapshot.live && index < (snapshot.engineLevel ?? 0)
-                        ? MotoTheme.accent : Color.white.opacity(0.12))
+                        ? MotoTheme.accent : Color.primary.opacity(0.12))
                         .frame(width: 12, height: CGFloat(4 + index * 3))
                 }
                 Text(snapshot.live ? "Живые данные" : "Ожидаем данные")
@@ -487,6 +601,9 @@ private struct BikeActivityView: View, Equatable {
     }
 
     private func sample() {
+        #if targetEnvironment(simulator)
+        if preview { snapshot = BikeActivitySnapshot.sample(connected: true, ready: true, measurements: ProductVisualData.measurements(), now: Date()); return }
+        #endif
         let next = BikeActivitySnapshot.sample(connected: bluetooth.connected, ready: bluetooth.ready,
             measurements: bluetooth.measurements, now: Date())
         if snapshot != next { snapshot = next }

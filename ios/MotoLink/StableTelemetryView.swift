@@ -4,6 +4,7 @@ import SwiftUI
 /// parser and journal retain every packet independently of the screen refresh.
 struct MotorcycleDashboardView: View, Equatable {
     let bluetooth: MotorcycleBluetooth
+    var preview = false
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.scenePhase) private var scenePhase
     @ScaledMetric(relativeTo: .largeTitle) private var speedSize = 54.0
@@ -14,37 +15,24 @@ struct MotorcycleDashboardView: View, Equatable {
     @State private var refreshTimer: Timer?
     @State private var visible = false
 
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth }
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.bluetooth === rhs.bluetooth && lhs.preview == rhs.preview }
 
     private var columns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), alignment: .topLeading), count: typeSize.isAccessibilitySize ? 1 : 2)
+        Array(repeating: GridItem(.flexible(), alignment: .topLeading), count: typeSize.isAccessibilitySize ? 1 : 3)
     }
 
     var body: some View {
         Group {
-            let primary = TelemetryPresentation.primaryIDs.map { id in
+            let primary = ["gear_position", "engine_water_temperature", "engine_speed"].map { id in
                 catalogue.row(catalogue.fields.first(where: { $0.id == id }) ?? TelemetryPresentation.placeholder(id),
                     connected: connected, ready: ready, now: sampledAt)
             }
             let additional = catalogue.rows(connected: connected, ready: ready, now: sampledAt)
                 .filter { !TelemetryPresentation.primaryIDs.contains($0.id) && $0.id != "fuel_injection_raw" && $0.field.decoded }
             VStack(alignment: .leading, spacing: 10) {
-                if typeSize.isAccessibilitySize {
-                    VStack(spacing: 10) {
-                        card(primary[0], prominent: true)
-                        card(primary[1])
-                    }
-                } else {
-                    HStack(alignment: .top, spacing: 10) {
-                        card(primary[0], prominent: true)
-                        card(primary[1], prominent: true).frame(width: 108)
-                    }
-                }
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
-                    ForEach(Array(primary.dropFirst(2))) { row in card(row) }
+                    ForEach(primary) { row in card(row) }
                 }
-                Text(overallStatus(primary)).font(.system(.caption)).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
                 if !additional.isEmpty {
                     DisclosureGroup("Другие показатели") {
                         LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
@@ -61,6 +49,9 @@ struct MotorcycleDashboardView: View, Equatable {
     }
 
     private func sample() {
+        #if targetEnvironment(simulator)
+        if preview { catalogue = ProductVisualData.catalogue(); connected = true; ready = true; sampledAt = Date(); return }
+        #endif
         catalogue = bluetooth.dashboardTelemetry
         connected = bluetooth.connected
         ready = bluetooth.ready
@@ -83,18 +74,15 @@ struct MotorcycleDashboardView: View, Equatable {
 
     private func card(_ row: TelemetryPresentation.Row, prominent: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(row.id == "wheel_speed" ? "Скорость" : row.id == "engine_speed" ? "Обороты" : row.field.label).font(MotoTheme.font(.caption))
+            Text(row.id == "engine_water_temperature" ? "Температура" : row.id == "engine_speed" ? "Обороты" : row.field.label).font(.system(.caption))
                 .fixedSize(horizontal: false, vertical: true)
-            Text(number(row)).font(prominent ? .system(size: speedSize, weight: .semibold, design: .rounded).monospacedDigit() : .system(.title2, design: .rounded).weight(.semibold).monospacedDigit())
+            Text(number(row)).font(.system(.title, design: .rounded).weight(.semibold).monospacedDigit())
                 .lineLimit(1).minimumScaleFactor(0.75)
                 .foregroundStyle(row.value == nil ? Color.secondary : Color.primary)
             // Units get their own line so a three-digit speed or five-digit RPM
             // does not wrap on an iPhone SE beside the fixed gear card.
             Text(row.field.unit.isEmpty ? " " : row.field.unit).font(.system(.caption)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text(row.value == nil ? "Нет данных" : " ").font(.system(.caption2)).foregroundStyle(.secondary)
-                .lineLimit(1).frame(minHeight: 14, alignment: .topLeading)
-                .accessibilityLabel(status(row))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)

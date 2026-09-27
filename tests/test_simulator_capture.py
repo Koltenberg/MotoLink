@@ -15,11 +15,11 @@ CAPTURE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CAPTURE)
 
 
-def screenshot(path, marker=b""):
+def screenshot(path, marker=b"", dimensions=(1170, 2532)):
     # Minimal structure used by the packaging guard; UI correctness is checked
     # with real screenshots in macOS CI, not asserted by this fake PNG.
     path.write_bytes(b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
-                     + struct.pack(">II", 1170, 2532) + marker + b"x" * 1100
+                     + struct.pack(">II", *dimensions) + marker + b"x" * 1100
                      + b"\x00\x00\x00\x00IEND\xaeB`\x82")
 
 
@@ -39,6 +39,8 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.launch_result = "org.koltenberg.MotoLink: 1234"
         self.active_mode = None
         self.content_size = "large"
+        self.theme = "default"
+        self.landscape = False
 
     def fake_run(self, *args, **kwargs):
         self.calls.append(args)
@@ -54,15 +56,19 @@ class SimulatorCaptureTests(unittest.TestCase):
         if self.failure:
             self.failure(args)
         if args[0] == "launch":
-            self.active_mode = "companion" if "--companion-visual-check" in args else "home"
+            self.active_mode = ("ride" if "--review-ride" in args else
+                                "companion" if "--companion-visual-check" in args else "home")
+            self.theme = "light" if "--review-light" in args else "default"
+            self.landscape = "--review-landscape" in args
             return self.launch_result
         if args[0] == "terminate":
             self.active_mode = None
         if args[:1] == ("ui",) and args[2] == "content_size":
             self.content_size = args[3]
         if args[0] == "io":
-            marker = f"{args[1]}|mode:{self.active_mode}|size:{self.content_size}|".encode()
-            screenshot(Path(args[-1]), marker=marker)
+            marker = f"{args[1]}|mode:{self.active_mode}|size:{self.content_size}|theme:{self.theme}|".encode()
+            screenshot(Path(args[-1]), marker=marker,
+                       dimensions=(2532, 1170) if self.landscape else (1170, 2532))
         return ""
 
     def execute(self):
@@ -94,6 +100,56 @@ class SimulatorCaptureTests(unittest.TestCase):
             ("simulator-companion-large-text.png", "companion", "accessibility-large"),
         ]:
             self.assertIn(f"mode:{mode}|size:{size}|".encode(), (self.output / name).read_bytes())
+
+    def test_ride_variants_are_fresh_processes_with_normal_text_and_real_orientation(self):
+        self.execute()
+        expected = [
+            ("simulator-garage-light.png", "home", "light", False),
+            ("simulator-ride.png", "ride", "default", False),
+            ("simulator-ride-light.png", "ride", "light", False),
+            ("simulator-ride-landscape.png", "ride", "default", True),
+        ]
+        for name, mode, theme, landscape in expected:
+            image = self.output / name
+            self.assertIn(f"mode:{mode}|size:large|theme:{theme}|".encode(), image.read_bytes())
+            width, height = CAPTURE.validate_png(image)
+            self.assertEqual(width > height, landscape)
+        # Termination must precede each new launch; otherwise iOS ignores new
+        # arguments and a screenshot could silently show a previous screen.
+        process_running = False
+        for call in self.calls:
+            if call[0] == "launch":
+                self.assertFalse(process_running, "relaunch reused an existing app process")
+                process_running = True
+            elif call[0] == "terminate":
+                process_running = False
+
+    def test_unapplied_landscape_rotation_rejects_entire_set_not_portrait_as_landscape(self):
+        def fail(args):
+            if args[0] == "io" and Path(args[-1]).name == "simulator-ride-landscape.png":
+                self.landscape = False
+        self.failure = fail
+        self.output.mkdir()
+        for name in CAPTURE.SCREENSHOT_NAMES:
+            screenshot(self.output / name)
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "Landscape rotation was not applied"):
+            self.execute()
+        self.assertEqual(len(self.devices), 2)
+        self.assertEqual(list(self.output.glob("*.png")), [])
+        for device in self.devices:
+            self.assertIn(("delete", device), self.calls)
+
+    def test_last_ride_launch_failure_does_not_publish_earlier_seven_views(self):
+        def fail(args):
+            if args[0] == "launch" and "--review-landscape" in args:
+                raise CAPTURE.CaptureError("ride landscape launch failed")
+        self.failure = fail
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "ride landscape launch failed"):
+            self.execute()
+        self.assertEqual(list(self.output.glob("*.png")), [])
+        self.assertFalse(any(args[0] == "io" and
+                             Path(args[-1]).name == "simulator-ride-landscape.png"
+                             for args in self.calls))
 
     def test_companion_failure_retries_all_captures_without_publishing_partial_home(self):
         def fail(args):

@@ -13,7 +13,9 @@ from pathlib import Path
 
 
 SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
-                    "simulator-companion.png", "simulator-companion-large-text.png")
+                    "simulator-companion.png", "simulator-companion-large-text.png",
+                    "simulator-garage-light.png", "simulator-ride.png",
+                    "simulator-ride-light.png", "simulator-ride-landscape.png")
 
 
 class CaptureError(RuntimeError):
@@ -123,9 +125,9 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
             raise CaptureError("simctl create did not return a device UUID")
         run("boot", device, timeout=30, deadline=deadline)
         run("bootstatus", device, "-b", timeout=150, deadline=deadline)
-        # MotoLinkApp already requests .preferredColorScheme(.dark). Setting
-        # global simulator appearance/status-bar decoration adds no app check
-        # and has hung on otherwise booted GitHub runners. Exercise the app.
+        # Appearance variants are app launch arguments, not global simulator
+        # settings: global appearance/status-bar decoration has hung on
+        # otherwise booted GitHub runners. Exercise the app's own theme.
         run("install", device, app, timeout=60, deadline=deadline)
         launched = run("launch", device, bundle_id, timeout=45, deadline=deadline)
         if not re.search(r":\s*[1-9][0-9]*\s*$", launched):
@@ -159,7 +161,33 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
         time.sleep(2)
         run("io", device, "screenshot", companion_large, timeout=30, deadline=deadline)
         validate_png(companion_large)
-        return home, large, companion, companion_large
+        images = [home, large, companion, companion_large]
+        # Relaunch each product state in the same disposable simulator. Fixture
+        # switches exist only in simulator builds; no hardware BLE is involved.
+        # Keep landscape last so a previous rotation cannot taint portrait QA.
+        variants = (
+            ("simulator-garage-light.png", ("--review-light",), False),
+            ("simulator-ride.png", ("--review-ride",), False),
+            ("simulator-ride-light.png", ("--review-ride", "--review-light"), False),
+            ("simulator-ride-landscape.png", ("--review-ride", "--review-landscape"), True),
+        )
+        for name, flags, landscape in variants:
+            run("terminate", device, bundle_id, timeout=30, deadline=deadline)
+            run("ui", device, "content_size", "large", timeout=30, deadline=deadline)
+            launched = run("launch", device, bundle_id, *flags, timeout=45, deadline=deadline)
+            if not re.search(r":\s*[1-9][0-9]*\s*$", launched):
+                raise CaptureError(f"{name} launch did not return a process ID: {launched}")
+            print(f"Visual state launched: {name}: {launched}", flush=True)
+            time.sleep(5)
+            image = output / name
+            run("io", device, "screenshot", image, timeout=30, deadline=deadline)
+            width, height = validate_png(image)
+            if landscape and width <= height:
+                raise CaptureError(f"Landscape rotation was not applied: {name} is {width}x{height}")
+            if not landscape and width >= height:
+                raise CaptureError(f"Portrait state was not restored: {name} is {width}x{height}")
+            images.append(image)
+        return tuple(images)
     finally:
         if device and re.fullmatch(r"[0-9A-Fa-f-]{36}", device):
             cleanup(device)
@@ -173,7 +201,7 @@ def capture(app, output):
     output.mkdir(parents=True, exist_ok=True)
     for name in SCREENSHOT_NAMES:
         (output / name).unlink(missing_ok=True)
-    deadline = time.monotonic() + 480
+    deadline = time.monotonic() + 600
     runtimes = json.loads(run("list", "runtimes", "-j", deadline=deadline))["runtimes"]
     types = json.loads(run("list", "devicetypes", "-j", deadline=deadline))["devicetypes"]
     device_type = next((item for item in types if item["name"] == "iPhone 16"), None)
@@ -196,7 +224,7 @@ def capture(app, output):
                 continue
             for image in images:
                 shutil.copyfile(image, output / image.name)
-            print(f"Simulator capture passed on attempt {attempt}: home and companion launched; all four PNGs validated", flush=True)
+            print(f"Simulator capture passed on attempt {attempt}: home, companion and ride states launched; all eight PNGs validated", flush=True)
             return
     raise CaptureError("Simulator visual validation failed: " + "; ".join(failures))
 

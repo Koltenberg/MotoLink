@@ -199,4 +199,128 @@ final class MotorcycleCompanionTests: XCTestCase {
         XCTAssertEqual(restored.fuelConsumptions, original.fuelConsumptions)
         try restored.validate()
     }
+
+    func testLegacy049ServiceJSONKeepsDateAndIdentifiers() throws {
+        // Exact non-optional date shape written by the 0.4.9 synthesized encoder.
+        let legacy = Data("""
+        {"id":"A0587EA3-CB3F-443A-81E2-9BA4CB4D32BD","bikeName":"Ninja 500",
+         "odometerKm":25000,"fuelEntries":[],"serviceTasks":[
+          {"id":"023C064C-2CA3-45CB-8F03-D6E8C8D8E177","title":"Масло",
+           "lastDoneAt":721692800,"lastDoneOdometerKm":23000,
+           "intervalKm":3000,"intervalMonths":12}]}
+        """.utf8)
+        let restored = try JSONDecoder().decode(CompanionData.self, from: legacy)
+        try restored.validate()
+        XCTAssertEqual(restored.id.uuidString, "A0587EA3-CB3F-443A-81E2-9BA4CB4D32BD")
+        let task = try XCTUnwrap(restored.serviceTasks.first)
+        XCTAssertEqual(task.id.uuidString, "023C064C-2CA3-45CB-8F03-D6E8C8D8E177")
+        XCTAssertEqual(task.lastDoneAt, epoch)
+        XCTAssertEqual(task.dueOdometerKm, 26_000)
+        XCTAssertNotNil(task.dueDate())
+        XCTAssertEqual(try JSONDecoder().decode(CompanionData.self, from: JSONEncoder().encode(restored)), restored)
+    }
+
+    func testMissingAndNullServiceDatesDecodeWithoutInventingToday() throws {
+        for dateField in ["", "\"lastDoneAt\":null,"] {
+            let json = Data("""
+            {"id":"023C064C-2CA3-45CB-8F03-D6E8C8D8E177","title":"Масло",
+             \(dateField)"lastDoneOdometerKm":23000,"intervalKm":3000}
+            """.utf8)
+            let task = try JSONDecoder().decode(ServiceTask.self, from: json)
+            try task.validate()
+            XCTAssertNil(task.lastDoneAt)
+            XCTAssertNil(task.dueDate())
+            XCTAssertEqual(task.dueOdometerKm, 26_000)
+            let roundTrip = try JSONDecoder().decode(ServiceTask.self, from: JSONEncoder().encode(task))
+            XCTAssertEqual(roundTrip, task)
+            XCTAssertNil(roundTrip.lastDoneAt)
+        }
+    }
+
+    func testMileageOnlyServiceRequiresNoDateAndTracksManualOdometer() throws {
+        let task = ServiceTask(title: "Масло", lastDoneOdometerKm: 23_000, intervalKm: 3_000)
+        try task.validate()
+        XCTAssertNil(task.lastDoneAt)
+        XCTAssertNil(task.dueDate())
+        XCTAssertEqual(task.dueOdometerKm, 26_000)
+        XCTAssertEqual(task.kilometersRemaining(odometerKm: 25_500), 500)
+        XCTAssertEqual(task.kilometersRemaining(odometerKm: 26_200), -200)
+        XCTAssertNil(task.kilometersRemaining(odometerKm: nil))
+        XCTAssertNil(task.kilometersRemaining(odometerKm: .nan))
+        XCTAssertNil(task.kilometersRemaining(odometerKm: -1))
+        XCTAssertFalse(task.isDue(odometerKm: 25_999, on: epoch))
+        XCTAssertTrue(task.isDue(odometerKm: 26_000, on: epoch))
+        XCTAssertFalse(task.isDue(odometerKm: nil, on: epoch.addingTimeInterval(100_000_000)))
+    }
+
+    func testMonthIntervalRequiresKnownDateWithoutInventingOne() throws {
+        var task = ServiceTask(title: "Тормозная жидкость", lastDoneOdometerKm: 23_000, intervalMonths: 24)
+        XCTAssertThrowsError(try task.validate()) {
+            XCTAssertEqual($0 as? CompanionValidationError, .missingServiceDate)
+        }
+        XCTAssertNil(task.dueDate())
+        task.lastDoneAt = epoch
+        XCTAssertNoThrow(try task.validate())
+        XCTAssertNotNil(task.dueDate())
+        task.lastDoneAt = nil
+        task.intervalMonths = nil
+        task.intervalKm = 5_000
+        XCTAssertNoThrow(try task.validate())
+        XCTAssertNil(task.dueDate())
+        task.lastDoneAt = Date(timeIntervalSince1970: .infinity)
+        XCTAssertThrowsError(try task.validate()) {
+            XCTAssertEqual($0 as? CompanionValidationError, .invalidDate)
+        }
+    }
+
+    func testDateUnknownServiceCanBeAddedEditedAndDeletedWithoutTouchingFuel() throws {
+        let fuel = fill(1, 24_000, 10)
+        var data = CompanionData(bikeName: "Тахиро", odometerKm: 25_000, fuelEntries: [fuel])
+        let task = ServiceTask(title: "Масло", lastDoneOdometerKm: 23_000, intervalKm: 3_000)
+        try data.addServiceTask(task)
+        XCTAssertEqual(data.serviceTasks.first?.dueOdometerKm, 26_000)
+        data.serviceTasks[0].lastDoneOdometerKm = 26_000
+        data.serviceTasks[0].title = "Масло и фильтр"
+        try data.validate()
+        XCTAssertEqual(data.serviceTasks[0].id, task.id)
+        XCTAssertNil(data.serviceTasks[0].lastDoneAt)
+        XCTAssertEqual(data.serviceTasks[0].dueOdometerKm, 29_000)
+        let restored = try JSONDecoder().decode(CompanionData.self, from: JSONEncoder().encode(data))
+        XCTAssertEqual(restored, data)
+        data.serviceTasks.removeAll { $0.id == task.id }
+        try data.validate()
+        XCTAssertTrue(data.serviceTasks.isEmpty)
+        XCTAssertEqual(data.fuelEntries, [fuel])
+        XCTAssertEqual(data.odometerKm, 25_000)
+        XCTAssertEqual(data.bikeName, "Тахиро")
+    }
+
+    func testMileageReminderUsesLastTenPercentCappedAtFiveHundredKm() {
+        let oil = ServiceTask(title: "Масло", lastDoneOdometerKm: 23_000, intervalKm: 3_000)
+        XCTAssertFalse(oil.isDueSoon(odometerKm: 25_699, on: epoch))
+        XCTAssertTrue(oil.isDueSoon(odometerKm: 25_700, on: epoch))
+        XCTAssertTrue(oil.isDueSoon(odometerKm: 25_999, on: epoch))
+        XCTAssertFalse(oil.isDueSoon(odometerKm: 26_000, on: epoch))
+        XCTAssertFalse(oil.isDueSoon(odometerKm: nil, on: epoch))
+        let large = ServiceTask(title: "Осмотр", lastDoneOdometerKm: 0, intervalKm: 20_000)
+        XCTAssertFalse(large.isDueSoon(odometerKm: 19_499, on: epoch))
+        XCTAssertTrue(large.isDueSoon(odometerKm: 19_500, on: epoch))
+        let chain = ServiceTask(title: "Цепь", lastDoneOdometerKm: 0, intervalKm: 500)
+        XCTAssertFalse(chain.isDueSoon(odometerKm: 449, on: epoch))
+        XCTAssertTrue(chain.isDueSoon(odometerKm: 450, on: epoch))
+    }
+
+    func testCalendarReminderUsesLocalDaysAndOverdueHasSeparateStatus() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 3 * 3600)!
+        let start = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 8, day: 31, hour: 18)))
+        let task = ServiceTask(title: "Осмотр", lastDoneAt: start, lastDoneOdometerKm: 0, intervalMonths: 1)
+        let due = try XCTUnwrap(task.dueDate(calendar: calendar))
+        let seven = try XCTUnwrap(calendar.date(byAdding: .day, value: -7, to: due))
+        let eight = try XCTUnwrap(calendar.date(byAdding: .day, value: -8, to: due))
+        XCTAssertFalse(task.isDueSoon(odometerKm: nil, on: eight, calendar: calendar))
+        XCTAssertTrue(task.isDueSoon(odometerKm: nil, on: seven, calendar: calendar))
+        XCTAssertFalse(task.isDueSoon(odometerKm: nil, on: due, calendar: calendar))
+        XCTAssertTrue(task.isDue(odometerKm: nil, on: due, calendar: calendar))
+    }
 }

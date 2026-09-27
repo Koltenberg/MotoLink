@@ -11,14 +11,21 @@ final class MotoLinkController: ObservableObject {
     private var subscriptions = Set<AnyCancellable>()
 
     private init() {
-        // One explicit full-capture flow; disable the legacy two-minute auto-ride mode.
-        rides.setAutoRecord(false)
+        // Automatic capture is opt-in and remains the user's persisted choice.
         bluetooth.onMeasurements = { [weak self] in self?.rides.recordMeasurements($0) }
         bluetooth.onStreamFrame = { [weak self] in self?.rides.recordStreamFrame(at: $0) }
         bluetooth.onDiagnosticEvent = { [weak self] in self?.rides.recordDiagnostic($0) }
         rides.onNewRideStarted = { [weak self] id in
             guard let self, self.rides.active?.id == id, !self.rides.finishRequested else { return }
             self.rides.recordConnectionContext(ConnectionTestSettingsView.capture())
+            self.bluetooth.startCaptureProfileIfNeeded()
+        }
+        bluetooth.onReadyForCapture = { [weak self] in
+            guard let self else { return }
+            self.rides.bluetoothReadyForCapture()
+            if self.rides.active != nil, !self.rides.finishRequested {
+                self.bluetooth.startCaptureProfileIfNeeded()
+            }
         }
         bluetooth.$connected.removeDuplicates().sink { [weak self] connected in
             self?.rides.bluetoothChanged(connected)

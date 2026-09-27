@@ -44,8 +44,8 @@ final class CompanionStore: ObservableObject {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             DispatchQueue.main.async {
                 self.notificationStatus = error?.localizedDescription ?? (granted
-                    ? "Напоминания по датам включены. Пробег проверяется в приложении."
-                    : "Уведомления выключены. Сроки остаются в приложении.")
+                    ? "Напомним о выбранных датах. Сроки по пробегу видны в гараже."
+                    : "Уведомления выключены. Сроки видны в гараже.")
                 if granted { self.scheduleReminders() }
             }
         }
@@ -96,6 +96,9 @@ final class CompanionStore: ObservableObject {
 private func decimal(_ value: String) -> Double? {
     let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
         .replacingOccurrences(of: ",", with: ".")
+        .replacingOccurrences(of: " ", with: "")
+        .replacingOccurrences(of: "\u{00A0}", with: "")
+        .replacingOccurrences(of: "\u{202F}", with: "")
     guard let number = Double(cleaned), number.isFinite else { return nil }
     return number
 }
@@ -104,31 +107,93 @@ private func numberText(_ value: Double?) -> String {
     value.map { String($0) } ?? ""
 }
 
+
+/// Reusable idle reminder; all readings come from the user's garage entries.
+struct ServiceReminderCard: View {
+    @ObservedObject var store: CompanionStore
+    @State private var selectedTask: ServiceTask?
+
+    private var nextTask: ServiceTask? {
+        store.data.serviceTasks.sorted { lhs, rhs in
+            let odo = store.data.currentOdometerKm
+            let leftDue = lhs.isDue(odometerKm: odo)
+            let rightDue = rhs.isDue(odometerKm: odo)
+            if leftDue != rightDue { return leftDue }
+            let leftSoon = lhs.isDueSoon(odometerKm: odo)
+            let rightSoon = rhs.isDueSoon(odometerKm: odo)
+            if leftSoon != rightSoon { return leftSoon }
+            // Order by stable dimensions; mixing pairwise date/km comparisons
+            // would make the sort non-transitive for mixed reminder types.
+            if (lhs.dueOdometerKm != nil) != (rhs.dueOdometerKm != nil) { return lhs.dueOdometerKm != nil }
+            let leftKm = lhs.dueOdometerKm ?? .greatestFiniteMagnitude
+            let rightKm = rhs.dueOdometerKm ?? .greatestFiniteMagnitude
+            if leftKm != rightKm { return leftKm < rightKm }
+            let leftDate = lhs.dueDate() ?? .distantFuture
+            let rightDate = rhs.dueDate() ?? .distantFuture
+            if leftDate != rightDate { return leftDate < rightDate }
+            let titleOrder = lhs.title.localizedStandardCompare(rhs.title)
+            if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }.first
+    }
+
+    var body: some View {
+        if let task = nextTask {
+            Button { selectedTask = task } label: {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(task.isDue(odometerKm: store.data.currentOdometerKm)
+                          ? "Пора обслужить" : (task.isDueSoon(odometerKm: store.data.currentOdometerKm)
+                          ? "Скоро обслуживание" : "Следующее обслуживание"),
+                          systemImage: "wrench.and.screwdriver")
+                        .font(.system(.subheadline, weight: .semibold))
+                    Text(task.title).font(MotoTheme.font(.headline))
+                    ServiceScheduleText(task: task, odometerKm: store.data.currentOdometerKm)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16).pixelPanel()
+            }
+            .buttonStyle(.plain)
+            .sheet(item: $selectedTask) { ServiceEditor(store: store, task: $0) }
+        }
+    }
+}
+
+private struct ServiceScheduleText: View {
+    let task: ServiceTask
+    let odometerKm: Double?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let next = task.dueOdometerKm {
+                Text(String(format: "Следующее — на %.0f км", next))
+                    .font(.system(.subheadline, weight: .semibold).monospacedDigit())
+            }
+            if let remaining = task.kilometersRemaining(odometerKm: odometerKm) {
+                Text(remaining > 0
+                     ? String(format: "Осталось %.0f км по последнему пробегу", remaining)
+                     : (remaining < 0 ? String(format: "Срок пройден на %.0f км", -remaining) : "Пробег для обслуживания достигнут"))
+                    .font(.system(.caption)).foregroundStyle(.secondary)
+            }
+            if let date = task.dueDate() {
+                Text("По дате — до " + date.formatted(date: .abbreviated, time: .omitted))
+                    .font(.system(.subheadline)).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// Kept for callers that present the garage as a card rather than a tab.
 struct CompanionHomeCard: View {
     @ObservedObject var store: CompanionStore
     @ObservedObject var rides: RideRecorder
     var body: some View {
         NavigationLink { CompanionView(store: store, rides: rides) } label: {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Label("Мой мотоцикл", systemImage: "wrench.and.screwdriver")
-                        .font(MotoTheme.font(.headline))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                }
-                if let odo = store.data.currentOdometerKm {
-                    Text(String(format: "%.0f км · %@", odo, store.data.bikeName))
-                        .font(.system(.title3).monospacedDigit())
-                } else { Text("Пробег, заправки и обслуживание").font(.system(.subheadline)) }
-                let due = store.data.serviceTasks.filter { $0.isDue(odometerKm: store.data.currentOdometerKm) }
-                if !due.isEmpty {
-                    Text("Пора проверить: " + due.map(\.title).joined(separator: ", "))
-                        .font(.system(.subheadline)).foregroundStyle(.orange)
-                } else if let fuel = store.data.fuelEntries.max(by: { $0.date < $1.date }) {
-                    Text("Заправка: " + fuel.date.formatted(date: .abbreviated, time: .omitted)
-                         + String(format: " · %.1f л", fuel.liters)).font(.system(.subheadline)).foregroundStyle(.secondary)
-                }
-                if let error = store.error { Text(error).font(.system(.caption)).foregroundStyle(.orange) }
+            VStack(alignment: .leading, spacing: 8) {
+                Label(store.data.bikeName, systemImage: "wrench.and.screwdriver")
+                    .font(MotoTheme.font(.headline))
+                Text(store.data.currentOdometerKm.map { String(format: "%.0f км", $0) }
+                     ?? "Добавь пробег с приборки")
+                    .font(.system(.title3).monospacedDigit())
+                Text("Заправки и обслуживание").font(.system(.subheadline)).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading).padding(18).pixelPanel()
         }.buttonStyle(.plain)
     }
@@ -140,103 +205,177 @@ struct CompanionView: View {
     @State private var editingBike = false
     @State private var newFuel = false
     @State private var newService = false
-    @State private var selectedFuel: FuelEntry?
     @State private var selectedService: ServiceTask?
 
     var body: some View {
         List {
-            Section("Мой мотоцикл") {
-                Text(store.data.bikeName).font(MotoTheme.font(.headline))
-                LabeledContent("Пробег по записям", value: store.data.currentOdometerKm.map { String(format: "%.0f км", $0) } ?? "Не указан")
-                Button("Указать пробег и название") { editingBike = true }
-                Text("Пробег вводится с приборки. GPS-расстояние поездок хранится отдельно и не меняет одометр.")
-                    .font(.caption).foregroundStyle(.secondary)
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top) {
+                        Text(store.data.bikeName).font(MotoTheme.font(.title2))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 12)
+                        Button { editingBike = true } label: { Image(systemName: "pencil") }
+                            .accessibilityLabel("Изменить название и пробег")
+                    }
+                    Image("BikeSpriteDetail").resizable().interpolation(.none).scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: 150).accessibilityHidden(true)
+                    Text(store.data.currentOdometerKm.map { String(format: "%.0f км", $0) } ?? "Пробег пока не указан")
+                        .font(.system(.title2, weight: .bold).monospacedDigit())
+                    Text("Последний известный пробег с приборки")
+                        .font(.system(.caption)).foregroundStyle(.secondary)
+                    Button("Обновить пробег") { editingBike = true }
+                }.padding(.vertical, 8)
+            }
+            if !store.data.serviceTasks.isEmpty {
+                Section { ServiceReminderCard(store: store) }.listRowBackground(Color.clear)
+            }
+            Section("Обслуживание") {
+                Button { newService = true } label: { Label("Добавить обслуживание", systemImage: "plus") }
+                if store.data.serviceTasks.isEmpty {
+                    Text("Запиши, на каком пробеге менял масло или обслуживал цепь. Дату можно не указывать.")
+                        .font(.system(.subheadline)).foregroundStyle(.secondary)
+                }
+                ForEach(store.data.serviceTasks) { task in
+                    Button { selectedService = task } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(task.title).font(.system(.body, weight: .semibold))
+                                Spacer()
+                                Image(systemName: "chevron.right").font(.caption)
+                            }
+                            Text(String(format: "Последнее — на %.0f км", task.lastDoneOdometerKm)
+                                 + (task.lastDoneAt.map { " · " + $0.formatted(date: .abbreviated, time: .omitted) } ?? ""))
+                                .font(.system(.caption)).foregroundStyle(.secondary)
+                            ServiceScheduleText(task: task, odometerKm: store.data.currentOdometerKm)
+                        }.padding(.vertical, 4)
+                    }.tint(.primary)
+                }
+                if store.data.serviceTasks.contains(where: { $0.intervalMonths != nil }) {
+                    Button("Напоминать о сроках по датам") { store.enableReminders() }
+                    if let status = store.notificationStatus { Text(status).font(.caption).foregroundStyle(.secondary) }
+                }
             }
             Section("Заправки") {
                 Button { newFuel = true } label: { Label("Добавить заправку", systemImage: "fuelpump") }
                 if let consumption = store.data.fuelConsumptions.last {
-                    LabeledContent("Последний расход", value: String(format: "%.2f л/100 км", consumption.litersPer100Km))
-                    Text("Между полными баками · по внесённым заправкам. Для верного расчёта нужны все заправки.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    LabeledContent("Расход между полными баками",
+                                   value: String(format: "%.2f л/100 км", consumption.litersPer100Km))
+                        .monospacedDigit()
+                }
+                if let fuel = store.data.fuelEntries.max(by: { $0.date < $1.date }) {
+                    Text("Последняя — " + fuel.date.formatted(date: .abbreviated, time: .omitted)
+                         + String(format: " · %.1f л", fuel.liters))
+                        .font(.system(.subheadline)).foregroundStyle(.secondary)
+                    NavigationLink("Все заправки") { FuelHistoryView(store: store) }
                 } else {
-                    Text("Расход появится после двух заправок до полного бака. Промежуточные доливы тоже записывай.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text("После двух полных баков появится расход. Для точности записывай каждую заправку, включая доливы.")
+                        .font(.system(.subheadline)).foregroundStyle(.secondary)
                 }
-                ForEach(store.data.fuelEntries.sorted { $0.date > $1.date }) { fuel in
-                    Button { selectedFuel = fuel } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(fuel.date.formatted(date: .abbreviated, time: .shortened))
-                            Text(String(format: "%.1f л · %.0f км", fuel.liters, fuel.odometerKm)
-                                 + (fuel.fullTank ? " · полный" : " · долив"))
-                                .font(.subheadline).foregroundStyle(.secondary)
-                        }
-                    }.tint(.primary)
-                }
-            }
-            Section("Обслуживание") {
-                Button { newService = true } label: { Label("Добавить задачу", systemImage: "wrench") }
-                ForEach(store.data.serviceTasks) { task in
-                    Button { selectedService = task } label: {
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack {
-                                Text(task.title)
-                                if task.isDue(odometerKm: store.data.currentOdometerKm) {
-                                    Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
-                                }
-                            }
-                            if let km = task.dueOdometerKm { Text(String(format: "Следующее: %.0f км", km)).font(.subheadline).foregroundStyle(.secondary) }
-                            if let date = task.dueDate() { Text("До " + date.formatted(date: .abbreviated, time: .omitted)).font(.subheadline).foregroundStyle(.secondary) }
-                        }
-                    }.tint(.primary)
-                }
-                Text("Масло, цепь, тормозная жидкость — добавь нужные задачи и интервалы из руководства своего байка. По пробегу и дате действует более ранний срок.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("Включить напоминания по датам") { store.enableReminders() }
-                if let status = store.notificationStatus { Text(status).font(.caption).foregroundStyle(.secondary) }
-            }
-            Section {
-                NavigationLink("Сводка поездок") { RideStatisticsView(rides: rides) }
-                NavigationLink("История поездок") { RideHistoryView(rides: rides) }
             }
             if let error = store.error { Section { Text(error).foregroundStyle(.orange) } }
         }
         .font(.system(.body))
         .scrollContentBackground(.hidden).background(MotoTheme.background)
-        .navigationTitle("Мой мотоцикл")
+        .navigationTitle("Гараж")
+        .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $editingBike) { BikeProfileEditor(store: store) }
         .sheet(isPresented: $newFuel) { FuelEditor(store: store, entry: nil) }
-        .sheet(item: $selectedFuel) { FuelEditor(store: store, entry: $0) }
         .sheet(isPresented: $newService) { ServiceEditor(store: store, task: nil) }
         .sheet(item: $selectedService) { ServiceEditor(store: store, task: $0) }
     }
 }
 
-private struct BikeProfileEditor: View {
+private struct CompanionNumberField: View {
+    let title: String
+    var example: String = ""
+    @Binding var value: String
+    var wholeNumber = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.system(.subheadline)).foregroundStyle(.secondary)
+            TextField(example, text: $value)
+                .keyboardType(wholeNumber ? .numberPad : .decimalPad)
+                .font(.system(.body).monospacedDigit())
+                .accessibilityLabel(title)
+        }.padding(.vertical, 3)
+    }
+}
+
+struct BikeProfileEditor: View {
     @ObservedObject var store: CompanionStore
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var odometer = ""
+    @State private var prepared = false
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Название мотоцикла", text: $name)
-                TextField("Пробег с приборки, км", text: $odometer).keyboardType(.decimalPad)
-                Text("Записи заправок и обслуживания тоже содержат пробег. Здесь нельзя понизить показание ниже этих записей — сначала исправь ошибочную запись.").font(.caption)
+                Section("Как зовут твой байк") {
+                    TextField("Например, Тахиро", text: $name)
+                        .accessibilityLabel("Название мотоцикла")
+                }
+                Section("Пробег с приборки") {
+                    CompanionNumberField(title: "Одометр, км", example: "Например, 26 500", value: $odometer)
+                    Text("Можно обновить в любой момент. Расстояние записанных поездок к одометру не прибавляется.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let recorded = CompanionData(fuelEntries: store.data.fuelEntries,
+                                                    serviceTasks: store.data.serviceTasks).currentOdometerKm {
+                        Text(String(format: "В записях уже есть %.0f км. Если там ошибка, исправь соответствующую заправку или обслуживание.", recorded))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 if let error = store.error { Text(error).foregroundStyle(.orange) }
-            }.font(.system(.body)).navigationTitle("Мотоцикл")
+            }.font(.system(.body)).navigationTitle("Мой байк").navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
                     ToolbarItem(placement: .confirmationAction) { Button("Сохранить") {
-                        guard odometer.isEmpty || decimal(odometer) != nil else { store.error = "Укажи пробег числом."; return }
-                        if store.save({ $0.bikeName = name; $0.odometerKm = decimal(odometer) }) { dismiss() }
+                        guard odometer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || decimal(odometer) != nil else {
+                            store.error = "Укажи пробег числом."; return
+                        }
+                        if store.save({
+                            $0.bikeName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                            $0.odometerKm = decimal(odometer)
+                        }) { dismiss() }
                     } }
                 }
-                .onAppear { name = store.data.bikeName; odometer = numberText(store.data.odometerKm) }
+                .onAppear {
+                    guard !prepared else { return }; prepared = true
+                    name = store.data.bikeName; odometer = numberText(store.data.odometerKm ?? store.data.currentOdometerKm)
+                }
         }
     }
 }
 
-private struct FuelEditor: View {
+private struct FuelHistoryView: View {
+    @ObservedObject var store: CompanionStore
+    @State private var selected: FuelEntry?
+    @State private var adding = false
+    var body: some View {
+        List {
+            ForEach(store.data.fuelEntries.sorted { $0.date > $1.date }) { fuel in
+                Button { selected = fuel } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(fuel.date.formatted(date: .abbreviated, time: .shortened))
+                            .font(.system(.body, weight: .semibold))
+                        Text(String(format: "%.1f л · %.0f км", fuel.liters, fuel.odometerKm)
+                             + (fuel.fullTank ? " · полный бак" : " · долив"))
+                            .font(.system(.subheadline)).foregroundStyle(.secondary)
+                        if let cost = fuel.cost { Text(String(format: "%.0f ₽", cost)).font(.system(.caption)).foregroundStyle(.secondary) }
+                    }.padding(.vertical, 4)
+                }.tint(.primary)
+            }
+            if store.data.fuelEntries.isEmpty { Text("Здесь появятся твои заправки.").foregroundStyle(.secondary) }
+        }.navigationTitle("Заправки").navigationBarTitleDisplayMode(.inline)
+            .scrollContentBackground(.hidden).background(MotoTheme.background)
+            .toolbar { ToolbarItem(placement: .primaryAction) { Button("Добавить") { adding = true } } }
+            .sheet(item: $selected) { FuelEditor(store: store, entry: $0) }
+            .sheet(isPresented: $adding) { FuelEditor(store: store, entry: nil) }
+    }
+}
+
+struct FuelEditor: View {
     @ObservedObject var store: CompanionStore
     let entry: FuelEntry?
     @Environment(\.dismiss) private var dismiss
@@ -246,22 +385,25 @@ private struct FuelEditor: View {
     @State private var cost = ""
     @State private var full = true
     @State private var delete = false
+    @State private var prepared = false
     var body: some View {
         NavigationStack {
             Form {
                 DatePicker("Дата", selection: $date, in: ...Date())
-                TextField("Одометр, км", text: $odometer).keyboardType(.decimalPad)
-                TextField("Залито, литров", text: $liters).keyboardType(.decimalPad)
-                TextField("Стоимость, ₽ (необязательно)", text: $cost).keyboardType(.decimalPad)
+                CompanionNumberField(title: "Одометр, км", value: $odometer)
+                CompanionNumberField(title: "Залито, л", value: $liters)
+                CompanionNumberField(title: "Стоимость, ₽ · необязательно", value: $cost)
                 Toggle("До полного бака", isOn: $full)
-                Text("Отметка полного бака нужна для расчёта расхода. Уровень топлива и расход из байка пока не подтверждены.").font(.caption)
+                Text("Для расчёта расхода нужны все заправки между двумя полными баками.")
+                    .font(.caption).foregroundStyle(.secondary)
                 if entry != nil { Button("Удалить заправку", role: .destructive) { delete = true } }
                 if let error = store.error { Text(error).foregroundStyle(.orange) }
-            }.font(.system(.body)).navigationTitle("Заправка")
+            }.font(.system(.body)).navigationTitle("Заправка").navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
                     ToolbarItem(placement: .confirmationAction) { Button("Сохранить") {
-                        guard let km = decimal(odometer), let l = decimal(liters), cost.isEmpty || decimal(cost) != nil else {
+                        guard let km = decimal(odometer), let l = decimal(liters),
+                              cost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || decimal(cost) != nil else {
                             store.error = "Проверь пробег, литры и стоимость: нужны числа."; return
                         }
                         let fuel = FuelEntry(id: entry?.id ?? UUID(), date: date, odometerKm: km,
@@ -272,6 +414,7 @@ private struct FuelEditor: View {
                     } }
                 }
                 .onAppear {
+                    guard !prepared else { return }; prepared = true
                     date = entry?.date ?? Date(); odometer = numberText(entry?.odometerKm ?? store.data.currentOdometerKm)
                     liters = numberText(entry?.liters); cost = numberText(entry?.cost); full = entry?.fullTank ?? true
                 }
@@ -284,57 +427,95 @@ private struct FuelEditor: View {
     }
 }
 
-private struct ServiceEditor: View {
+struct ServiceEditor: View {
     @ObservedObject var store: CompanionStore
     let task: ServiceTask?
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var date = Date()
+    @State private var knowsDate = false
+    @State private var calendarInterval = false
     @State private var odometer = ""
     @State private var km = ""
     @State private var months = ""
     @State private var delete = false
+    @State private var prepared = false
+
+    private var preview: ServiceTask? {
+        guard let reading = decimal(odometer) else { return nil }
+        return ServiceTask(title: title, lastDoneAt: knowsDate ? date : nil,
+                           lastDoneOdometerKm: reading, intervalKm: decimal(km),
+                           intervalMonths: calendarInterval ? Int(months) : nil)
+    }
+
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Например, масло или чистка цепи", text: $title)
-                Section("Когда выполнено последний раз") {
-                    DatePicker("Дата", selection: $date, in: ...Date(), displayedComponents: .date)
-                    TextField("Одометр, км", text: $odometer).keyboardType(.decimalPad)
+                Section("Что обслуживать") {
+                    TextField("Например, масло и фильтр", text: $title)
+                        .accessibilityLabel("Название обслуживания")
+                }
+                Section("Последнее обслуживание") {
+                    CompanionNumberField(title: "На каком пробеге, км", example: "Например, 23 000", value: $odometer)
+                    Toggle("Помню дату", isOn: $knowsDate)
+                    if knowsDate { DatePicker("Дата", selection: $date, in: ...Date(), displayedComponents: .date) }
                     if task != nil {
-                        Button("Выполнено сегодня") { date = Date(); odometer = numberText(store.data.currentOdometerKm) }
-                        Text("Проверь пробег и нажми «Сохранить», чтобы отсчитать следующий срок.").font(.caption)
+                        Button("Выполнено сегодня") {
+                            knowsDate = true; date = Date(); odometer = numberText(store.data.currentOdometerKm)
+                        }
+                        Text("После выполнения проверь пробег и сохрани — следующий срок сдвинется.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Section("Повторять — укажи хотя бы один интервал") {
-                    TextField("Через километры", text: $km).keyboardType(.decimalPad)
-                    TextField("Через месяцы", text: $months).keyboardType(.numberPad)
+                Section("Как часто повторять") {
+                    CompanionNumberField(title: "Интервал, км", example: "Например, 3 000", value: $km)
+                    Toggle("Учитывать срок в месяцах", isOn: $calendarInterval)
+                    if calendarInterval {
+                        CompanionNumberField(title: "Интервал, месяцев", example: "Например, 12", value: $months, wholeNumber: true)
+                        if !knowsDate {
+                            Text("Для срока в месяцах укажи дату последнего обслуживания. Для пробега дата не нужна.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }
-                if task != nil { Button("Удалить задачу", role: .destructive) { delete = true } }
+                if let preview, (try? preview.validate()) != nil {
+                    Section("Следующий раз") { ServiceScheduleText(task: preview, odometerKm: store.data.currentOdometerKm) }
+                }
+                if task != nil { Button("Удалить обслуживание", role: .destructive) { delete = true } }
                 if let error = store.error { Text(error).foregroundStyle(.orange) }
-            }.font(.system(.body)).navigationTitle("Обслуживание")
+            }.font(.system(.body)).navigationTitle("Обслуживание").navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
-                    ToolbarItem(placement: .confirmationAction) { Button("Сохранить") {
-                        guard let odo = decimal(odometer), km.isEmpty || decimal(km) != nil,
-                              months.isEmpty || Int(months) != nil else { store.error = "Проверь пробег и интервалы."; return }
-                        let value = ServiceTask(id: task?.id ?? UUID(), title: title, lastDoneAt: date,
-                            lastDoneOdometerKm: odo, intervalKm: decimal(km), intervalMonths: Int(months))
-                        if store.save({ data in
-                            if let i = data.serviceTasks.firstIndex(where: { $0.id == value.id }) { data.serviceTasks[i] = value }
-                            else { data.serviceTasks.append(value) }
-                        }) { dismiss() }
-                    } }
+                    ToolbarItem(placement: .confirmationAction) { Button("Сохранить", action: save) }
                 }
                 .onAppear {
+                    guard !prepared else { return }; prepared = true
                     title = task?.title ?? ""; date = task?.lastDoneAt ?? Date()
-                    odometer = numberText(task?.lastDoneOdometerKm ?? store.data.currentOdometerKm)
+                    knowsDate = task?.lastDoneAt != nil; calendarInterval = task?.intervalMonths != nil
+                    odometer = numberText(task?.lastDoneOdometerKm)
                     km = numberText(task?.intervalKm); months = task?.intervalMonths.map(String.init) ?? ""
                 }
-                .confirmationDialog("Удалить задачу обслуживания?", isPresented: $delete, titleVisibility: .visible) {
-                    Button("Удалить", role: .destructive) { if store.save({ $0.serviceTasks.removeAll { $0.id == task?.id } }) { dismiss() } }
+                .confirmationDialog("Удалить это обслуживание?", isPresented: $delete, titleVisibility: .visible) {
+                    Button("Удалить", role: .destructive) {
+                        if store.save({ $0.serviceTasks.removeAll { $0.id == task?.id } }) { dismiss() }
+                    }
                 }
         }
+    }
+
+    private func save() {
+        guard let odo = decimal(odometer),
+              km.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || decimal(km) != nil,
+              !calendarInterval || Int(months) != nil else {
+            store.error = "Проверь пробег и интервалы."; return
+        }
+        let value = ServiceTask(id: task?.id ?? UUID(), title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+                                lastDoneAt: knowsDate ? date : nil, lastDoneOdometerKm: odo,
+                                intervalKm: decimal(km), intervalMonths: calendarInterval ? Int(months) : nil)
+        if store.save({ data in
+            if let i = data.serviceTasks.firstIndex(where: { $0.id == value.id }) { data.serviceTasks[i] = value }
+            else { data.serviceTasks.append(value) }
+        }) { dismiss() }
     }
 }
 

@@ -400,15 +400,13 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private let location = CLLocationManager()
     private var archive: RideArchive?
     private var bluetoothConnected = false
-    private var disconnectedAt: Date?
-    private var autoStopWork: DispatchWorkItem?
+    private var automation = RideAutomationPolicy()
     private var pendingManualStart = false
     private var lastTelemetryTimes: [String: Date] = [:]
     private var previous: CLLocation?
     private var distanceAnchor: CLLocation?
     private var locationRunning = false
     private var segment = 0
-    private var autoSuppressedForConnection = false
     private var cancellables = Set<AnyCancellable>()
     private var pendingGPSGapReason: String?
     private var batteryMonitoringBeforeRide: Bool?
@@ -422,7 +420,6 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             let all = try archive?.summaries() ?? []
             history = all.filter { $0.endedAt != nil }
             if var interrupted = all.first(where: { $0.endedAt == nil }) {
-                if interrupted.trigger == "bluetooth" { disconnectedAt = interrupted.lastSavedAt }
                 interrupted.interruptionCount += 1
                 interrupted.lastSavedAt = Date()
                 active = interrupted
@@ -478,6 +475,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         autoRecord = enabled
         UserDefaults.standard.set(enabled, forKey: "MotoLink.autoRecord")
         if enabled {
+            automation.userEnabledAutomaticRecording()
             if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
             else if authorization == .authorizedWhenInUse { location.requestAlwaysAuthorization() }
             evaluateAutoStart()
@@ -503,7 +501,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         guard active != nil, !locationRunning, !restoringRoute, !finishRequested else { return }
         guard authorization == .authorizedAlways ||
                 (authorization == .authorizedWhenInUse && UIApplication.shared.applicationState == .active) else {
-            status = "Для продолжения открой приложение и разреши геопозицию"; return
+            status = "Запись данных мотоцикла продолжается без маршрута"; return
         }
         markGPSGap("Запись геопозиции возобновлена")
         previous = nil
@@ -525,7 +523,6 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         finishRequested = true
         location.stopUpdatingLocation()
         locationRunning = false
-        autoStopWork?.cancel(); autoStopWork = nil
         summary.endedAt = Date(); summary.lastSavedAt = Date()
         var ending = [RideRecord(kind: "finished", timestamp: Date())]
         if let last = points.last,
@@ -564,7 +561,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                 self.distanceAnchor = nil
                 self.speedMS = nil
                 self.pendingGPSGapReason = nil
-                self.autoSuppressedForConnection = self.bluetoothConnected
+                self.automation.rideFinished(transportConnected: self.bluetoothConnected)
                 self.status = "Поездка сохранена на iPhone"
                 completion?(finished)
             case .failure(let failure):
@@ -579,21 +576,22 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         bluetoothConnected = connected
         if !connected { active?.streamCoverage?.endSegment() }
         if connected {
-            autoStopWork?.cancel(); autoStopWork = nil
-            disconnectedAt = nil
-            evaluateAutoStart()
             if active != nil { resume() }
-        } else if changed {
-            disconnectedAt = Date()
-            autoSuppressedForConnection = false
-            autoStopWork?.cancel()
-            let item = DispatchWorkItem { [weak self] in _ = self?.finishAfterDisconnect() }
-            autoStopWork = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: item)
+        } else {
+            // Radio loss cannot distinguish an engine stop from interference.
+            // Keep this same locally saved ride until the rider finishes it.
+            automation.transportDisconnected()
         }
         if changed, active != nil {
             append([RideRecord(kind: "bluetooth", timestamp: Date(), detail: connected ? "connected" : "disconnected")])
         }
+    }
+
+    /// Called synchronously after all notification channels are confirmed,
+    /// before the controller asks the bike for its normal capture profile.
+    func bluetoothReadyForCapture() {
+        automation.channelsBecameReady()
+        evaluateAutoStart()
     }
 
     func recordMeasurements(_ measurements: [MotoProtocol.Measurement]) {
@@ -764,6 +762,9 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     private func begin(trigger: String) {
+        // A delayed permission callback can arrive after automatic BLE capture.
+        // It must never replace an already active or restored journal.
+        guard active == nil else { resume(); return }
         guard archive != nil else { status = "Хранилище недоступно — запись не начата"; return }
         pendingFinish = nil
         finishRequested = false
@@ -779,7 +780,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         beginBatteryMonitoring()
         append([RideRecord(kind: "started", timestamp: Date(), detail: "GPS и скорость: iPhone. BLE-подключение не доказывает работу двигателя.")])
         recordLifecycle("iOS \(UIDevice.current.systemVersion); locationPermission=\(authorization.rawValue); lowPower=\(ProcessInfo.processInfo.isLowPowerModeEnabled)")
-        if authorization == .authorizedAlways || authorization == .authorizedWhenInUse {
+        if authorization == .authorizedAlways ||
+            (authorization == .authorizedWhenInUse && UIApplication.shared.applicationState == .active) {
             locationRunning = true
             location.startUpdatingLocation()
         }
@@ -788,24 +790,16 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     private func evaluateAutoStart() {
-        guard autoRecord, bluetoothConnected, active == nil, !autoSuppressedForConnection else { return }
-        guard authorization == .authorizedAlways else {
-            status = "Для автозаписи выбери геопозицию «Всегда». Ручная запись доступна отдельно."; return
-        }
+        guard bluetoothConnected, automation.shouldStart(enabled: autoRecord,
+            hasActiveRide: active != nil, finishing: finishRequested || finishingRide) else { return }
+        // BLE capture is useful with denied/missing GPS. Permission controls
+        // location updates only, never whether motorcycle evidence is saved.
         begin(trigger: "bluetooth")
     }
 
     private func resumeOnForeground() {
         authorization = location.authorizationStatus
-        if finishAfterDisconnect() { return }
         if active != nil { resume() } else { evaluateAutoStart() }
-    }
-
-    @discardableResult private func finishAfterDisconnect() -> Bool {
-        guard active?.trigger == "bluetooth", !bluetoothConnected,
-              let disconnectedAt, Date().timeIntervalSince(disconnectedAt) >= 120 else { return false }
-        stop { [weak self] _ in self?.status = "Автопоездка завершена: связь отсутствовала 2 минуты" }
-        return true
     }
 
     private func append(_ records: [RideRecord]) {
@@ -848,7 +842,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard let startedAt = active?.startedAt, !finishRequested, !finishAfterDisconnect() else { return }
+        guard let startedAt = active?.startedAt, !finishRequested else { return }
         var records: [RideRecord] = []
         for fix in locations.sorted(by: { $0.timestamp < $1.timestamp }) {
             records.append(RideRecord(kind: "gps_observation", timestamp: fix.timestamp,

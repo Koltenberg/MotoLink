@@ -17,6 +17,10 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     @Published private(set) var status = "Проверка Bluetooth…"
     @Published private(set) var bluetoothPowered = false
     @Published private(set) var scanning = false
+    @Published private(set) var scanStartedAt: Date?
+    @Published private(set) var scanDeadline: Date?
+    @Published private(set) var scanFoundNothing = false
+    @Published private(set) var connectionPaused: Bool
     @Published private(set) var connecting = false
     @Published private(set) var connected = false
     @Published private(set) var ready = false
@@ -58,6 +62,11 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     @Published private(set) var streamPackets = 0
     var onMeasurements: (([MotoProtocol.Measurement]) -> Void)?
     var onStreamFrame: ((Date) -> Void)?
+    /// Synchronous ride creation before capture commands, independent of any scene.
+    var onReadyForCapture: (() -> Void)?
+    private var captureProfileSession: UUID?
+    private var captureProfileRequested = false
+    private var scanGeneration = UUID()
 
     private var diagnosticPhase = 0
     private var decodedStreamFrames = 0
@@ -68,6 +77,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         static let identifier = "MotoLink.peripheralIdentifier"
         static let name = "MotoLink.peripheralName"
         static let reconnect = "MotoLink.autoReconnect"
+        static let paused = "MotoLink.connectionPaused"
         static let verifiedDevices = "MotoLink.verifiedBLE5Devices"
     }
 
@@ -106,7 +116,8 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         hasRememberedDevice = rememberedID != nil
         selectedName = defaults.string(forKey: Key.name) ?? "Мотоцикл не выбран"
         autoReconnect = reconnect
-        shouldResumeAtPowerOn = reconnect
+        connectionPaused = defaults.bool(forKey: Key.paused)
+        shouldResumeAtPowerOn = reconnect && !defaults.bool(forKey: Key.paused)
         super.init()
         do {
             logStore = try SessionLogStore()
@@ -140,34 +151,62 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     func scan() {
-        guard bluetoothPowered, current == nil else { return }
+        guard bluetoothPowered, current == nil, UIApplication.shared.applicationState == .active else { return }
         stopScan()
         found.removeAll()
         nearby.removeAll()
         terminalStatus = nil
+        scanFoundNothing = false
+        scanStartedAt = Date()
+        scanDeadline = scanStartedAt?.addingTimeInterval(25)
         scanning = true
         status = "Поиск мотоцикла поблизости…"
         // Foreground discovery includes devices omitting UUIDs in advertising.
         // The list is restricted to Kawasaki names or the observed service UUID.
         central.scanForPeripherals(withServices: nil, options: nil)
         record("scan", "Начат поиск; выберите свой мотоцикл в списке")
+        let expectedScan = scanGeneration
         let timeout = DispatchWorkItem { [weak self] in
-            self?.stopScan()
-            self?.status = "Поиск завершён. Выберите мотоцикл или повторите поиск."
+            guard let self, self.scanning, self.scanGeneration == expectedScan else { return }
+            self.stopScan()
+            self.scanFoundNothing = self.nearby.isEmpty
+            self.status = self.nearby.isEmpty
+                ? "Мотоцикл не найден. Включите зажигание и Bluetooth на приборке, затем повторите поиск."
+                : "Поиск завершён. Выберите свой мотоцикл."
         }
         scanTimeout = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: timeout)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25, execute: timeout)
     }
 
     func stopScan() {
+        let wasScanning = scanning
+        scanGeneration = UUID()
         scanTimeout?.cancel()
         scanTimeout = nil
         central?.stopScan()
         scanning = false
+        scanStartedAt = nil
+        scanDeadline = nil
+        if wasScanning { status = nearby.isEmpty ? "Поиск остановлен" : "Выберите свой мотоцикл" }
+    }
+
+    func scanProgress(at date: Date) -> String {
+        guard scanning, let scanDeadline else { return status }
+        let remaining = max(0, min(25, Int(ceil(scanDeadline.timeIntervalSince(date)))))
+        return nearby.isEmpty ? "Ищем рядом · ещё \(remaining) с"
+            : "Найдено: \(nearby.count) · ещё \(remaining) с"
+    }
+
+    private func resumeConnectionIntent() {
+        connectionPaused = false
+        scanFoundNothing = false
+        shouldResumeAtPowerOn = autoReconnect
+        UserDefaults.standard.set(false, forKey: Key.paused)
     }
 
     func connect(to identifier: UUID) {
         guard bluetoothPowered, current == nil, let peripheral = found[identifier] else { return }
+        resumeConnectionIntent()
         resetRecovery()
         savedID = identifier
         selectedName = nearby.first(where: { $0.id == identifier })?.name ?? peripheral.name ?? "Kawasaki"
@@ -179,6 +218,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     func connectRemembered() {
         guard bluetoothPowered, current == nil, let savedID else { return }
+        resumeConnectionIntent()
         guard let peripheral = central.retrievePeripherals(withIdentifiers: [savedID]).first else {
             status = "Сохранённый мотоцикл не найден в iOS. Повторите поиск."
             return
@@ -244,6 +284,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         autoReconnect = enabled
         shouldResumeAtPowerOn = enabled
         UserDefaults.standard.set(enabled, forKey: Key.reconnect)
+        if enabled { resumeConnectionIntent() }
         record("setting", "Автоподключение: \(enabled ? "включено" : "выключено")")
         if enabled, bluetoothPowered, current == nil {
             connectRemembered()
@@ -264,12 +305,20 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     func stop() {
-        resetRecovery()
         autoReconnect = false
-        shouldResumeAtPowerOn = false
         UserDefaults.standard.set(false, forKey: Key.reconnect)
+        pauseConnection()
+    }
+
+    /// An explicit pause retains preferences. Only a new user connection or
+    /// enabling auto-connect resumes it; radio cycling/restoration cannot undo it.
+    func pauseConnection() {
+        resetRecovery()
+        connectionPaused = true
+        shouldResumeAtPowerOn = false
+        UserDefaults.standard.set(true, forKey: Key.paused)
         connectionWanted = false
-        terminalStatus = "Остановлено"
+        terminalStatus = "Подключение приостановлено"
         stopScan()
         clearTransport()
         if let current {
@@ -278,8 +327,8 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         }
         connecting = false
         connected = false
-        status = "Остановлено"
-        record("connection", "Остановлено пользователем; очередь запросов очищена")
+        status = "Подключение приостановлено"
+        record("connection", "Подключение приостановлено пользователем; очередь запросов очищена; autoReconnect=\(autoReconnect)")
     }
 
     /// Bounded, source-derived queries and the telemetry session profile.
@@ -311,8 +360,16 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         if !commands.isEmpty { request(commands) }
     }
 
+    func startCaptureProfileIfNeeded() {
+        guard ready, captureProfileSession != session else { return }
+        captureProfileRequested = true
+        runFullDiagnostic()
+    }
+
     func runFullDiagnostic() {
         guard ready, !busy, !diagnosticRunning else { return }
+        captureProfileSession = session
+        captureProfileRequested = false
         diagnosticRunning = true
         diagnosticPhase = 1
         streamPackets = 0
@@ -585,6 +642,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private func clearTransport() {
         cancelScheduledReconnect()
         session = UUID()
+        captureProfileRequested = false
         streamRecovery.reset()
         lastStreamAt = nil
         rssiPending = false
@@ -655,6 +713,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         guard !pendingWrites.isEmpty else {
             busy = false
             status = "Запросы переданы. Ответы — в журнале."
+            if captureProfileRequested { startCaptureProfileIfNeeded() }
             return
         }
         let write = pendingWrites.removeFirst()
@@ -736,6 +795,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         if pendingWrites.isEmpty {
             busy = false
             observeDiagnostic()
+            if captureProfileRequested { startCaptureProfileIfNeeded() }
         } else {
             sendNext()
         }
@@ -795,7 +855,7 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
         guard let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] else { return }
         for peripheral in peripherals {
-            guard autoReconnect, peripheral.identifier == savedID else {
+            guard autoReconnect, !connectionPaused, peripheral.identifier == savedID else {
                 central.cancelPeripheralConnection(peripheral)
                 continue
             }
@@ -956,10 +1016,11 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
         setupTimeout?.cancel()
         setupTimeout = nil
         ready = true
-        status = "Каналы готовы. Выберите диагностический запрос."
+        status = "Мотоцикл подключён"
+        onReadyForCapture?()
         record("ready", "Все три подписки подтверждены")
         if autoReconnect && UserDefaults.standard.bool(forKey: "MotoLink.resumeTelemetry") {
-            runFullDiagnostic()
+            startCaptureProfileIfNeeded()
         }
     }
 
