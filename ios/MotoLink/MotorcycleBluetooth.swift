@@ -217,16 +217,22 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         UserDefaults.standard.set(false, forKey: Key.paused)
     }
 
-    func connect(to identifier: UUID) {
+    func connect(to identifier: UUID, automaticallyReconnect: Bool? = nil) {
         guard bluetoothPowered, current == nil, let peripheral = found[identifier] else { return }
-        resumeConnectionIntent()
-        resetRecovery()
-        savedID = identifier
-        selectedName = nearby.first(where: { $0.id == identifier })?.name ?? peripheral.name ?? "Kawasaki"
-        hasRememberedDevice = true
-        UserDefaults.standard.set(identifier.uuidString, forKey: Key.identifier)
-        UserDefaults.standard.set(selectedName, forKey: Key.name)
-        beginConnection(peripheral)
+        BLEDiscoverySelection.connect(identifier, automaticallyReconnect: automaticallyReconnect,
+            currentPreference: autoReconnect, commit: { selectedID, enabled in
+                savedID = selectedID
+                selectedName = nearby.first(where: { $0.id == selectedID })?.name ?? peripheral.name ?? "Kawasaki"
+                hasRememberedDevice = true
+                autoReconnect = enabled
+                UserDefaults.standard.set(selectedID.uuidString, forKey: Key.identifier)
+                UserDefaults.standard.set(selectedName, forKey: Key.name)
+                UserDefaults.standard.set(enabled, forKey: Key.reconnect)
+                resumeConnectionIntent()
+                resetRecovery()
+            }, issue: { _ in
+                beginConnection(peripheral)
+            })
     }
 
     func connectRemembered() {
@@ -505,6 +511,20 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private static func errorDetails(_ error: Error?) -> String {
         guard let error = error as NSError? else { return "error=none" }
         return "domain=\(error.domain); code=\(error.code); message=\(error.localizedDescription)"
+    }
+
+    /// Passive evidence at an accepted disconnect, before clearing GATT ages.
+    /// Never call recordHealthSnapshot here: it also runs recovery/RSSI work.
+    private func recordDisconnectContext(_ error: Error?) {
+        let now = Date()
+        func age(_ date: Date?) -> String {
+            guard let date else { return "unavailable" }
+            let seconds = now.timeIntervalSince(date)
+            guard seconds.isFinite, seconds >= 0 else { return "clock_changed" }
+            return String(format: "%.3f", seconds)
+        }
+        let rssi = lastRSSI.map(String.init) ?? "unavailable"
+        record("ble_disconnect_context", "connected=\(connected); ready=\(ready); busy=\(busy); diagnosticRunning=\(diagnosticRunning); lastRSSIdBm=\(rssi); rssiAgeSeconds=\(age(lastRSSIAt)); packetAgeSeconds=\(age(lastPacketAt)); streamAgeSeconds=\(age(lastStreamAt)); peripheralState=\(current?.state.rawValue ?? -1); systemReconnectPending=\(nativeReconnect.systemOwnsPendingConnection); cancelPending=\(nativeReconnect.awaitingCancellation); transportRestartPending=\(reconnectPolicy.transportRestartPending); appState=\(UIApplication.shared.applicationState.rawValue); protectedDataAvailable=\(UIApplication.shared.isProtectedDataAvailable); \(Self.errorDetails(error))")
     }
 
     @objc private func enteredBackground() {
@@ -1103,11 +1123,13 @@ extension MotorcycleBluetooth {
 
     private func recordNativeDisconnection(_ error: Error?, reconnect: Bool) {
         guard !nativeDisconnectLogged else { return }
+        recordDisconnectContext(error)
         nativeDisconnectLogged = true
         record("connection", "Отключено; \(Self.errorDetails(error)); reconnect=\(reconnect); systemOwnership=true")
     }
 
     private func completeDisconnection(_ peripheral: CBPeripheral, error: Error?) {
+        if !nativeDisconnectLogged { recordDisconnectContext(error) }
         onConfirmedTransportBoundary?(peripheral.identifier)
         if completeUserRescanCancellation(peripheral, error: error) { return }
         let resumeRemembered = cancelResume.completedCancellation(for: peripheral.identifier,

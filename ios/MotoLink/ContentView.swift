@@ -259,8 +259,7 @@ struct ContentView: View {
                     Text("Начнём запись при подключении. Сохраняем на iPhone без интернета.").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     ForEach(bluetooth.nearby) { device in
                         Button {
-                            bluetooth.connect(to: device.id)
-                            bluetooth.setAutoReconnect(true)
+                            bluetooth.connect(to: device.id, automaticallyReconnect: true)
                             rides.setAutoRecord(recordAfterPairing)
                             selectedTab = 1
                             showDiscovery = false
