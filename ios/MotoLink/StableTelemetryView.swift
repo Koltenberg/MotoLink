@@ -108,7 +108,7 @@ struct MotorcycleDashboardView: View, Equatable {
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 Text(row.id == "engine_water_temperature" ? "Температура" : row.id == "engine_speed" ? "Обороты" : row.field.label).font(MotoTheme.font(.caption))
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(1).minimumScaleFactor(0.8)
                 Text(number(row)).font(MotoTheme.font(.title).monospacedDigit())
                     .lineLimit(1).minimumScaleFactor(0.75)
                     .foregroundStyle(row.value == nil ? MotoTheme.secondary : Color.primary)
