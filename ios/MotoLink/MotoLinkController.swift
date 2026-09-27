@@ -11,10 +11,13 @@ final class MotoLinkController: ObservableObject {
     private var subscriptions = Set<AnyCancellable>()
 
     private init() {
-        // Automatic capture is opt-in and remains the user's persisted choice.
+        // First pairing presents an enabled, visible recording switch; later
+        // launches preserve the user's choice instead of overriding it.
         bluetooth.onMeasurements = { [weak self] in self?.rides.recordMeasurements($0) }
         bluetooth.onStreamFrame = { [weak self] in self?.rides.recordStreamFrame(at: $0) }
         bluetooth.onDiagnosticEvent = { [weak self] in self?.rides.recordDiagnostic($0) }
+        bluetooth.onTransportIdentity = { [weak self] in self?.rides.observeBluetoothPeripheral($0) }
+        bluetooth.onConfirmedTransportBoundary = { [weak self] in self?.rides.confirmedBluetoothBoundary($0) }
         rides.onNewRideStarted = { [weak self] id in
             guard let self, self.rides.active?.id == id, !self.rides.finishRequested else { return }
             self.rides.recordConnectionContext(ConnectionTestSettingsView.capture())

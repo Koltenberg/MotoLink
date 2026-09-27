@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Capture real app UI on disposable CI simulators, with bounded recovery."""
 import json
+import os
 import plistlib
 import re
 import shutil
@@ -81,6 +82,55 @@ def select_device_type(types):
     raise CaptureError("Neither iPhone 17 nor iPhone 16 simulator device type is available")
 
 
+def select_runner_seed(devices, runtime, device_type):
+    # Only a matching precreated, stopped device from the disposable hosted
+    # image is a seed. Do not choose a failed clone from an earlier attempt.
+    for device in devices.get(runtime, []):
+        if (device.get("isAvailable") is True and device.get("state") == "Shutdown"
+                and device.get("deviceTypeIdentifier") == device_type["identifier"]
+                and device.get("name") == device_type["name"]
+                and re.fullmatch(r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}",
+                                 device.get("udid", ""))):
+            return device["udid"]
+    return None
+
+
+def output_text(value):
+    # TimeoutExpired output is bytes even when subprocess.run(text=True).
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else (value or "")
+
+
+def boot_with_progress(command, timeout):
+    # Inherit stdout/stderr directly: boot stages reach CI's tee immediately,
+    # without pipe buffering or a reader thread. Never wait() with PIPEs here.
+    started = time.monotonic()
+    process = subprocess.Popen(command)
+    try:
+        while True:
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                code = process.wait(timeout=min(30, remaining))
+            except subprocess.TimeoutExpired:
+                elapsed = time.monotonic() - started
+                print(f"Simulator boot still running after {elapsed:.0f}s "
+                      f"(limit {timeout:.0f}s); boot stages are streamed above", flush=True)
+                continue
+            if code:
+                raise CaptureError(f"simctl bootstatus failed ({code}); see streamed boot stages above")
+            return ""
+    finally:
+        if process.poll() is None:
+            # This kills only the simctl client we started, not CoreSimulator
+            # or any other device. Keep even process reaping bounded.
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                print("Boot client did not exit within 5s after kill", flush=True)
+
+
 def run(*args, timeout=60, deadline=None):
     if deadline is not None:
         remaining = deadline - time.monotonic()
@@ -88,8 +138,22 @@ def run(*args, timeout=60, deadline=None):
             raise CaptureError("Simulator capture time budget exhausted")
         timeout = min(timeout, remaining)
     print("simctl " + " ".join(map(str, args)) + f" (timeout {timeout:.1f}s)", flush=True)
-    result = subprocess.run(["xcrun", "simctl", *map(str, args)],
-                            text=True, capture_output=True, timeout=timeout)
+    command = ["xcrun", "simctl", *map(str, args)]
+    try:
+        if args[0] == "bootstatus":
+            return boot_with_progress(command, timeout)
+        result = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        stdout = output_text(error.stdout)[-8000:]
+        stderr = output_text(error.stderr)[-8000:]
+        detail = f"simctl {args[0]} timed out after {timeout:.1f}s"
+        if stdout:
+            detail += f"\nCaptured stdout:\n{stdout}"
+        if stderr:
+            detail += f"\nCaptured stderr:\n{stderr}"
+        if args[0] == "bootstatus":
+            detail += "; see streamed boot stages above"
+        raise CaptureError(detail) from error
     if result.returncode:
         raise CaptureError(f"simctl {args[0]} failed ({result.returncode}): "
                            f"{result.stdout[-4000:]} {result.stderr[-4000:]}")
@@ -99,7 +163,7 @@ def run(*args, timeout=60, deadline=None):
 
 
 def cleanup(device):
-    # These are only UUIDs returned by our own create call. Never shutdown all
+    # These are only UUIDs returned by our own create/clone call. Never shutdown all
     # devices, restart CoreSimulatorService, or touch a physical phone.
     for command in ("shutdown", "delete"):
         try:
@@ -126,15 +190,20 @@ def validate_png(path):
     return width, height
 
 
-def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadline):
+def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadline, seed=None):
     device = None
     try:
-        device = run("create", f"MotoLink visual check {attempt}", device_type,
-                     runtime, timeout=30, deadline=deadline)
-        if not re.fullmatch(r"[0-9A-Fa-f-]{36}", device):
-            raise CaptureError("simctl create did not return a device UUID")
+        name = f"MotoLink visual check {attempt}"
+        if seed:
+            print(f"Cloning hosted image device {seed}; source remains untouched", flush=True)
+            created = run("clone", seed, name, timeout=60, deadline=deadline)
+        else:
+            created = run("create", name, device_type, runtime, timeout=30, deadline=deadline)
+        if not re.fullmatch(r"[0-9A-Fa-f-]{36}", created) or created == seed:
+            raise CaptureError("simctl create/clone did not return a new device UUID")
+        device = created
         run("boot", device, timeout=30, deadline=deadline)
-        run("bootstatus", device, "-b", timeout=150, deadline=deadline)
+        run("bootstatus", device, "-b", timeout=300, deadline=deadline)
         # Appearance variants are app launch arguments, not global simulator
         # settings: global appearance/status-bar decoration has hung on
         # otherwise booted GitHub runners. Exercise the app's own theme.
@@ -211,11 +280,16 @@ def capture(app, output):
     output.mkdir(parents=True, exist_ok=True)
     for name in SCREENSHOT_NAMES:
         (output / name).unlink(missing_ok=True)
-    deadline = time.monotonic() + 600
+    deadline = time.monotonic() + 900
     runtimes = json.loads(run("list", "runtimes", "-j", deadline=deadline))["runtimes"]
     types = json.loads(run("list", "devicetypes", "-j", deadline=deadline))["devicetypes"]
     device_type = select_device_type(types)
     runtime = select_runtime(app_info, runtimes, device_type)
+    seed = None
+    if os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted":
+        devices = json.loads(run("list", "devices", "-j", deadline=deadline))["devices"]
+        seed = select_runner_seed(devices, runtime, device_type)
+        print("Hosted simulator seed: " + (seed or "none available; create a fresh device"), flush=True)
     failures = []
     for attempt in range(1, 3):
         print(f"Simulator capture attempt {attempt}/2", flush=True)
@@ -223,7 +297,7 @@ def capture(app, output):
         with tempfile.TemporaryDirectory(prefix="motolink-visual-") as temporary:
             try:
                 images = capture_attempt(app, Path(temporary), device_type["identifier"], runtime,
-                                         bundle_id, attempt, deadline)
+                                         bundle_id, attempt, deadline, seed=seed)
             except (CaptureError, subprocess.TimeoutExpired, OSError) as error:
                 failures.append(f"attempt {attempt}: {error}")
                 print(f"Capture failed: {failures[-1]}", flush=True)

@@ -64,6 +64,8 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     var onStreamFrame: ((Date) -> Void)?
     /// Synchronous ride creation before capture commands, independent of any scene.
     var onReadyForCapture: (() -> Void)?
+    var onTransportIdentity: ((UUID) -> Void)?
+    var onConfirmedTransportBoundary: ((UUID) -> Void)?
     private var captureProfileSession: UUID?
     private var captureProfileRequested = false
     private var scanGeneration = UUID()
@@ -535,6 +537,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     private func beginConnection(_ peripheral: CBPeripheral, delay: TimeInterval = 0) {
+        onTransportIdentity?(peripheral.identifier)
         stopScan()
         selectTelemetryCatalogue(for: peripheral.identifier)
         clearTransport()
@@ -605,6 +608,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     private func prepare(_ peripheral: CBPeripheral) {
+        onTransportIdentity?(peripheral.identifier)
         selectTelemetryCatalogue(for: peripheral.identifier)
         clearTransport()
         connected = true
@@ -861,6 +865,7 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
             }
             current = peripheral
             peripheral.delegate = self
+            onTransportIdentity?(peripheral.identifier)
             connectionWanted = true
             connecting = peripheral.state != .connected
             connected = peripheral.state == .connected
@@ -896,6 +901,7 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
             return
         }
         record("connection", "BLE соединение установлено; телеметрия ещё не подтверждена")
+        onConfirmedTransportBoundary?(peripheral.identifier)
         prepare(peripheral)
     }
 
@@ -921,6 +927,7 @@ extension MotorcycleBluetooth: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard current === peripheral, peripheral.state == .disconnected,
               reconnectScheduler.pending == nil else { return }
+        onConfirmedTransportBoundary?(peripheral.identifier)
         if completeUserRescanCancellation(peripheral, error: error) { return }
         let shouldReconnect = connectionWanted && autoReconnect && bluetoothPowered
         let recoveryError = transportRecoveryError ?? error

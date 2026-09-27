@@ -77,11 +77,6 @@ if ((check_simulator)); then
     -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath "$build_root/simulator" build \
     2>&1 | tee "$run_dir/simulator-build.log"
-  if [[ "${MOTOLINK_SCREENSHOT:-0}" == 1 ]]; then
-    python3 "$project_root/scripts/capture-simulator.py" \
-      "$build_root/simulator/Build/Products/Release-iphonesimulator/MotoLink.app" "$run_dir" \
-      2>&1 | tee "$run_dir/simulator-capture.log"
-  fi
 fi
 
 xcodebuild "${common[@]}" \
@@ -114,3 +109,12 @@ python3 "$project_root/scripts/validate-ipa.py" \
 )
 printf '\nValidated unsigned package: %s\n' "$run_dir/MotoLink-unsigned.ipa"
 printf 'This IPA still needs personal signing before installation. No Bluetooth hardware test was performed.\n'
+
+# Keep the compiled device artifact available for diagnosis even if the CI
+# simulator cannot boot. Visual validation remains a required, failing step;
+# packaging alone never marks the workflow successful.
+if ((check_simulator)) && [[ "${MOTOLINK_SCREENSHOT:-0}" == 1 ]]; then
+  python3 "$project_root/scripts/capture-simulator.py" \
+    "$build_root/simulator/Build/Products/Release-iphonesimulator/MotoLink.app" "$run_dir" \
+    2>&1 | tee "$run_dir/simulator-capture.log"
+fi

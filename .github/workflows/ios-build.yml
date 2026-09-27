@@ -39,6 +39,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
       - name: Upload unsigned IPA and package report
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: MotoLink-unsigned-iPhone-${{ github.run_number }}
@@ -46,7 +47,7 @@ jobs:
             build-artifacts/ios/**/MotoLink-unsigned.ipa
             build-artifacts/ios/**/MotoLink-unsigned.ipa.sha256
             build-artifacts/ios/**/package-validation.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 3
       - name: Upload build logs
         if: always()

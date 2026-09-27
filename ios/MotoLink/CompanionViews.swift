@@ -273,7 +273,7 @@ struct CompanionView: View {
                         .font(.system(.subheadline)).foregroundStyle(.secondary)
                 }
             }
-            if let error = store.error { Section { Text(error).foregroundStyle(.orange) } }
+            if let error = store.error { Section { Text(error).foregroundStyle(MotoTheme.accent) } }
         }
         .font(.system(.body))
         .scrollContentBackground(.hidden).background(MotoTheme.background)
@@ -326,7 +326,7 @@ struct BikeProfileEditor: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                if let error = store.error { Text(error).foregroundStyle(.orange) }
+                if let error = store.error { Text(error).foregroundStyle(MotoTheme.accent) }
             }.font(.system(.body)).navigationTitle("Мой байк").navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
@@ -397,7 +397,7 @@ struct FuelEditor: View {
                 Text("Для расчёта расхода нужны все заправки между двумя полными баками.")
                     .font(.caption).foregroundStyle(.secondary)
                 if entry != nil { Button("Удалить заправку", role: .destructive) { delete = true } }
-                if let error = store.error { Text(error).foregroundStyle(.orange) }
+                if let error = store.error { Text(error).foregroundStyle(MotoTheme.accent) }
             }.font(.system(.body)).navigationTitle("Заправка").navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }
@@ -482,7 +482,7 @@ struct ServiceEditor: View {
                     Section("Следующий раз") { ServiceScheduleText(task: preview, odometerKm: store.data.currentOdometerKm) }
                 }
                 if task != nil { Button("Удалить обслуживание", role: .destructive) { delete = true } }
-                if let error = store.error { Text(error).foregroundStyle(.orange) }
+                if let error = store.error { Text(error).foregroundStyle(MotoTheme.accent) }
             }.font(.system(.body)).navigationTitle("Обслуживание").navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() } }

@@ -400,7 +400,9 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private let location = CLLocationManager()
     private var archive: RideArchive?
     private var bluetoothConnected = false
-    private var automation = RideAutomationPolicy()
+    private static let automaticFinishKey = "MotoLink.autoRecordFinishedPeripheral"
+    private var automation = RideAutomationPolicy(stoppedPeripheralID:
+        UserDefaults.standard.string(forKey: RideRecorder.automaticFinishKey).flatMap(UUID.init(uuidString:)))
     private var pendingManualStart = false
     private var lastTelemetryTimes: [String: Date] = [:]
     private var previous: CLLocation?
@@ -476,6 +478,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         UserDefaults.standard.set(enabled, forKey: "MotoLink.autoRecord")
         if enabled {
             automation.userEnabledAutomaticRecording()
+            persistAutomationFinishMarker()
             if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
             else if authorization == .authorizedWhenInUse { location.requestAlwaysAuthorization() }
             evaluateAutoStart()
@@ -489,6 +492,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
 
     func start() {
         guard active == nil else { resume(); return }
+        automation.userRequestedManualStart()
+        persistAutomationFinishMarker()
         if authorization == .notDetermined {
             pendingManualStart = true
             location.requestWhenInUseAuthorization()
@@ -518,6 +523,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             persistPendingFinish(using: archive, completion: completion)
             return
         }
+        automation.userRequestedFinish(transportConnected: bluetoothConnected)
+        persistAutomationFinishMarker()
         recordPhoneHealth(reason: "finished")
         guard var summary = active else { return }
         finishRequested = true
@@ -561,9 +568,12 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                 self.distanceAnchor = nil
                 self.speedMS = nil
                 self.pendingGPSGapReason = nil
-                self.automation.rideFinished(transportConnected: self.bluetoothConnected)
                 self.status = "Поездка сохранена на iPhone"
                 completion?(finished)
+                // A genuinely new BLE connection may have arrived while the
+                // old journal was being saved. The persisted marker protects
+                // the same connection, but must not suppress this new one.
+                self.evaluateAutoStart()
             case .failure(let failure):
                 self.error = failure.localizedDescription
                 self.status = "Не удалось завершить сохранение. Запись приостановлена — повторите завершение."
@@ -592,6 +602,23 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     func bluetoothReadyForCapture() {
         automation.channelsBecameReady()
         evaluateAutoStart()
+    }
+
+    func observeBluetoothPeripheral(_ identifier: UUID) {
+        automation.observePeripheral(identifier)
+    }
+
+    func confirmedBluetoothBoundary(_ identifier: UUID) {
+        automation.confirmedTransportBoundary(for: identifier)
+        persistAutomationFinishMarker()
+    }
+
+    private func persistAutomationFinishMarker() {
+        if let identifier = automation.stoppedPeripheralID {
+            UserDefaults.standard.set(identifier.uuidString, forKey: Self.automaticFinishKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.automaticFinishKey)
+        }
     }
 
     func recordMeasurements(_ measurements: [MotoProtocol.Measurement]) {
@@ -668,6 +695,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     /// a denied permission, unavailable satellites, or a long GPS outage.
     func startCapture() {
         guard active == nil else { resume(); return }
+        automation.userRequestedManualStart()
+        persistAutomationFinishMarker()
         begin(trigger: "capture")
         if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
     }

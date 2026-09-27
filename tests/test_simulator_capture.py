@@ -7,7 +7,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SPEC = importlib.util.spec_from_file_location("capture_simulator",
     Path(__file__).resolve().parents[1] / "scripts" / "capture-simulator.py")
@@ -41,6 +41,9 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.content_size = "large"
         self.theme = "default"
         self.landscape = False
+        self.runner_env = {}
+        self.seed_devices = {}
+        self.clone_result = None
 
     def fake_run(self, *args, **kwargs):
         self.calls.append(args)
@@ -49,8 +52,11 @@ class SimulatorCaptureTests(unittest.TestCase):
                                             "name": "iOS 18.5", "version": "18.5"}]})
         if args[:2] == ("list", "devicetypes"):
             return json.dumps({"devicetypes": [{"name": "iPhone 16", "identifier": "iphone16"}]})
-        if args[0] == "create":
-            device = f"00000000-0000-0000-0000-{len(self.devices) + 1:012d}"
+        if args[:2] == ("list", "devices"):
+            return json.dumps({"devices": self.seed_devices})
+        if args[0] in ("create", "clone"):
+            device = (self.clone_result if args[0] == "clone" and self.clone_result else
+                      f"00000000-0000-0000-0000-{len(self.devices) + 1:012d}")
             self.devices.append(device)
             return device
         if self.failure:
@@ -72,8 +78,50 @@ class SimulatorCaptureTests(unittest.TestCase):
         return ""
 
     def execute(self):
-        with patch.object(CAPTURE, "run", side_effect=self.fake_run), patch.object(CAPTURE.time, "sleep"):
+        with patch.object(CAPTURE, "run", side_effect=self.fake_run), \
+             patch.object(CAPTURE.time, "sleep"), patch.dict(CAPTURE.os.environ, self.runner_env, clear=True):
             CAPTURE.capture(self.app, self.output)
+
+    def set_hosted_seed(self):
+        self.runner_env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+        seed = {"udid": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE", "name": "iPhone 16",
+                "deviceTypeIdentifier": "iphone16", "isAvailable": True, "state": "Shutdown"}
+        self.seed_devices = {"runtime-ios": [seed]}
+        return seed["udid"]
+
+    def test_hosted_capture_clones_source_without_booting_or_deleting_it(self):
+        seed = self.set_hosted_seed()
+        self.execute()
+        self.assertIn(("clone", seed, "MotoLink visual check 1"), self.calls)
+        self.assertFalse(any(call[0] == "create" for call in self.calls))
+        for call in self.calls:
+            if call[0] != "clone":
+                self.assertNotIn(seed, call)
+        self.assertIn(("delete", self.devices[0]), self.calls)
+
+    def test_no_seed_on_hosted_runner_falls_back_to_new_device(self):
+        self.runner_env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+        self.execute()
+        self.assertTrue(any(call[0] == "create" for call in self.calls))
+        self.assertFalse(any(call[0] == "clone" for call in self.calls))
+
+    def test_self_hosted_or_local_capture_never_reads_or_clones_user_devices(self):
+        for env in ({}, {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted"},
+                    {"RUNNER_ENVIRONMENT": "github-hosted"}):
+            with self.subTest(env=env):
+                self.calls = []
+                self.runner_env = env
+                self.execute()
+                self.assertFalse(any(call[:2] == ("list", "devices") or call[0] == "clone"
+                                     for call in self.calls))
+
+    def test_clone_returning_source_uuid_cannot_trigger_source_cleanup(self):
+        seed = self.set_hosted_seed()
+        self.clone_result = seed
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "did not return a new device UUID"):
+            self.execute()
+        self.assertFalse(any(call[0] in ("boot", "shutdown", "delete", "install")
+                             for call in self.calls))
 
     def test_real_required_steps_run_without_redundant_global_appearance(self):
         self.execute()
@@ -181,7 +229,7 @@ class SimulatorCaptureTests(unittest.TestCase):
     def test_boot_timeout_gets_one_fresh_simulator_then_all_checks(self):
         def fail(args):
             if args[0] == "bootstatus" and args[1] == self.devices[0]:
-                raise subprocess.TimeoutExpired("bootstatus", 150)
+                raise subprocess.TimeoutExpired("bootstatus", 300)
         self.failure = fail
         self.execute()
         self.assertEqual(len(self.devices), 2)
@@ -247,6 +295,72 @@ class SimulatorCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(CAPTURE.CaptureError, "budget exhausted"):
                 CAPTURE.run("boot", "simulator", deadline=99)
             process.assert_not_called()
+
+
+class RunnerSeedSelectionTests(unittest.TestCase):
+    device_type = {"name": "iPhone 17", "identifier": "iphone17"}
+    valid = {"name": "iPhone 17", "deviceTypeIdentifier": "iphone17",
+             "udid": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE", "state": "Shutdown", "isAvailable": True}
+
+    def test_seed_requires_exact_runtime_type_and_available_stopped_valid_uuid(self):
+        variants = [{"deviceTypeIdentifier": "iphone16"}, {"state": "Booted"},
+                    {"isAvailable": False}, {"isAvailable": None}, {"udid": "not-a-uuid"},
+                    {"name": "MotoLink visual check 1"}]
+        candidates = [{**self.valid, **override} for override in variants] + [self.valid]
+        selected = CAPTURE.select_runner_seed(
+            {"wrong-runtime": [self.valid], "runtime-ios": candidates}, "runtime-ios", self.device_type)
+        self.assertEqual(selected, self.valid["udid"])
+        self.assertIsNone(CAPTURE.select_runner_seed(
+            {"wrong-runtime": [self.valid]}, "runtime-ios", self.device_type))
+        self.assertIsNone(CAPTURE.select_runner_seed(
+            {"runtime-ios": candidates[:-1]}, "runtime-ios", self.device_type))
+
+
+class CommandDiagnosticsTests(unittest.TestCase):
+    def test_timeout_surfaces_binary_stdout_and_stderr_with_bounded_tail(self):
+        error = subprocess.TimeoutExpired("install", 60,
+            output=b"discard-me" + b"x" * 9000 + b"Waiting on installd",
+            stderr=b"service did not reply\\xff")
+        with patch.object(CAPTURE.subprocess, "run", side_effect=error):
+            with self.assertRaises(CAPTURE.CaptureError) as raised:
+                CAPTURE.run("install", "simulator", "App.app", timeout=60)
+        detail = str(raised.exception)
+        self.assertIn("\nCaptured stdout:\n", detail)
+        self.assertIn("Waiting on installd", detail)
+        self.assertIn("service did not reply", detail)
+        self.assertNotIn("discard-me", detail)
+        self.assertLess(len(detail), 8300)
+
+    def test_boot_progress_inherits_streams_reports_wait_and_does_not_kill_success(self):
+        process = Mock()
+        process.wait.side_effect = [subprocess.TimeoutExpired("bootstatus", 30), 0]
+        process.poll.return_value = 0
+        with patch.object(CAPTURE.subprocess, "Popen", return_value=process) as popen, \
+             patch.object(CAPTURE.time, "monotonic", side_effect=[0, 0, 30, 30]), \
+             patch("builtins.print") as output:
+            CAPTURE.boot_with_progress(["xcrun", "simctl", "bootstatus", "simulator", "-b"], 300)
+        popen.assert_called_once_with(["xcrun", "simctl", "bootstatus", "simulator", "-b"])
+        self.assertTrue(any("after 30s" in str(call) for call in output.call_args_list))
+        process.kill.assert_not_called()
+
+    def test_boot_deadline_kills_only_started_client_and_retains_failure(self):
+        process = Mock()
+        process.wait.side_effect = [subprocess.TimeoutExpired("bootstatus", 30), -9]
+        process.poll.return_value = None
+        with patch.object(CAPTURE.subprocess, "Popen", return_value=process), \
+             patch.object(CAPTURE.time, "monotonic", side_effect=[0, 0, 31, 31]):
+            with self.assertRaisesRegex(CAPTURE.CaptureError, "timed out"):
+                CAPTURE.run("bootstatus", "simulator", "-b", timeout=30)
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.wait.call_args_list[-1].kwargs, {"timeout": 5})
+
+    def test_nonzero_boot_result_is_not_treated_as_readiness(self):
+        process = Mock()
+        process.wait.return_value = 2
+        process.poll.return_value = 2
+        with patch.object(CAPTURE.subprocess, "Popen", return_value=process):
+            with self.assertRaisesRegex(CAPTURE.CaptureError, r"bootstatus failed \(2\)"):
+                CAPTURE.run("bootstatus", "simulator", "-b", timeout=300)
 
 
 class DeviceSelectionTests(unittest.TestCase):
