@@ -1,0 +1,31 @@
+{
+  "family": "Moto Link Pixel",
+  "version": "1.100",
+  "sourceSHA256": "65855a2e639f720eba0ec5adfa7c37563f4402938ded42366d8d4546e4ba8b9a",
+  "sha256": "0612622445f0398877665d6c8d9ac10d3ec6c9a476a2bf64057dd1a45e60e334",
+  "bytes": 53852,
+  "unitsPerEm": 1000,
+  "unicodeMappings": 581,
+  "requiredCharacters": " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~«°·»ЁАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюяё–—…₽↑→↓∅",
+  "requiredCharacterCount": 173,
+  "missingCharacters": [],
+  "decimalAdvances": {
+    "0": 586,
+    "1": 586,
+    "2": 586,
+    "3": 586,
+    "4": 586,
+    "5": 586,
+    "6": 586,
+    "7": 586,
+    "8": 586,
+    "9": 586
+  },
+  "aliases": {
+    "О": "O",
+    "П": "Π",
+    "К": "K"
+  },
+  "newPixelSymbols": "₽↑↓→∅",
+  "redrawnCharacters": "05ZzVvЫы"
+}

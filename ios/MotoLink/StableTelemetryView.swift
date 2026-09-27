@@ -91,13 +91,13 @@ struct MotorcycleDashboardView: View, Equatable {
         if compact {
             VStack(alignment: .leading, spacing: 3) {
                 Text(row.id == "engine_water_temperature" ? "Температура" : row.id == "engine_speed" ? "Обороты" : row.field.label)
-                    .font(.system(.caption)).lineLimit(1).minimumScaleFactor(0.8)
+                    .font(MotoTheme.font(.caption)).lineLimit(1).minimumScaleFactor(0.8)
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(number(row)).font(.system(size: 24, weight: .semibold, design: .rounded).monospacedDigit())
+                    Text(number(row)).font(MotoTheme.numberFont(size: 24).monospacedDigit())
                         .lineLimit(1).minimumScaleFactor(0.75)
                         .foregroundStyle(row.value == nil ? MotoTheme.secondary : Color.primary)
                     if !row.field.unit.isEmpty {
-                        Text(row.field.unit).font(.system(.caption)).foregroundStyle(MotoTheme.secondary).lineLimit(1)
+                        Text(row.field.unit).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary).lineLimit(1)
                     }
                 }
             }
@@ -107,14 +107,14 @@ struct MotorcycleDashboardView: View, Equatable {
             .accessibilityElement(children: .combine)
         } else {
             VStack(alignment: .leading, spacing: 8) {
-                Text(row.id == "engine_water_temperature" ? "Температура" : row.id == "engine_speed" ? "Обороты" : row.field.label).font(.system(.caption))
+                Text(row.id == "engine_water_temperature" ? "Температура" : row.id == "engine_speed" ? "Обороты" : row.field.label).font(MotoTheme.font(.caption))
                     .fixedSize(horizontal: false, vertical: true)
-                Text(number(row)).font(.system(.title, design: .rounded).weight(.semibold).monospacedDigit())
+                Text(number(row)).font(MotoTheme.font(.title).monospacedDigit())
                     .lineLimit(1).minimumScaleFactor(0.75)
                     .foregroundStyle(row.value == nil ? MotoTheme.secondary : Color.primary)
                 // Units get their own line so a three-digit speed or five-digit RPM
                 // does not wrap on an iPhone SE beside the fixed gear card.
-                Text(row.field.unit.isEmpty ? " " : row.field.unit).font(.system(.caption)).foregroundStyle(MotoTheme.secondary)
+                Text(row.field.unit.isEmpty ? " " : row.field.unit).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

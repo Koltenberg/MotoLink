@@ -19,7 +19,9 @@ from pathlib import Path
 SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
                     "simulator-companion.png", "simulator-companion-large-text.png",
                     "simulator-garage-light.png", "simulator-ride.png",
-                    "simulator-ride-light.png", "simulator-ride-landscape.png")
+                    "simulator-ride-light.png", "simulator-settings.png",
+                    "simulator-service-editor.png", "simulator-history.png",
+                    "simulator-ride-landscape.png")
 ORIENTATION_EVIDENCE = "MotoLinkVisualOrientation.json"
 READY_EVIDENCE = "MotoLinkVisualReady.json"
 READY_NAMES = tuple(Path(name).with_suffix(".ready.json").name for name in SCREENSHOT_NAMES)
@@ -443,6 +445,9 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
             ("simulator-garage-light.png", ("--review-light",), False),
             ("simulator-ride.png", ("--review-ride",), False),
             ("simulator-ride-light.png", ("--review-ride", "--review-light"), False),
+            ("simulator-settings.png", ("--review-settings", "--review-light"), False),
+            ("simulator-service-editor.png", ("--companion-visual-check", "--review-service-editor", "--review-light"), False),
+            ("simulator-history.png", ("--review-history", "--review-light"), False),
             ("simulator-ride-landscape.png", ("--review-ride", "--review-landscape"), True),
         )
         for name, flags, landscape in variants:

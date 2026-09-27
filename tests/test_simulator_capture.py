@@ -185,6 +185,9 @@ class SimulatorCaptureTests(unittest.TestCase):
             ("simulator-garage-light.png", "home", "light", False),
             ("simulator-ride.png", "ride", "default", False),
             ("simulator-ride-light.png", "ride", "light", False),
+            ("simulator-settings.png", "home", "light", False),
+            ("simulator-service-editor.png", "companion", "light", False),
+            ("simulator-history.png", "home", "light", False),
             ("simulator-ride-landscape.png", "ride", "default", True),
         ]
         for name, mode, theme, landscape in expected:
@@ -201,6 +204,32 @@ class SimulatorCaptureTests(unittest.TestCase):
                 process_running = True
             elif call[0] == "terminate":
                 process_running = False
+
+    def test_settings_service_editor_and_history_use_their_own_launch_flags_before_landscape(self):
+        self.execute()
+        launches = {}
+        flags = ()
+        captured = []
+        for call in self.calls:
+            if call[0] == "launch":
+                flags = call[3:call.index("--visual-review-token")]
+            elif call[0] == "io":
+                name = Path(call[-1]).name
+                launches[name] = flags
+                captured.append(name)
+        for name, expected_flags, mode in [
+            ("simulator-settings.png", ("--review-settings", "--review-light"), "garage"),
+            ("simulator-service-editor.png",
+             ("--companion-visual-check", "--review-service-editor", "--review-light"), "companion"),
+            ("simulator-history.png", ("--review-history", "--review-light"), "garage"),
+        ]:
+            with self.subTest(name=name):
+                self.assertEqual(launches[name], expected_flags)
+                self.assertLess(captured.index(name), captured.index("simulator-ride-landscape.png"))
+                evidence = json.loads((self.output / Path(name).with_suffix(".ready.json")).read_text())
+                self.assertEqual(evidence["mode"], mode)
+                self.assertEqual(evidence["appearance"], "light")
+        self.assertEqual(captured[-1], "simulator-ride-landscape.png")
 
     def test_unapplied_landscape_rotation_rejects_entire_set_not_portrait_as_landscape(self):
         self.orientation_override = {"interfaceLandscape": False, "interfaceOrientation": 1,
@@ -219,7 +248,7 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.assertEqual(list(self.output.glob("*.png")), [])
         for attempt in (1, 2):
             debug = self.output / f"debug-attempt{attempt}"
-            self.assertEqual(len(list(debug.glob("*.png"))), 8)
+            self.assertEqual(len(list(debug.glob("*.png"))), 11)
             manifest = json.loads((debug / "failure.json").read_text())
             self.assertEqual(manifest["status"], "failed")
             self.assertIn("Landscape rotation was not applied", manifest["error"])
@@ -227,7 +256,7 @@ class SimulatorCaptureTests(unittest.TestCase):
         for device in self.devices:
             self.assertIn(("delete", device), self.calls)
 
-    def test_last_ride_launch_failure_does_not_publish_earlier_seven_views(self):
+    def test_last_ride_launch_failure_does_not_publish_earlier_ten_views(self):
         def fail(args):
             if args[0] == "launch" and "--review-landscape" in args:
                 raise CAPTURE.CaptureError("ride landscape launch failed")
@@ -237,7 +266,7 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.assertEqual(list(self.output.glob("*.png")), [])
         for attempt in (1, 2):
             debug = self.output / f"debug-attempt{attempt}"
-            self.assertEqual(len(list(debug.glob("*.png"))), 7)
+            self.assertEqual(len(list(debug.glob("*.png"))), 10)
             self.assertEqual(json.loads((debug / "failure.json").read_text())["status"], "failed")
         self.assertFalse(any(args[0] == "io" and
                              Path(args[-1]).name == "simulator-ride-landscape.png"
@@ -279,7 +308,7 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.execute()
         tokens = [call[call.index("--visual-review-token") + 1] for call in self.calls if call[0] == "launch"]
         self.assertEqual(len(tokens), len(set(tokens)))
-        self.assertEqual(len(list(self.output.glob("*.ready.json"))), 8)
+        self.assertEqual(len(list(self.output.glob("*.ready.json"))), 11)
         dark = json.loads((self.output / "simulator-ride.ready.json").read_text())
         light = json.loads((self.output / "simulator-ride-light.ready.json").read_text())
         self.assertEqual(dark["appearance"], "dark")

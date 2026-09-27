@@ -6,6 +6,8 @@ struct MotoLinkApp: App {
     @UIApplicationDelegateAdaptor(MotoLinkAppDelegate.self) private var delegate
     @AppStorage("MotoLink.appearance") private var appearance = "system"
 
+    init() { MotoTheme.configureNavigationFonts() }
+
     var body: some Scene {
         WindowGroup {
             appContent
@@ -16,7 +18,7 @@ struct MotoLinkApp: App {
                 }
                 .preferredColorScheme(selectedScheme)
                 .tint(MotoTheme.accent)
-                .font(.system(.body))
+                .font(MotoTheme.font(.body))
                 .onAppear {
                     #if targetEnvironment(simulator)
                     if ProcessInfo.processInfo.arguments.contains("--review-landscape") {
@@ -80,6 +82,59 @@ enum MotoTheme {
         default: size = 18
         }
         return .custom("MotoLinkPixel-Regular", size: size, relativeTo: style)
+    }
+
+    static func numberFont(size: CGFloat) -> Font {
+        .custom("MotoLinkPixel-Regular", size: size, relativeTo: .largeTitle)
+    }
+
+    /// SwiftUI's environment font does not reach UIKit navigation/tab labels.
+    /// Keep the bundled family there too, with accessible text-size scaling.
+    static func uiFont(size: CGFloat, style: UIFont.TextStyle) -> UIFont {
+        guard let font = UIFont(name: "MotoLinkPixel-Regular", size: size) else {
+            preconditionFailure("Bundled Moto Link Pixel font is missing")
+        }
+        return UIFontMetrics(forTextStyle: style).scaledFont(for: font)
+    }
+
+    static func configureNavigationFonts() {
+        let navigation = UINavigationBarAppearance()
+        navigation.configureWithDefaultBackground()
+        navigation.titleTextAttributes = [.font: uiFont(size: 20, style: .headline)]
+        navigation.largeTitleTextAttributes = [.font: uiFont(size: 34, style: .largeTitle)]
+        for buttons in [navigation.buttonAppearance, navigation.doneButtonAppearance, navigation.backButtonAppearance] {
+            for state in [buttons.normal, buttons.highlighted, buttons.disabled, buttons.focused] {
+                state.titleTextAttributes = [.font: uiFont(size: 18, style: .body)]
+            }
+        }
+        UINavigationBar.appearance().standardAppearance = navigation
+        UINavigationBar.appearance().scrollEdgeAppearance = navigation
+        UINavigationBar.appearance().compactAppearance = navigation
+        UINavigationBar.appearance().compactScrollEdgeAppearance = navigation
+        let tabs = UITabBarAppearance()
+        tabs.configureWithDefaultBackground()
+        for item in [tabs.stackedLayoutAppearance, tabs.inlineLayoutAppearance, tabs.compactInlineLayoutAppearance] {
+            item.normal.titleTextAttributes = [.font: uiFont(size: 14, style: .caption1)]
+            item.selected.titleTextAttributes = [.font: uiFont(size: 14, style: .caption1)]
+        }
+        UITabBar.appearance().standardAppearance = tabs
+        UITabBar.appearance().scrollEdgeAppearance = tabs
+        UIBarButtonItem.appearance().setTitleTextAttributes([.font: uiFont(size: 18, style: .body)], for: .normal)
+        UIBarButtonItem.appearance().setTitleTextAttributes([.font: uiFont(size: 18, style: .body)], for: .disabled)
+    }
+}
+
+/// Form/List section headers have their own font environment.
+struct PixelSection<Content: View>: View {
+    let title: String
+    let content: Content
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title; self.content = content()
+    }
+    var body: some View {
+        Section { content.font(MotoTheme.font(.body)) } header: {
+            Text(title).font(MotoTheme.font(.caption)).textCase(nil)
+        }
     }
 }
 

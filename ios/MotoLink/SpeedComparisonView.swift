@@ -31,7 +31,7 @@ struct SpeedComparisonView: View, Equatable {
             }
             if !compact, let difference = display.difference {
                 Text(String(format: "Разница %+.0f км/ч", difference))
-                    .font(.system(.caption).monospacedDigit()).foregroundStyle(MotoTheme.secondary)
+                    .font(MotoTheme.font(.caption).monospacedDigit()).foregroundStyle(MotoTheme.secondary)
             }
         }
         .onAppear { visible = true; updateTimer() }
@@ -41,22 +41,22 @@ struct SpeedComparisonView: View, Equatable {
     @ViewBuilder private func reading(_ title: String, _ speed: Double?) -> some View {
         if compact {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(title).font(.system(.caption)).foregroundStyle(MotoTheme.secondary)
+                Text(title).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 Spacer(minLength: 0)
                 Text(speed.map { String(format: "%.0f", $0) } ?? "—")
-                    .font(.system(size: 42, weight: .bold, design: .rounded).monospacedDigit())
+                    .font(MotoTheme.numberFont(size: 42).monospacedDigit())
                     .lineLimit(1).minimumScaleFactor(0.6)
-                Text("км/ч").font(.system(.caption)).foregroundStyle(MotoTheme.secondary)
+                Text("км/ч").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
             }
             .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
             .padding(.horizontal, 12).padding(.vertical, 7).pixelPanel(accent: true)
         } else {
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(.caption)).foregroundStyle(MotoTheme.secondary)
+                Text(title).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 Text(speed.map { String(format: "%.0f", $0) } ?? "—")
-                    .font(.system(size: 60, weight: .bold, design: .rounded).monospacedDigit())
+                    .font(MotoTheme.numberFont(size: 60).monospacedDigit())
                     .lineLimit(1).minimumScaleFactor(0.6)
-                Text("км/ч").font(.system(.caption)).foregroundStyle(MotoTheme.secondary)
+                Text("км/ч").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading).padding(12).pixelPanel(accent: true)
         }
     }
@@ -97,30 +97,37 @@ struct ConnectionTestSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Условия следующей поездки").font(MotoTheme.font(.headline))
-            Picker("Sena 50S", selection: $sena) {
-                Text("Не указано").tag("unknown"); Text("Выключена").tag("off")
-                Text("Подключена, без звука").tag("idle"); Text("Музыка").tag("music")
-                Text("Интерком Bluetooth").tag("intercom"); Text("Mesh").tag("mesh")
-            }
-            Picker("Apple Watch", selection: $watch) {
-                Text("Не указано").tag("unknown"); Text("На руке, включены").tag("on"); Text("Выключены").tag("off")
-            }
-            Picker("Телефон", selection: $position) {
-                Text("Не указано").tag("unknown"); Text("На креплении").tag("mount")
-                Text("В кармане").tag("pocket"); Text("В сумке").tag("bag")
-            }
-            Picker("Модель с наклейки Sena", selection: $variant) {
-                Text("Не указана").tag("")
-                Text("50S · SP113").tag("SP113")
-                Text("50S · SP75").tag("SP75")
-            }
+            PixelChoiceField(title: "Sena 50S", selection: $sena, options: [
+                .init(value: "unknown", label: "Не указано"),
+                .init(value: "off", label: "Выключена"),
+                .init(value: "idle", label: "Подключена, без звука"),
+                .init(value: "music", label: "Музыка"),
+                .init(value: "intercom", label: "Интерком Bluetooth"),
+                .init(value: "mesh", label: "Mesh")
+            ])
+            PixelChoiceField(title: "Apple Watch", selection: $watch, options: [
+                .init(value: "unknown", label: "Не указано"),
+                .init(value: "on", label: "На руке, включены"),
+                .init(value: "off", label: "Выключены")
+            ])
+            PixelChoiceField(title: "Телефон", selection: $position, options: [
+                .init(value: "unknown", label: "Не указано"),
+                .init(value: "mount", label: "На креплении"),
+                .init(value: "pocket", label: "В кармане"),
+                .init(value: "bag", label: "В сумке")
+            ])
+            PixelChoiceField(title: "Модель с наклейки Sena", selection: $variant, options: [
+                .init(value: "", label: "Не указана"),
+                .init(value: "SP113", label: "50S · SP113"),
+                .init(value: "SP75", label: "50S · SP75")
+            ])
             if variant == "SP113" {
-                Text("SP113 — аппаратный вариант 50S с веткой прошивки 2.x. Наклейка не показывает установленную версию; её можно посмотреть в приложении Sena.").font(.caption).foregroundStyle(MotoTheme.secondary)
+                Text("SP113 — аппаратный вариант 50S с веткой прошивки 2.x. Наклейка не показывает установленную версию; её можно посмотреть в приложении Sena.").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
             }
-            TextField("Версия Sena, если известна", text: $firmware).textFieldStyle(.roundedBorder)
+            TextField("Версия Sena, если известна", text: $firmware).font(MotoTheme.font(.body)).textFieldStyle(.roundedBorder)
             Text("Это твои отметки, а не обнаруженные устройства. Условия сбросятся после начала записи; вариант и версия сохранятся. Системная диагностика Apple в этот журнал не входит.")
-                .font(.caption).foregroundStyle(MotoTheme.secondary)
-        }.font(.system(.subheadline))
+                .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+        }.font(MotoTheme.font(.subheadline))
     }
     static func capture() -> String {
         let d = UserDefaults.standard

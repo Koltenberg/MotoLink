@@ -7,14 +7,21 @@ struct CompanionVisualCheckView: View {
     @StateObject private var store = CompanionStore()
     @ObservedObject var rides: RideRecorder
     @State private var prepared = false
+    @State private var showServiceEditor = false
 
     var body: some View {
         NavigationStack {
             CompanionView(store: store, rides: rides)
         }
+        .sheet(isPresented: $showServiceEditor) {
+            ServiceEditor(store: store, task: store.data.serviceTasks.last)
+        }
         .onAppear {
             guard !prepared else { return }
             prepared = true
+            if ProcessInfo.processInfo.arguments.contains("--review-service-editor") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { showServiceEditor = true }
+            }
             // Even a manually invoked simulator check must preserve existing
             // records. Normal app launch never enters this view.
             guard store.data.bikeName == "Мой мотоцикл", store.data.odometerKm == nil,
