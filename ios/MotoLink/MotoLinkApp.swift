@@ -15,10 +15,7 @@ struct MotoLinkApp: App {
                 .onAppear {
                     #if targetEnvironment(simulator)
                     if ProcessInfo.processInfo.arguments.contains("--review-landscape") {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                            guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
-                            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight))
-                        }
+                        ProductVisualData.prepareLandscapeReview()
                     }
                     #endif
                 }

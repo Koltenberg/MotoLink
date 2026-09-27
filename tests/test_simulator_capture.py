@@ -6,6 +6,7 @@ import plistlib
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -44,6 +45,11 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.runner_env = {}
         self.seed_devices = {}
         self.clone_result = None
+        self.container = self.root / "app-data"
+        (self.container / "Documents").mkdir(parents=True)
+        self.orientation_file = self.container / "Documents" / CAPTURE.ORIENTATION_EVIDENCE
+        self.write_orientation = True
+        self.orientation_override = {}
 
     def fake_run(self, *args, **kwargs):
         self.calls.append(args)
@@ -54,6 +60,8 @@ class SimulatorCaptureTests(unittest.TestCase):
             return json.dumps({"devicetypes": [{"name": "iPhone 16", "identifier": "iphone16"}]})
         if args[:2] == ("list", "devices"):
             return json.dumps({"devices": self.seed_devices})
+        if args[0] == "get_app_container":
+            return str(self.container)
         if args[0] in ("create", "clone"):
             device = (self.clone_result if args[0] == "clone" and self.clone_result else
                       f"00000000-0000-0000-0000-{len(self.devices) + 1:012d}")
@@ -66,6 +74,13 @@ class SimulatorCaptureTests(unittest.TestCase):
                                 "companion" if "--companion-visual-check" in args else "home")
             self.theme = "light" if "--review-light" in args else "default"
             self.landscape = "--review-landscape" in args
+            if self.landscape and self.write_orientation:
+                self.orientation_file.write_text(json.dumps({
+                    "interfaceLandscape": True, "interfaceOrientation": 3,
+                    "windowWidth": 844, "windowHeight": 390,
+                    "sceneWidth": 844, "sceneHeight": 390,
+                    "error": None, "capturedAt": time.time(), **self.orientation_override,
+                }), encoding="utf-8")
             return self.launch_result
         if args[0] == "terminate":
             self.active_mode = None
@@ -173,6 +188,9 @@ class SimulatorCaptureTests(unittest.TestCase):
                 process_running = False
 
     def test_unapplied_landscape_rotation_rejects_entire_set_not_portrait_as_landscape(self):
+        self.orientation_override = {"interfaceLandscape": False, "interfaceOrientation": 1,
+                                     "windowWidth": 390, "windowHeight": 844,
+                                     "sceneWidth": 390, "sceneHeight": 844}
         def fail(args):
             if args[0] == "io" and Path(args[-1]).name == "simulator-ride-landscape.png":
                 self.landscape = False
@@ -184,6 +202,13 @@ class SimulatorCaptureTests(unittest.TestCase):
             self.execute()
         self.assertEqual(len(self.devices), 2)
         self.assertEqual(list(self.output.glob("*.png")), [])
+        for attempt in (1, 2):
+            debug = self.output / f"debug-attempt{attempt}"
+            self.assertEqual(len(list(debug.glob("*.png"))), 8)
+            manifest = json.loads((debug / "failure.json").read_text())
+            self.assertEqual(manifest["status"], "failed")
+            self.assertIn("Landscape rotation was not applied", manifest["error"])
+            self.assertFalse(json.loads((debug / CAPTURE.ORIENTATION_EVIDENCE).read_text())["interfaceLandscape"])
         for device in self.devices:
             self.assertIn(("delete", device), self.calls)
 
@@ -195,9 +220,56 @@ class SimulatorCaptureTests(unittest.TestCase):
         with self.assertRaisesRegex(CAPTURE.CaptureError, "ride landscape launch failed"):
             self.execute()
         self.assertEqual(list(self.output.glob("*.png")), [])
+        for attempt in (1, 2):
+            debug = self.output / f"debug-attempt{attempt}"
+            self.assertEqual(len(list(debug.glob("*.png"))), 7)
+            self.assertEqual(json.loads((debug / "failure.json").read_text())["status"], "failed")
         self.assertFalse(any(args[0] == "io" and
                              Path(args[-1]).name == "simulator-ride-landscape.png"
                              for args in self.calls))
+
+    def test_headless_portrait_pixels_pass_only_with_fresh_landscape_scene_evidence(self):
+        def keep_physical_display_portrait(args):
+            if args[0] == "io" and Path(args[-1]).name == "simulator-ride-landscape.png":
+                self.landscape = False
+        self.failure = keep_physical_display_portrait
+        self.execute()
+        self.assertEqual(CAPTURE.validate_png(self.output / "simulator-ride-landscape.png"), (1170, 2532))
+        evidence = json.loads((self.output / CAPTURE.ORIENTATION_EVIDENCE).read_text())
+        self.assertTrue(evidence["interfaceLandscape"])
+        self.assertGreater(evidence["windowWidth"], evidence["windowHeight"])
+
+    def test_previous_geometry_is_deleted_and_missing_new_evidence_fails(self):
+        self.orientation_file.write_text('{"interfaceLandscape":true}', encoding="utf-8")
+        self.write_orientation = False
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "Missing landscape geometry evidence"):
+            self.execute()
+        self.assertFalse(self.orientation_file.exists())
+        self.assertEqual(list(self.output.glob("*.png")), [])
+        self.assertFalse((self.output / CAPTURE.ORIENTATION_EVIDENCE).exists())
+
+    def test_corrupt_new_geometry_is_retained_for_diagnosis_and_fails(self):
+        def corrupt_evidence(args):
+            if args[0] == "io" and Path(args[-1]).name == "simulator-ride-landscape.png":
+                self.orientation_file.write_text("{broken", encoding="utf-8")
+        self.failure = corrupt_evidence
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "invalid landscape geometry evidence"):
+            self.execute()
+        self.assertEqual(list(self.output.glob("*.png")), [])
+        self.assertEqual((self.output / "debug-attempt1" / CAPTURE.ORIENTATION_EVIDENCE).read_text(), "{broken")
+
+    def test_stale_geometry_or_rejected_request_cannot_validate_landscape(self):
+        for override, message in [
+            ({"capturedAt": time.time() - 3600}, "does not belong to this launch"),
+            ({"error": "request denied"}, "Landscape rotation was not applied"),
+            ({"sceneWidth": float("nan")}, "Landscape rotation was not applied"),
+            ({"windowWidth": 0}, "Landscape rotation was not applied"),
+        ]:
+            with self.subTest(override=override):
+                self.orientation_override = override
+                with self.assertRaisesRegex(CAPTURE.CaptureError, message):
+                    self.execute()
+                self.assertEqual(list(self.output.glob("*.png")), [])
 
     def test_companion_failure_retries_all_captures_without_publishing_partial_home(self):
         def fail(args):
@@ -271,6 +343,9 @@ class SimulatorCaptureTests(unittest.TestCase):
         for image in self.output.glob("*.png"):
             self.assertIn(self.devices[1].encode(), image.read_bytes())
             self.assertNotIn(self.devices[0].encode(), image.read_bytes())
+        self.assertIn(self.devices[0].encode(),
+                      (self.output / "debug-attempt1" / "simulator-home.png").read_bytes())
+        self.assertEqual(json.loads((self.output / "debug-attempt1" / "failure.json").read_text())["status"], "failed")
 
     def test_successful_command_without_launch_pid_is_not_success(self):
         self.launch_result = ""

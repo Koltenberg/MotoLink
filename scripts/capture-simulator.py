@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Capture real app UI on disposable CI simulators, with bounded recovery."""
 import json
+import math
 import os
 import plistlib
 import re
@@ -17,6 +18,7 @@ SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
                     "simulator-companion.png", "simulator-companion-large-text.png",
                     "simulator-garage-light.png", "simulator-ride.png",
                     "simulator-ride-light.png", "simulator-ride-landscape.png")
+ORIENTATION_EVIDENCE = "MotoLinkVisualOrientation.json"
 
 
 class CaptureError(RuntimeError):
@@ -190,6 +192,63 @@ def validate_png(path):
     return width, height
 
 
+def preserve_failed_attempt(temporary, output, attempt, error):
+    """Keep raw evidence separate from the complete, validated capture set."""
+    debug = output / f"debug-attempt{attempt}"
+    debug.mkdir(parents=True, exist_ok=True)
+    screenshots = []
+    for name in SCREENSHOT_NAMES:
+        source = temporary / name
+        if not source.is_file():
+            continue
+        shutil.copyfile(source, debug / name)
+        record = {"name": name}
+        try:
+            record["width"], record["height"] = validate_png(source)
+            record["valid_png"] = True
+        except (CaptureError, OSError) as validation_error:
+            record.update(valid_png=False, error=str(validation_error))
+        screenshots.append(record)
+    evidence = temporary / ORIENTATION_EVIDENCE
+    if evidence.is_file():
+        shutil.copyfile(evidence, debug / ORIENTATION_EVIDENCE)
+    (debug / "failure.json").write_text(json.dumps({
+        "status": "failed", "attempt": attempt, "error": str(error),
+        "note": "Diagnostic captures only; this is not a passed visual validation set.",
+        "screenshots": screenshots,
+    }, indent=2) + "\n", encoding="utf-8")
+    print(f"Saved {len(screenshots)} diagnostic screenshots in {debug}", flush=True)
+
+
+def validate_landscape_evidence(path, launched_at):
+    """Validate UIKit geometry, not the headless simulator's display pixels."""
+    try:
+        if path.stat().st_size > 65536:
+            raise CaptureError("Landscape geometry evidence is unexpectedly large")
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise CaptureError(f"Missing or invalid landscape geometry evidence: {error}") from error
+    if not isinstance(evidence, dict):
+        raise CaptureError("Landscape geometry evidence must be an object")
+
+    def finite_number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+    dimensions = [evidence.get(key) for key in ("windowWidth", "windowHeight", "sceneWidth", "sceneHeight")]
+    if (evidence.get("interfaceLandscape") is not True
+            or evidence.get("interfaceOrientation") not in (3, 4)
+            or evidence.get("error", "missing") is not None
+            or not all(finite_number(value) for value in dimensions)
+            or not dimensions[0] > dimensions[1] > 0
+            or not dimensions[2] > dimensions[3] > 0):
+        raise CaptureError(f"Landscape rotation was not applied: UIKit geometry {evidence}")
+    captured_at = evidence.get("capturedAt")
+    if not finite_number(captured_at) or captured_at < launched_at or captured_at > time.time() + 5:
+        raise CaptureError("Landscape geometry evidence does not belong to this launch")
+    print(f"Landscape UIKit geometry verified: window {dimensions[0]}x{dimensions[1]}, "
+          f"scene {dimensions[2]}x{dimensions[3]}", flush=True)
+
+
 def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadline, seed=None):
     device = None
     try:
@@ -253,6 +312,15 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
         for name, flags, landscape in variants:
             run("terminate", device, bundle_id, timeout=30, deadline=deadline)
             run("ui", device, "content_size", "large", timeout=30, deadline=deadline)
+            if landscape:
+                container = Path(run("get_app_container", device, bundle_id, "data", timeout=30, deadline=deadline))
+                if not container.is_absolute() or not container.is_dir():
+                    raise CaptureError("simctl did not return an existing absolute app data container")
+                orientation_source = container / "Documents" / ORIENTATION_EVIDENCE
+                # The prior process is terminated. Delete only our fixture file,
+                # so stale geometry cannot validate the next app launch.
+                orientation_source.unlink(missing_ok=True)
+            launched_at = time.time()
             launched = run("launch", device, bundle_id, *flags, timeout=45, deadline=deadline)
             if not re.search(r":\s*[1-9][0-9]*\s*$", launched):
                 raise CaptureError(f"{name} launch did not return a process ID: {launched}")
@@ -261,8 +329,17 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
             image = output / name
             run("io", device, "screenshot", image, timeout=30, deadline=deadline)
             width, height = validate_png(image)
-            if landscape and width <= height:
-                raise CaptureError(f"Landscape rotation was not applied: {name} is {width}x{height}")
+            if landscape:
+                evidence = output / ORIENTATION_EVIDENCE
+                try:
+                    shutil.copyfile(orientation_source, evidence)
+                except OSError as error:
+                    raise CaptureError(f"Missing landscape geometry evidence: {error}") from error
+                validate_landscape_evidence(evidence, launched_at)
+                # Headless simctl can capture its physical portrait display
+                # with a landscape UIKit scene rendered sideways. Preserve the
+                # raw screenshot; actual scene/window geometry is checked above.
+                print(f"Raw landscape screenshot retained at {width}x{height}", flush=True)
             if not landscape and width >= height:
                 raise CaptureError(f"Portrait state was not restored: {name} is {width}x{height}")
             images.append(image)
@@ -280,6 +357,13 @@ def capture(app, output):
     output.mkdir(parents=True, exist_ok=True)
     for name in SCREENSHOT_NAMES:
         (output / name).unlink(missing_ok=True)
+    (output / ORIENTATION_EVIDENCE).unlink(missing_ok=True)
+    # Clear only files owned by this capture script, never a directory tree.
+    # A rerun must not mistake an old failed attempt for the current evidence.
+    for attempt in range(1, 3):
+        debug = output / f"debug-attempt{attempt}"
+        for name in (*SCREENSHOT_NAMES, ORIENTATION_EVIDENCE, "failure.json"):
+            (debug / name).unlink(missing_ok=True)
     deadline = time.monotonic() + 900
     runtimes = json.loads(run("list", "runtimes", "-j", deadline=deadline))["runtimes"]
     types = json.loads(run("list", "devicetypes", "-j", deadline=deadline))["devicetypes"]
@@ -293,7 +377,8 @@ def capture(app, output):
     failures = []
     for attempt in range(1, 3):
         print(f"Simulator capture attempt {attempt}/2", flush=True)
-        # Publish neither partial captures nor images left by a failed attempt.
+        # Only complete captures reach the top level; failures retain raw
+        # evidence in explicitly failed diagnostic directories.
         with tempfile.TemporaryDirectory(prefix="motolink-visual-") as temporary:
             try:
                 images = capture_attempt(app, Path(temporary), device_type["identifier"], runtime,
@@ -301,11 +386,16 @@ def capture(app, output):
             except (CaptureError, subprocess.TimeoutExpired, OSError) as error:
                 failures.append(f"attempt {attempt}: {error}")
                 print(f"Capture failed: {failures[-1]}", flush=True)
+                try:
+                    preserve_failed_attempt(Path(temporary), output, attempt, error)
+                except OSError as diagnostic_error:
+                    print(f"Could not preserve diagnostic screenshots: {diagnostic_error}", flush=True)
                 if time.monotonic() >= deadline:
                     break
                 continue
             for image in images:
                 shutil.copyfile(image, output / image.name)
+            shutil.copyfile(Path(temporary) / ORIENTATION_EVIDENCE, output / ORIENTATION_EVIDENCE)
             print(f"Simulator capture passed on attempt {attempt}: home, companion and ride states launched; all eight PNGs validated", flush=True)
             return
     raise CaptureError("Simulator visual validation failed: " + "; ".join(failures))
