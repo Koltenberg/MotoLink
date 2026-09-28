@@ -219,7 +219,7 @@ struct ContentView: View {
                 PixelInfoButton(title: "Почему ожидаем подключение", detail: reason)
             }
             TimelineView(.periodic(from: .now, by: 1)) { context in
-                if bluetooth.canRequestUserRescan(at: context.date) && !previewRide {
+                if rides.active == nil && bluetooth.canRequestUserRescan(at: context.date) && !previewRide {
                     Button("Повторить поиск") { bluetooth.requestUserRescan() }.font(MotoTheme.font(.caption))
                 }
             }
@@ -249,11 +249,13 @@ struct ContentView: View {
                 Text(reason).font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
             }
             if rides.active != nil && !bluetooth.connected {
-                Label("Ждём связь · запись продолжается", systemImage: "arrow.triangle.2.circlepath")
+                Label("Связь прервана · запись продолжается", systemImage: "arrow.triangle.2.circlepath")
                     .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
+                Text("В движении байк может не предлагать новое подключение. После остановки и нового запуска двигателя связь может вернуться.")
+                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
             }
             TimelineView(.periodic(from: .now, by: 1)) { context in
-                if bluetooth.canRequestUserRescan(at: context.date) {
+                if rides.active == nil && bluetooth.canRequestUserRescan(at: context.date) {
                     Button("Повторить поиск рядом") { bluetooth.requestUserRescan() }
                         .font(MotoTheme.font(.subheadline))
                 }

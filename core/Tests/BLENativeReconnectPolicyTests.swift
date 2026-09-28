@@ -13,6 +13,32 @@ final class BLENativeReconnectPolicyTests: XCTestCase {
         return policy
     }
 
+    func testTurningOffFutureAutoConnectKeepsRestoredLiveLink() {
+        XCTAssertTrue(BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
+            isSaved: true, paused: false, autoReconnect: false, isConnected: true))
+        XCTAssertFalse(BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
+            isSaved: true, paused: true, autoReconnect: true, isConnected: true))
+        XCTAssertFalse(BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
+            isSaved: false, paused: false, autoReconnect: true, isConnected: true))
+        XCTAssertFalse(BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
+            isSaved: true, paused: false, autoReconnect: false, isConnected: false))
+    }
+
+    func testFutureAutoConnectPreferenceDoesNotCancelIOSNativeReconnectOfExistingLink() {
+        let preserve = BLENativeReconnectPolicy.shouldPreserveNativeConnection(
+            wanted: true, powered: true, paused: false,
+            pairingFailure: false, transportRestartPending: false)
+        XCTAssertTrue(preserve)
+        var policy = connectedPolicy()
+        XCTAssertEqual(policy.disconnected(bike, timestamp: 121,
+            reconnecting: true, peripheralIsConnected: false, mayResume: preserve), .waitForSystem)
+        XCTAssertEqual(policy.disconnected(bike, timestamp: 122,
+            reconnecting: true, peripheralIsConnected: true, mayResume: preserve), .prepareConnected)
+        XCTAssertFalse(BLENativeReconnectPolicy.shouldPreserveNativeConnection(
+            wanted: true, powered: true, paused: true,
+            pairingFailure: false, transportRestartPending: false))
+    }
+
     func testSystemPendingHasNoApplicationDeadlineAndNewConnectPrepares() {
         var policy = connectedPolicy()
         XCTAssertEqual(policy.disconnected(bike, timestamp: 120,

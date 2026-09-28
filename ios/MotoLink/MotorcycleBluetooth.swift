@@ -1064,7 +1064,10 @@ extension MotorcycleBluetooth {
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
         guard let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] else { return }
         for peripheral in peripherals {
-            guard autoReconnect, !connectionPaused, peripheral.identifier == savedID else {
+            guard BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
+                isSaved: peripheral.identifier == savedID,
+                paused: connectionPaused, autoReconnect: autoReconnect,
+                isConnected: peripheral.state == .connected) else {
                 central.cancelPeripheralConnection(peripheral)
                 continue
             }
@@ -1080,7 +1083,7 @@ extension MotorcycleBluetooth {
             connectionRequestedAt = peripheral.state == .connecting ? Date() : nil
             connectionWaitOrigin = peripheral.state == .connecting ? "restored_observation" : "none"
             record("restore_wait", "peripheralState=\(peripheral.state.rawValue); waitOrigin=\(connectionWaitOrigin); originalRequestAge=unknown")
-            record("restore", "iOS восстановила соединение; профиль телеметрии возобновится только при включённом автоподключении")
+            record("restore", "iOS восстановила действующее соединение; профиль телеметрии возобновится на существующей связи")
             // didUpdateState starts discovery once CoreBluetooth is powered on.
         }
     }
@@ -1160,8 +1163,10 @@ extension MotorcycleBluetooth {
         let pairingFailure = cause?.domain == CBErrorDomain &&
             [CBError.Code.peerRemovedPairingInformation.rawValue,
              CBError.Code.tooManyLEPairedDevices.rawValue].contains(cause?.code ?? -1)
-        let mayResume = connectionWanted && autoReconnect && bluetoothPowered
-            && !connectionPaused && !pairingFailure && !reconnectPolicy.transportRestartPending
+        let mayResume = BLENativeReconnectPolicy.shouldPreserveNativeConnection(
+            wanted: connectionWanted, powered: bluetoothPowered,
+            paused: connectionPaused, pairingFailure: pairingFailure,
+            transportRestartPending: reconnectPolicy.transportRestartPending)
         let action = nativeReconnect.disconnected(peripheral.identifier,
             timestamp: timestamp, reconnecting: isReconnecting,
             peripheralIsConnected: peripheral.state == .connected, mayResume: mayResume)
