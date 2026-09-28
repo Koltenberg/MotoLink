@@ -3,7 +3,7 @@ import Combine
 import UIKit
 
 struct ContentView: View {
-    private enum ConnectionPrompt: Equatable { case rescan, disconnect }
+    private enum ConnectionPrompt: Equatable { case rescan, disconnect, stopWaiting }
 
     @ObservedObject var bluetooth: MotorcycleBluetooth
     @ObservedObject var rides: RideRecorder
@@ -74,6 +74,8 @@ struct ContentView: View {
         }
         .confirmationDialog(connectionPrompt == .rescan
                             ? "Мотоцикл остановлен и зажигание включено заново?"
+                            : connectionPrompt == .stopWaiting
+                            ? "Остановить ожидание на стоянке?"
                             : "Отключить мотоцикл на стоянке?",
                             isPresented: Binding(get: { connectionPrompt != nil },
                                                  set: { if !$0 { connectionPrompt = nil } }),
@@ -82,8 +84,10 @@ struct ContentView: View {
                 Button("Да, повторить поиск") { bluetooth.requestUserRescan() }
             } else if connectionPrompt == .disconnect {
                 Button("Отключить байк", role: .destructive) { bluetooth.pauseConnection() }
+            } else if connectionPrompt == .stopWaiting {
+                Button("Остановить ожидание", role: .destructive) { bluetooth.pauseConnection() }
             }
-            Button("Оставить связь", role: .cancel) {}
+            Button("Назад", role: .cancel) {}
         } message: {
             Text(connectionPrompt == .rescan
                  ? "В движении байк может не предлагать подключение. Новый поиск отменит текущее ожидание iOS."
@@ -247,7 +251,7 @@ struct ContentView: View {
                 Button("Отключить") { connectionPrompt = .disconnect }.font(MotoTheme.font(.caption))
             }
             if bluetooth.connecting && !bluetooth.connected && rides.active == nil && !previewRide {
-                Button("Отменить") { bluetooth.pauseConnection() }.font(MotoTheme.font(.subheadline))
+                Button("Остановить ожидание") { connectionPrompt = .stopWaiting }.font(MotoTheme.font(.subheadline))
             }
         }.padding(.horizontal, 8).padding(.vertical, 4)
     }
@@ -263,7 +267,7 @@ struct ContentView: View {
                 Spacer()
                 if bluetooth.connecting { ProgressView().controlSize(.small) }
                 if bluetooth.connecting && !bluetooth.connected && rides.active == nil {
-                    Button("Отменить") { bluetooth.pauseConnection() }.font(MotoTheme.font(.subheadline))
+                    Button("Остановить ожидание") { connectionPrompt = .stopWaiting }.font(MotoTheme.font(.subheadline))
                 } else if bluetooth.connected && rides.active == nil && !previewRide {
                     Button("Отключить") { connectionPrompt = .disconnect }.font(MotoTheme.font(.subheadline))
                 }
