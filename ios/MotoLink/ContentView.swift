@@ -539,7 +539,9 @@ struct ContentView: View {
                             .font(MotoTheme.font(.subheadline))
                         Spacer()
                         Button(rides.finishRequested ? "Сохранить ещё раз" : "Завершить") {
-                            if !bluetooth.autoReconnect { bluetooth.pauseConnection() }
+                            // Saving a ride must not tear down a healthy BLE link.
+                            // Discovery may be unavailable once the bike is moving;
+                            // disconnecting remains an explicit user action.
                             rides.stop { _ in justSaved = true }
                         }.buttonStyle(PixelButtonStyle())
                     }
