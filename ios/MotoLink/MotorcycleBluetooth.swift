@@ -297,6 +297,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         resetRecovery()
         userRescanAfterCancellation = current
         userRescanMayStartScan = true
+        connectionPaused = true
+        shouldResumeAtPowerOn = false
+        UserDefaults.standard.set(true, forKey: Key.paused)
         cancelResume.requestedCancellation(for: current.identifier)
         connectionWanted = false
         terminalStatus = "Ожидание остановлено. Повторите поиск, когда будете готовы."
@@ -349,6 +352,10 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         if enabled, bluetoothPowered {
             connectRemembered()
         } else if !enabled, connecting || nativeReconnect.systemOwnsPendingConnection, let current {
+            // A user cancellation must survive iOS state restoration. Turning
+            // off future auto-connect while a link is live does not enter here.
+            connectionPaused = true
+            UserDefaults.standard.set(true, forKey: Key.paused)
             connectionWanted = false
             terminalStatus = "Ожидание подключения остановлено"
             if current.state == .disconnected && !nativeReconnect.systemOwnsPendingConnection
@@ -1067,7 +1074,8 @@ extension MotorcycleBluetooth {
             guard BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
                 isSaved: peripheral.identifier == savedID,
                 paused: connectionPaused, autoReconnect: autoReconnect,
-                isConnected: peripheral.state == .connected) else {
+                isConnected: peripheral.state == .connected,
+                isConnecting: peripheral.state == .connecting) else {
                 central.cancelPeripheralConnection(peripheral)
                 continue
             }

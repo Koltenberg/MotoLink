@@ -11,8 +11,9 @@ struct BLENativeReconnectPolicy {
     /// already established. Losing that link while the bike is moving may be
     /// irreversible until the ignition is restarted.
     static func shouldAdoptRestoredPeripheral(isSaved: Bool, paused: Bool,
-                                              autoReconnect: Bool, isConnected: Bool) -> Bool {
-        isSaved && !paused && (autoReconnect || isConnected)
+                                              autoReconnect: Bool, isConnected: Bool,
+                                              isConnecting: Bool) -> Bool {
+        isSaved && !paused && (autoReconnect || isConnected || isConnecting)
     }
 
     static func shouldPreserveNativeConnection(wanted: Bool, powered: Bool,

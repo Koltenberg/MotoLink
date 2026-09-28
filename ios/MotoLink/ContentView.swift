@@ -17,6 +17,7 @@ struct ContentView: View {
     @State private var showHelp = false
     @State private var showDiagnostics = false
     @State private var showDiscovery = false
+    @State private var showRescanConfirmation = false
     @State private var showConnectionCheck = false
     @State private var connectionCheckOwnsScan = false
     @State private var justSaved = false
@@ -68,6 +69,13 @@ struct ContentView: View {
         .fullScreenCover(item: $focusedMetric) { metric in
             FocusedRideMetricView(bluetooth: bluetooth, rides: rides, metric: metric,
                                   preview: previewRide) { focusedMetric = nil }
+        }
+        .confirmationDialog("Мотоцикл остановлен и зажигание включено заново?",
+                            isPresented: $showRescanConfirmation, titleVisibility: .visible) {
+            Button("Да, повторить поиск") { bluetooth.requestUserRescan() }
+            Button("Оставить ожидание iOS", role: .cancel) {}
+        } message: {
+            Text("В движении байк может не предлагать подключение. Новый поиск отменит текущее ожидание iOS.")
         }
         .onAppear {
             if rides.active != nil || bluetooth.connected { selectedTab = 1 }
@@ -209,7 +217,7 @@ struct ContentView: View {
     private var compactConnectionStatus: some View {
         HStack(spacing: 8) {
             Image(systemName: bluetooth.ready || previewRide ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
-            Text(previewRide ? "Связь с байком · пример" : bluetooth.ready ? "Связь с байком" : bluetooth.connected ? "Готовим соединение" : "Ждём связь")
+            Text(previewRide ? "Связь с байком · пример" : bluetooth.ready ? "Связь с байком" : bluetooth.connected ? "Связь есть · ждём данные" : "Ждём связь")
                 .font(MotoTheme.font(.subheadline))
             if rides.active != nil && !bluetooth.connected && !previewRide {
                 Text("Запись продолжается").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
@@ -220,10 +228,10 @@ struct ContentView: View {
             }
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 if rides.active == nil && bluetooth.canRequestUserRescan(at: context.date) && !previewRide {
-                    Button("Повторить поиск") { bluetooth.requestUserRescan() }.font(MotoTheme.font(.caption))
+                    Button("Поиск на стоянке") { showRescanConfirmation = true }.font(MotoTheme.font(.caption))
                 }
             }
-            if occupied && rides.active == nil && !previewRide {
+            if bluetooth.connecting && !bluetooth.connected && rides.active == nil && !previewRide {
                 Button("Отменить") { bluetooth.pauseConnection() }.font(MotoTheme.font(.subheadline))
             }
         }.padding(.horizontal, 8).padding(.vertical, 4)
@@ -234,12 +242,12 @@ struct ContentView: View {
             HStack {
                 Image(systemName: bluetooth.connected ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
                     .foregroundStyle(bluetooth.connected ? Color.primary : MotoTheme.secondary)
-                Text(previewRide ? "Связь с байком · пример" : bluetooth.ready ? "Связь с байком" : bluetooth.connected ? "Готовим соединение" :
+                Text(previewRide ? "Связь с байком · пример" : bluetooth.ready ? "Связь с байком" : bluetooth.connected ? "Связь есть · ждём данные" :
                     bluetooth.connecting ? "Ожидаем подключения" : "Байк не подключён")
                     .font(MotoTheme.font(.subheadline))
                 Spacer()
                 if bluetooth.connecting { ProgressView().controlSize(.small) }
-                if occupied && rides.active == nil {
+                if bluetooth.connecting && !bluetooth.connected && rides.active == nil {
                     Button("Отменить") { bluetooth.pauseConnection() }.font(MotoTheme.font(.subheadline))
                 }
             }
@@ -247,6 +255,9 @@ struct ContentView: View {
                 Text(bluetooth.status).font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
             } else if let reason = bluetooth.reconnectBlockedReason {
                 Text(reason).font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
+            }
+            if bluetooth.connected && !bluetooth.ready && !previewRide {
+                Text(bluetooth.status).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
             }
             if rides.active != nil && !bluetooth.connected {
                 Label("Связь прервана · запись продолжается", systemImage: "arrow.triangle.2.circlepath")
@@ -256,7 +267,7 @@ struct ContentView: View {
             }
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 if rides.active == nil && bluetooth.canRequestUserRescan(at: context.date) {
-                    Button("Повторить поиск рядом") { bluetooth.requestUserRescan() }
+                    Button("Поиск на стоянке") { showRescanConfirmation = true }
                         .font(MotoTheme.font(.subheadline))
                 }
             }
