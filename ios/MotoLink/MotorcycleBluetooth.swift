@@ -71,6 +71,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     var onConfirmedTransportBoundary: ((UUID) -> Void)?
     private var captureProfileSession: UUID?
     private var captureProfileRequested = false
+    private var resumeCaptureAfterGATTRecovery = false
     private var scanGeneration = UUID()
 
     private var diagnosticPhase = 0
@@ -100,6 +101,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private var notifications: [String: CBCharacteristic] = [:]
     private var subscribed: Set<String> = []
     private var pendingNotification: String?
+    private var gattRecovery = BLEGATTRecoveryPolicy()
+    private var discoveredGATTService: CBService?
+    private var invalidatedGATTServices: Set<ObjectIdentifier> = []
     private var session = UUID()
     private var scanTimeout: DispatchWorkItem?
     private var setupTimeout: DispatchWorkItem?
@@ -567,7 +571,8 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     private func checkStreamRecovery() {
-        let eligible = autoReconnect && connectionWanted && ready && !busy && !diagnosticRunning
+        let eligible = connectionWanted && ready && !busy && !diagnosticRunning
+            && captureProfileSession == session
             && UserDefaults.standard.bool(forKey: "MotoLink.resumeTelemetry")
             && current.map(isCurrent) == true
         guard let action = streamRecovery.nextAction(at: ProcessInfo.processInfo.systemUptime,
@@ -722,22 +727,42 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
     #endif
 
-    private func prepare(_ peripheral: CBPeripheral) {
+    private func prepare(_ peripheral: CBPeripheral, inPlaceRecovery: Bool = false,
+                         invalidatedServices: [CBService] = []) {
+        let preserveCaptureProfile = inPlaceRecovery && captureProfileSession == session && !diagnosticRunning
+        let resumeInterruptedProfile = inPlaceRecovery && (diagnosticRunning || captureProfileRequested)
+        let previousStreamRecovery = inPlaceRecovery ? streamRecovery : nil
+        let previousCapabilities = inPlaceRecovery ? capabilities : []
         nativeDisconnectLogged = false
         onTransportIdentity?(peripheral.identifier)
         selectTelemetryCatalogue(for: peripheral.identifier)
-        clearTransport()
+        clearTransport(resetGATTRecovery: !inPlaceRecovery)
+        if !inPlaceRecovery { gattRecovery.beginConnection() }
+        if preserveCaptureProfile { captureProfileSession = session }
+        resumeCaptureAfterGATTRecovery = resumeInterruptedProfile
+        if let previousStreamRecovery { streamRecovery = previousStreamRecovery }
+        if inPlaceRecovery { capabilities = previousCapabilities }
+        invalidatedGATTServices = Set(invalidatedServices.map { ObjectIdentifier($0) })
         connected = true
         connecting = false
         connectionRequestedAt = nil
         status = "Bluetooth подключён. Проверка каналов…"
         peripheral.delegate = self
-        record("setup", "Поиск сервиса Kawasaki; attempt=\(reconnectAttempt)")
+        record(inPlaceRecovery ? "gatt_rediscovery" : "setup",
+               "Поиск сервиса Kawasaki на существующем BLE-канале; attempt=\(reconnectAttempt)")
+        scheduleGATTSetupTimeout(peripheral)
         peripheral.discoverServices([CBUUID(string: MotoProtocol.service)])
+    }
+
+    private func scheduleGATTSetupTimeout(_ peripheral: CBPeripheral) {
+        setupTimeout?.cancel()
         let expectedSession = session
         let timeout = DispatchWorkItem { [weak self] in
-            guard let self, self.session == expectedSession, !self.ready else { return }
-            self.failSetup("Мотоцикл не подтвердил каналы за 60 секунд", retry: true)
+            guard let self, self.session == expectedSession, self.isCurrent(peripheral),
+                  !self.ready, self.gattRecovery.phase != .unavailable else { return }
+            self.gattSetupUnavailable(peripheral,
+                "Мотоцикл не подтвердил каналы за 60 секунд",
+                preserveOtherNotifications: self.gattRecovery.phase == .subscribing)
         }
         setupTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: timeout)
@@ -759,10 +784,14 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         dashboardTelemetry = telemetryPresentation
     }
 
-    private func clearTransport() {
+    private func clearTransport(resetGATTRecovery: Bool = true) {
         cancelScheduledReconnect()
         session = UUID()
+        if resetGATTRecovery { gattRecovery = BLEGATTRecoveryPolicy() }
+        discoveredGATTService = nil
+        invalidatedGATTServices.removeAll()
         captureProfileRequested = false
+        resumeCaptureAfterGATTRecovery = false
         streamRecovery.reset()
         lastStreamAt = nil
         rssiPending = false
@@ -792,6 +821,54 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         notifications.removeAll()
         subscribed.removeAll()
         pendingNotification = nil
+    }
+
+    /// GATT failure is not proof that the connected Bluetooth ACL is lost.
+    /// Keep the peripheral and wait for a real CoreBluetooth disconnect.
+    private func gattSetupUnavailable(_ peripheral: CBPeripheral, _ message: String,
+                                      error: Error? = nil, preserveOtherNotifications: Bool = false,
+                                      invalidatedCurrentService: Bool = false) {
+        // A Service Changed event must discard invalid CBService/CBCharacteristic
+        // objects even if a prior notification failure already marked GATT unavailable.
+        guard isCurrent(peripheral), gattRecovery.phase != .unavailable || invalidatedCurrentService else { return }
+        record("gatt_unavailable", "\(message); BLE-соединение сохраняется; \(Self.errorDetails(error))")
+        setupTimeout?.cancel()
+        setupTimeout = nil
+        if preserveOtherNotifications {
+            gattRecovery.markUnavailable()
+            ready = false
+            pendingNotification = nil
+            pendingWrites.removeAll()
+            observationTimeout?.cancel()
+            observationTimeout = nil
+            if diagnosticRunning { diagnosticStatus = "Проверка прервана; журнал сохранён" }
+            diagnosticRunning = false
+            captureProfileRequested = false
+            if activeWrite == nil { busy = false }
+        } else {
+            clearTransport(resetGATTRecovery: false)
+            gattRecovery.markUnavailable()
+        }
+        status = "\(message). BLE-соединение сохранено; данные ожидаются."
+    }
+
+    private func retryServiceDiscovery(_ peripheral: CBPeripheral, reason: String,
+                                       verifiedOnly: Bool = false) -> Bool {
+        guard (!verifiedOnly || previouslyVerified(peripheral)), gattRecovery.retryServices() else { return false }
+        record("gatt_retry", "Один повтор поиска сервиса на текущем BLE-соединении; \(reason)")
+        scheduleGATTSetupTimeout(peripheral)
+        peripheral.discoverServices([CBUUID(string: MotoProtocol.service)])
+        return true
+    }
+
+    private func retryCharacteristicDiscovery(_ peripheral: CBPeripheral, service: CBService,
+                                              reason: String, verifiedOnly: Bool = false) -> Bool {
+        guard (!verifiedOnly || previouslyVerified(peripheral)), gattRecovery.retryCharacteristics() else { return false }
+        record("gatt_retry", "Один повтор поиска каналов на текущем BLE-соединении; \(reason)")
+        let ids = ([MotoProtocol.control] + MotoProtocol.notify).map { CBUUID(string: $0) }
+        scheduleGATTSetupTimeout(peripheral)
+        peripheral.discoverCharacteristics(ids, for: service)
+        return true
     }
 
     private func failSetup(_ message: String, error: Error? = nil, retry: Bool = false) {
@@ -861,7 +938,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         let expectedSession = session
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, self.session == expectedSession, self.activeWrite != nil else { return }
-            if self.ready {
+            if self.gattRecovery.everReady {
                 // Missing an ATT callback does not prove the physical link is
                 // gone. Retain the original write so a late callback cannot
                 // be mistaken for confirmation of a newer command.
@@ -967,6 +1044,9 @@ extension MotorcycleBluetooth {
                 return
             }
             if current.state == .connected {
+                // A later powered-on callback cannot reset a live GATT repair
+                // or silently grant it another rediscovery attempt.
+                guard gattRecovery.phase == .idle || !connected else { return }
                 nativeReconnect.preparedConnectedState(current.identifier)
                 prepare(current)
             }
@@ -1205,10 +1285,15 @@ private final class MotoModernCentralDelegate: MotoCentralDelegate {
 
 extension MotorcycleBluetooth: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
-        guard isCurrent(peripheral), invalidatedServices.contains(where: {
-            $0.uuid == CBUUID(string: MotoProtocol.service)
-        }) else { return }
-        failSetup("iOS сообщила об изменении сервиса Kawasaki", retry: true)
+        guard isCurrent(peripheral), let activeService = discoveredGATTService,
+              invalidatedServices.contains(where: { $0 === activeService }) else { return }
+        guard gattRecovery.beginServiceRediscovery() else {
+            gattSetupUnavailable(peripheral, "Сервис Kawasaki снова изменился; повторное обнаружение уже использовано",
+                                 invalidatedCurrentService: true)
+            return
+        }
+        record("gatt_service_changed", "iOS признала прежний сервис недействительным; заново ищем его на текущем BLE-соединении")
+        prepare(peripheral, inPlaceRecovery: true, invalidatedServices: invalidatedServices)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
@@ -1223,37 +1308,60 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        guard isCurrent(peripheral) else { return }
-        if let error { failSetup("Ошибка поиска сервиса", error: error, retry: true); return }
-        guard let service = peripheral.services?.first(where: { $0.uuid == CBUUID(string: MotoProtocol.service) }) else {
-            let verified = previouslyVerified(peripheral)
-            failSetup(verified ? "Ранее проверенный сервис Kawasaki временно не найден"
-                : "Ожидаемый сервис Kawasaki отсутствует. Эта модель пока не подтверждена.", retry: verified)
+        guard isCurrent(peripheral), gattRecovery.phase == .discoveringServices else { return }
+        if let error {
+            if retryServiceDiscovery(peripheral, reason: Self.errorDetails(error)) { return }
+            gattSetupUnavailable(peripheral, "Ошибка поиска сервиса", error: error)
             return
         }
+        guard let service = peripheral.services?.first(where: {
+            $0.uuid == CBUUID(string: MotoProtocol.service)
+                && !invalidatedGATTServices.contains(ObjectIdentifier($0))
+        }) else {
+            if retryServiceDiscovery(peripheral, reason: "сервис не найден или прежний объект недействителен",
+                                     verifiedOnly: true) { return }
+            let verified = previouslyVerified(peripheral)
+            gattSetupUnavailable(peripheral, verified ? "Ранее проверенный сервис Kawasaki временно не найден"
+                : "Ожидаемый сервис Kawasaki отсутствует. Эта модель пока не подтверждена.")
+            return
+        }
+        guard gattRecovery.servicesDiscovered() else { return }
+        discoveredGATTService = service
+        invalidatedGATTServices.removeAll()
         record("setup", "Сервис найден; поиск каналов")
         let ids = ([MotoProtocol.control] + MotoProtocol.notify).map { CBUUID(string: $0) }
         peripheral.discoverCharacteristics(ids, for: service)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        guard isCurrent(peripheral), service.uuid == CBUUID(string: MotoProtocol.service) else { return }
-        if let error { failSetup("Ошибка поиска каналов", error: error, retry: true); return }
+        guard isCurrent(peripheral), gattRecovery.phase == .discoveringCharacteristics,
+              service === discoveredGATTService,
+              service.uuid == CBUUID(string: MotoProtocol.service) else { return }
+        if let error {
+            if retryCharacteristicDiscovery(peripheral, service: service, reason: Self.errorDetails(error)) { return }
+            gattSetupUnavailable(peripheral, "Ошибка поиска каналов", error: error)
+            return
+        }
         let characteristics = service.characteristics ?? []
         guard let write = characteristics.first(where: { $0.uuid == CBUUID(string: MotoProtocol.control) }),
               write.properties.contains(.write) else {
-            failSetup("Канал запросов с подтверждением не найден", retry: previouslyVerified(peripheral))
+            if retryCharacteristicDiscovery(peripheral, service: service, reason: "канал записи не найден",
+                                            verifiedOnly: true) { return }
+            gattSetupUnavailable(peripheral, "Канал запросов с подтверждением не найден")
             return
         }
         control = write
         for identifier in MotoProtocol.notify {
             guard let characteristic = characteristics.first(where: { $0.uuid == CBUUID(string: identifier) }),
                   characteristic.properties.contains(.notify) else {
-                failSetup("Канал уведомлений отсутствует: \(identifier)", retry: previouslyVerified(peripheral))
+                if retryCharacteristicDiscovery(peripheral, service: service, reason: "канал уведомлений отсутствует",
+                                                verifiedOnly: true) { return }
+                gattSetupUnavailable(peripheral, "Канал уведомлений отсутствует: \(identifier)")
                 return
             }
             notifications[identifier.uppercased()] = characteristic
         }
+        guard gattRecovery.characteristicsDiscovered() else { return }
         rememberVerified(peripheral)
         record("setup", "Каналы найдены; последовательная проверка трёх уведомлений; maxWriteWithResponse=\(peripheral.maximumWriteValueLength(for: .withResponse))")
         subscribed.removeAll()
@@ -1271,7 +1379,8 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
     }
 
     private func subscribeNext(_ peripheral: CBPeripheral) {
-        guard isCurrent(peripheral), !ready, pendingNotification == nil else { return }
+        guard isCurrent(peripheral), gattRecovery.phase == .subscribing,
+              !ready, pendingNotification == nil else { return }
         for identifier in MotoProtocol.notify.map({ $0.uppercased() }) where !subscribed.contains(identifier) {
             guard let characteristic = notifications[identifier] else { return }
             pendingNotification = identifier
@@ -1279,13 +1388,17 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             return
         }
         guard subscribed.count == MotoProtocol.notify.count else { return }
+        guard let firstReady = gattRecovery.notificationsReady() else { return }
         setupTimeout?.cancel()
         setupTimeout = nil
         ready = true
         status = "Мотоцикл подключён"
-        onReadyForCapture?()
-        record("ready", "Все три подписки подтверждены")
-        if autoReconnect && UserDefaults.standard.bool(forKey: "MotoLink.resumeTelemetry") {
+        if firstReady { onReadyForCapture?() }
+        record("ready", firstReady ? "Все три подписки подтверждены" : "Подписки восстановлены на прежнем BLE-соединении")
+        if resumeCaptureAfterGATTRecovery {
+            resumeCaptureAfterGATTRecovery = false
+            startCaptureProfileIfNeeded()
+        } else if autoReconnect && UserDefaults.standard.bool(forKey: "MotoLink.resumeTelemetry") {
             startCaptureProfileIfNeeded()
         }
     }
@@ -1293,12 +1406,29 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         guard isCurrent(peripheral), characteristic.service?.uuid == CBUUID(string: MotoProtocol.service),
               notifications[characteristic.uuid.uuidString.uppercased()] === characteristic else { return }
-        if let error { failSetup("Не удалось включить уведомления", error: error, retry: true); return }
-        guard characteristic.isNotifying else { failSetup("Мотоцикл отключил уведомления", retry: true); return }
         let identifier = characteristic.uuid.uuidString.uppercased()
+        guard gattRecovery.phase == .subscribing || gattRecovery.phase == .ready,
+              pendingNotification == identifier || pendingNotification == nil && gattRecovery.phase == .ready else { return }
         if pendingNotification == identifier { pendingNotification = nil }
+        if !characteristic.isNotifying {
+            subscribed.remove(identifier)
+            ready = false
+            status = "Уведомления недоступны; BLE-соединение сохраняется…"
+            if gattRecovery.retryNotification(identifier, permitted: characteristic.properties.contains(.notify)) {
+                record("notify_retry", "Один повтор подписки на текущем BLE-соединении; \(Self.errorDetails(error))",
+                       characteristic: characteristic.uuid.uuidString)
+                pendingNotification = identifier
+                scheduleGATTSetupTimeout(peripheral)
+                peripheral.setNotifyValue(true, for: characteristic)
+            } else {
+                gattSetupUnavailable(peripheral, "Не удалось восстановить уведомления",
+                                     error: error, preserveOtherNotifications: true)
+            }
+            return
+        }
         subscribed.insert(identifier)
-        record("notify", "Уведомления подтверждены", characteristic: characteristic.uuid.uuidString)
+        record(error == nil ? "notify" : "notify_existing", "Уведомления подтверждены на текущем канале; \(Self.errorDetails(error))",
+               characteristic: characteristic.uuid.uuidString)
         subscribeNext(peripheral)
     }
 
@@ -1371,7 +1501,7 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             let cause = error as NSError
             let pairingFailure = cause.domain == CBErrorDomain &&
                 [CBError.Code.peerRemovedPairingInformation.rawValue, CBError.Code.tooManyLEPairedDevices.rawValue].contains(cause.code)
-            if ready && !pairingFailure {
+            if gattRecovery.everReady && !pairingFailure {
                 // An error callback completes this ATT operation. Drop the
                 // queued requests without voluntarily surrendering a link
                 // which may still carry telemetry.
