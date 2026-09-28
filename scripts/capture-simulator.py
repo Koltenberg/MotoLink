@@ -19,7 +19,8 @@ from pathlib import Path
 SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
                     "simulator-companion.png", "simulator-companion-large-text.png",
                     "simulator-garage-light.png", "simulator-ride.png",
-                    "simulator-ride-light.png", "simulator-settings.png",
+                    "simulator-ride-light.png", "simulator-focus-rpm.png",
+                    "simulator-focus-gps.png", "simulator-settings.png",
                     "simulator-service-editor.png", "simulator-fuel-editor.png", "simulator-history.png",
                     "simulator-ride-landscape.png")
 ORIENTATION_EVIDENCE = "MotoLinkVisualOrientation.json"
@@ -545,6 +546,8 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
             ("simulator-garage-light.png", ("--review-light",), False),
             ("simulator-ride.png", ("--review-ride",), False),
             ("simulator-ride-light.png", ("--review-ride", "--review-light"), False),
+            ("simulator-focus-rpm.png", ("--review-ride", "--review-focus-rpm"), False),
+            ("simulator-focus-gps.png", ("--review-ride", "--review-focus-gps", "--review-light"), False),
             ("simulator-settings.png", ("--review-settings", "--review-light"), False),
             ("simulator-service-editor.png", ("--companion-visual-check", "--review-service-editor", "--review-light"), False),
             ("simulator-fuel-editor.png", ("--companion-visual-check", "--review-fuel-editor", "--review-light"), False),

@@ -5,6 +5,7 @@ struct SpeedComparisonView: View, Equatable {
     let rides: RideRecorder
     var preview = false
     var compact = false
+    var onSelect: (String) -> Void = { _ in }
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var gps: Double?
@@ -39,26 +40,34 @@ struct SpeedComparisonView: View, Equatable {
         .onChange(of: scenePhase) { phase in updateTimer(for: phase) }
     }
     @ViewBuilder private func reading(_ title: String, _ speed: Double?) -> some View {
-        if compact {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(title).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-                Spacer(minLength: 0)
-                Text(speed.map { String(format: "%.0f", $0) } ?? "—")
-                    .font(MotoTheme.numberFont(size: 42).monospacedDigit())
-                    .lineLimit(1).minimumScaleFactor(0.6)
-                Text("км/ч").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+        let id = title == "GPS" ? "gps_speed" : "wheel_speed"
+        Button { onSelect(id) } label: {
+            if compact {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(title).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    Spacer(minLength: 0)
+                    Text(speed.map { String(format: "%.0f", $0) } ?? "—")
+                        .font(MotoTheme.numberFont(size: 42).monospacedDigit())
+                        .lineLimit(1).minimumScaleFactor(0.6)
+                    Text("км/ч").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+                .padding(.horizontal, 12).padding(.vertical, 7).pixelPanel(accent: true)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    Text(speed.map { String(format: "%.0f", $0) } ?? "—")
+                        .font(MotoTheme.numberFont(size: 60).monospacedDigit())
+                        .lineLimit(1).minimumScaleFactor(0.6)
+                    Text("км/ч").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(12).pixelPanel(accent: true)
             }
-            .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
-            .padding(.horizontal, 12).padding(.vertical, 7).pixelPanel(accent: true)
-        } else {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-                Text(speed.map { String(format: "%.0f", $0) } ?? "—")
-                    .font(MotoTheme.numberFont(size: 60).monospacedDigit())
-                    .lineLimit(1).minimumScaleFactor(0.6)
-                Text("км/ч").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-            }.frame(maxWidth: .infinity, alignment: .leading).padding(12).pixelPanel(accent: true)
         }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .accessibilityLabel(title == "GPS" ? "Скорость GPS" : "Скорость мотоцикла")
+        .accessibilityValue(speed.map { String(format: "%.0f километров в час", $0) } ?? "Нет свежих данных")
+        .accessibilityHint("Дважды коснитесь, чтобы увеличить показатель")
     }
     private func sample(fromTimer: Bool = false) {
         #if targetEnvironment(simulator)

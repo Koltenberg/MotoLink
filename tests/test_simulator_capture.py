@@ -190,6 +190,8 @@ class SimulatorCaptureTests(unittest.TestCase):
             ("simulator-garage-light.png", "home", "light", False),
             ("simulator-ride.png", "ride", "default", False),
             ("simulator-ride-light.png", "ride", "light", False),
+            ("simulator-focus-rpm.png", "ride", "default", False),
+            ("simulator-focus-gps.png", "ride", "light", False),
             ("simulator-settings.png", "home", "light", False),
             ("simulator-service-editor.png", "companion", "light", False),
             ("simulator-fuel-editor.png", "companion", "light", False),

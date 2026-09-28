@@ -4,17 +4,17 @@ import Foundation
 /// These are app recovery windows, not Kawasaki keepalive intervals. Callers use
 /// monotonic uptime and report only structurally valid 4A frames.
 struct BLEStreamRecoveryPolicy {
-    enum Action: Equatable { case rearmStream, preserveActiveLink, restartTransport }
+    enum Action: Equatable { case rearmStream, preserveActiveLink, preserveSilentLink }
 
     static let staleInterval: TimeInterval = 45
     static let rearmGraceInterval: TimeInterval = 30
     private(set) var lastStreamAt: TimeInterval?
     private var lastPacketAt: TimeInterval?
     private(set) var rearmUsed = false
-    private(set) var restartRequested = false
     private var rearmedAt: TimeInterval?
     private var lastObservedAt: TimeInterval?
     private var reportedActiveLink = false
+    private var reportedSilentLink = false
 
     static func isPacket(_ data: Data) -> Bool {
         let bytes = Array(data)
@@ -33,6 +33,7 @@ struct BLEStreamRecoveryPolicy {
         lastStreamAt = now
         rearmedAt = nil
         reportedActiveLink = false
+        reportedSilentLink = false
     }
 
     mutating func receivedPacket(at now: TimeInterval) {
@@ -45,13 +46,6 @@ struct BLEStreamRecoveryPolicy {
         lastPacketAt = now
     }
 
-    /// An optional recovery write may wait for its ATT callback while a working
-    /// notification stream continues. Never advance its queue on this evidence.
-    func hasRecentPacket(at now: TimeInterval) -> Bool {
-        guard now.isFinite, let lastPacketAt, now >= lastPacketAt else { return false }
-        return now - lastPacketAt < Self.rearmGraceInterval
-    }
-
     mutating func nextAction(at now: TimeInterval, eligible: Bool) -> Action? {
         guard now.isFinite, now >= 0 else { return nil }
         if let previous = lastObservedAt, now < previous {
@@ -61,21 +55,23 @@ struct BLEStreamRecoveryPolicy {
             if rearmedAt != nil { rearmedAt = now }
         }
         lastObservedAt = now
-        guard eligible, !restartRequested, let lastStreamAt,
+        guard eligible, let lastStreamAt,
               now - lastStreamAt >= Self.staleInterval else { return nil }
         if let rearmedAt {
             guard now - rearmedAt >= Self.rearmGraceInterval else { return nil }
         }
         if rearmUsed {
             // Kawasaki can limit discovery after riding begins. Do not surrender
-            // an active ACL when other valid telemetry still proves it works.
+            // a connected ACL merely because notifications stopped. CoreBluetooth
+            // owns the physical disconnect decision; wait for its callback.
             if let lastPacketAt, now - lastPacketAt < Self.rearmGraceInterval {
                 guard !reportedActiveLink else { return nil }
                 reportedActiveLink = true
                 return .preserveActiveLink
             }
-            restartRequested = true
-            return .restartTransport
+            guard !reportedSilentLink else { return nil }
+            reportedSilentLink = true
+            return .preserveSilentLink
         }
         rearmUsed = true
         rearmedAt = now

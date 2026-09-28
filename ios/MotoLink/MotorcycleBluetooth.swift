@@ -108,8 +108,6 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private var pendingWrites: [(command: UInt8, frame: Data)] = []
     private var lastSlowQueryAt: [UInt8: Date] = [:]
     private var activeWrite: (command: UInt8, frame: Data)?
-    private var optionalStreamRearmInProgress = false
-    private var rearmWriteDeferralLogged = false
     private var writeConfirmed = false
     private var responseReceived = false
     private var rejectedResponse = false
@@ -499,9 +497,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         }
     }
 
-    /// Called by the existing low-frequency capture timer; this is diagnostic
-    /// observation, not a background keepalive or a reconnect deadline.
-    func recordHealthSnapshot() {
+    /// Called by the low-frequency BLE observation timer while a connection or
+    /// ride is active; this is not a background keepalive or reconnect deadline.
+    func recordHealthSnapshot(allowRSSI: Bool = true) {
         resumeScheduledReconnect()
         let now = Date()
         let packetAge = lastPacketAt.map { Int(max(0, now.timeIntervalSince($0))) } ?? -1
@@ -515,7 +513,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         record("ble_health", "connected=\(connected); ready=\(ready); connecting=\(connecting); waitSeconds=\(waiting); waitOrigin=\(connecting ? connectionWaitOrigin : "none"); packetAgeSeconds=\(packetAge); streamAgeSeconds=\(streamAge); peripheralState=\(current?.state.rawValue ?? -1); reconnectAttempt=\(reconnectAttempt); retryCooldownSeconds=\(cooldown); systemReconnectPending=\(nativeReconnect.systemOwnsPendingConnection); cancelPending=\(nativeReconnect.awaitingCancellation); appState=\(UIApplication.shared.applicationState.rawValue); centralState=\(central.state.rawValue); protectedDataAvailable=\(UIApplication.shared.isProtectedDataAvailable); lastRSSIdBm=\(rssiValue); rssiAgeSeconds=\(rssiAge)")
         checkStreamRecovery()
         // One local RSSI read per minute, only while visible and between commands.
-        if UIApplication.shared.applicationState == .active, ready, !busy,
+        if allowRSSI, UIApplication.shared.applicationState == .active, ready, !busy,
            !diagnosticRunning, !rssiPending, let current, isCurrent(current),
            lastRSSIRequestAt == nil || now.timeIntervalSince(lastRSSIRequestAt!) >= 60 {
             lastRSSIRequestAt = now
@@ -577,13 +575,11 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         switch action {
         case .rearmStream:
             record("stream_recovery", "Нет структурно корректного 4A не менее 45 секунд. Один повтор известного профиля 08; соединение сохраняется.")
-            optionalStreamRearmInProgress = true
-            rearmWriteDeferralLogged = false
             request([0x08])
         case .preserveActiveLink:
             record("stream_stalled_link_alive", "4A пока не вернулся, но другие корректные пакеты поступают. Сохраняем соединение: повторное обнаружение мотоцикла в движении может быть недоступно.")
-        case .restartTransport:
-            failSetup("Поток 4A не восстановился и все корректные пакеты отсутствуют не менее 30 секунд; восстанавливаем канал", retry: true)
+        case .preserveSilentLink:
+            record("stream_stalled_link_silent", "После повтора 08 нет корректных пакетов. Соединение сохраняется до фактического отключения iOS: мотоцикл может не обнаруживаться повторно в движении.")
         }
     }
 
@@ -787,8 +783,6 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         pendingWrites.removeAll()
         lastSlowQueryAt.removeAll()
         activeWrite = nil
-        optionalStreamRearmInProgress = false
-        rearmWriteDeferralLogged = false
         writeConfirmed = false
         responseReceived = false
         rejectedResponse = false
@@ -831,8 +825,6 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         guard ready, let current, current.state == .connected, let control else {
             pendingWrites.removeAll()
             activeWrite = nil
-            optionalStreamRearmInProgress = false
-            rearmWriteDeferralLogged = false
             busy = false
             return
         }
@@ -845,7 +837,12 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         }
         let write = pendingWrites.removeFirst()
         guard write.frame.count <= current.maximumWriteValueLength(for: .withResponse) else {
-            failSetup("Размер запроса превышает доступный размер BLE-записи")
+            pendingWrites.removeAll()
+            busy = false
+            diagnosticRunning = false
+            captureProfileRequested = false
+            status = "Запрос слишком велик для BLE-канала; соединение сохраняется."
+            record("request_failed", status)
             return
         }
         activeWrite = write
@@ -864,15 +861,13 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         let expectedSession = session
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, self.session == expectedSession, self.activeWrite != nil else { return }
-            if self.optionalStreamRearmInProgress,
-               self.streamRecovery.hasRecentPacket(at: ProcessInfo.processInfo.systemUptime) {
-                // The original ATT write is still pending: keep busy/activeWrite
-                // intact so its late callback cannot confirm a different command.
-                if !self.rearmWriteDeferralLogged {
-                    self.rearmWriteDeferralLogged = true
-                    self.record("stream_rearm_ack_deferred", "Подтверждение дополнительного 08 задержалось, но корректные пакеты поступают. Сохраняем связь и очередь; повторная проверка через 60 секунд.")
-                }
-                self.scheduleWriteTimeout()
+            if self.ready {
+                // Missing an ATT callback does not prove the physical link is
+                // gone. Retain the original write so a late callback cannot
+                // be mistaken for confirmation of a newer command.
+                self.writeTimeout = nil
+                self.status = "BLE подключён; ждём подтверждения запроса…"
+                self.record("att_write_pending", "Нет подтверждения BLE-записи за 60 секунд; сохраняем соединение и ожидаем исходный callback")
                 return
             }
             self.failSetup("Нет подтверждения BLE-записи за 60 секунд", retry: true)
@@ -897,14 +892,12 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         responseTimeout?.cancel()
         responseTimeout = nil
         activeWrite = nil
-        optionalStreamRearmInProgress = false
-        rearmWriteDeferralLogged = false
         writeConfirmed = false
         responseReceived = false
         rejectedResponse = false
         let command = String(format: "0x%02X", write.command)
         if let failure {
-            status = "Дополнительный запрос не выполнен; соединение сохраняется."
+            status = "Запрос не выполнен; соединение сохраняется."
             record("request_failed", failure)
         } else if received {
             status = "Ответ \(command) получен. Расшифровка — в журнале."
@@ -1378,11 +1371,15 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             let cause = error as NSError
             let pairingFailure = cause.domain == CBErrorDomain &&
                 [CBError.Code.peerRemovedPairingInformation.rawValue, CBError.Code.tooManyLEPairedDevices.rawValue].contains(cause.code)
-            if optionalStreamRearmInProgress, !pairingFailure,
-               streamRecovery.hasRecentPacket(at: ProcessInfo.processInfo.systemUptime) {
-                // An error callback completes this ATT operation. Unlike a
-                // missing callback, it is now safe to release the queue.
-                finishRequest(received: false, failure: "Дополнительный 08: \(Self.errorDetails(error)); другие корректные пакеты поступают")
+            if ready && !pairingFailure {
+                // An error callback completes this ATT operation. Drop the
+                // queued requests without voluntarily surrendering a link
+                // which may still carry telemetry.
+                pendingWrites.removeAll()
+                diagnosticRunning = false
+                captureProfileRequested = false
+                diagnosticStatus = "BLE-запись не прошла; журнал сохранён, соединение сохраняется."
+                finishRequest(received: false, failure: "BLE-запись не прошла: \(Self.errorDetails(error)); соединение сохранено")
                 return
             }
             failSetup("Ошибка передачи запроса", error: error, retry: true)

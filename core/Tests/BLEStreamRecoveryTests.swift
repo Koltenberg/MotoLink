@@ -21,7 +21,7 @@ final class BLEStreamRecoveryTests: XCTestCase {
         XCTAssertFalse(policy.rearmUsed)
     }
 
-    func testLostStreamRearmsOnceThenRestartsAfterGrace() {
+    func testLostStreamRearmsOnceThenKeepsConnectedLinkAfterGrace() {
         var policy = BLEStreamRecoveryPolicy()
         policy.receivedStream(at: 100)
         XCTAssertNil(policy.nextAction(at: 144.99, eligible: true))
@@ -29,7 +29,7 @@ final class BLEStreamRecoveryTests: XCTestCase {
         for time in stride(from: 145.01, through: 174.99, by: 0.1) {
             XCTAssertNil(policy.nextAction(at: time, eligible: true))
         }
-        XCTAssertEqual(policy.nextAction(at: 175, eligible: true), .restartTransport)
+        XCTAssertEqual(policy.nextAction(at: 175, eligible: true), .preserveSilentLink)
         for time in 176...1000 { XCTAssertNil(policy.nextAction(at: Double(time), eligible: true)) }
     }
 
@@ -41,10 +41,10 @@ final class BLEStreamRecoveryTests: XCTestCase {
         XCTAssertEqual(policy.nextAction(at: 200, eligible: true), .rearmStream)
         XCTAssertNil(policy.nextAction(at: 229, eligible: true))
         XCTAssertNil(policy.nextAction(at: 230, eligible: false))
-        XCTAssertEqual(policy.nextAction(at: 300, eligible: true), .restartTransport)
+        XCTAssertEqual(policy.nextAction(at: 300, eligible: true), .preserveSilentLink)
     }
 
-    func testReturningStreamCancelsEscalationWithoutRepeatedProfileWrites() {
+    func testReturningStreamAvoidsRepeatedProfileWrites() {
         var policy = BLEStreamRecoveryPolicy()
         policy.receivedStream(at: 0)
         XCTAssertEqual(policy.nextAction(at: 45, eligible: true), .rearmStream)
@@ -52,7 +52,7 @@ final class BLEStreamRecoveryTests: XCTestCase {
         XCTAssertNil(policy.nextAction(at: 75, eligible: true))
         policy.receivedStream(at: 76)
         XCTAssertNil(policy.nextAction(at: 120, eligible: true))
-        XCTAssertEqual(policy.nextAction(at: 121, eligible: true), .restartTransport)
+        XCTAssertEqual(policy.nextAction(at: 121, eligible: true), .preserveSilentLink)
     }
 
     func testResetRemovesPreviousSessionEvidenceAndRearmBudget() {
@@ -77,7 +77,7 @@ final class BLEStreamRecoveryTests: XCTestCase {
         XCTAssertNil(policy.nextAction(at: 10, eligible: true))
         XCTAssertNil(policy.nextAction(at: 39, eligible: true))
         // The 45-second silence criterion remains in force after clock rebasing.
-        XCTAssertEqual(policy.nextAction(at: 55, eligible: true), .restartTransport)
+        XCTAssertEqual(policy.nextAction(at: 55, eligible: true), .preserveSilentLink)
     }
 
     func testUnknownMeasurementLayoutStillProvesStreamIsAlive() {
@@ -117,19 +117,21 @@ final class BLEStreamRecoveryTests: XCTestCase {
             else { XCTAssertNil(action) }
         }
         XCTAssertEqual(notices, 1)
-        XCTAssertFalse(policy.restartRequested)
         XCTAssertNil(policy.nextAction(at: 7229, eligible: true))
-        XCTAssertEqual(policy.nextAction(at: 7230, eligible: true), .restartTransport)
+        XCTAssertEqual(policy.nextAction(at: 7230, eligible: true), .preserveSilentLink)
+        for time in stride(from: 7231.0, through: 14400, by: 60) {
+            XCTAssertNil(policy.nextAction(at: time, eligible: true))
+        }
     }
 
-    func testRearmAckDelaysTransportRestartUntilAllTrafficIsSilent() {
+    func testOtherPacketsRemainDistinguishableFromCompleteSilence() {
         var policy = BLEStreamRecoveryPolicy()
         policy.receivedStream(at: 0)
         XCTAssertEqual(policy.nextAction(at: 45, eligible: true), .rearmStream)
         policy.receivedPacket(at: 70)
         XCTAssertEqual(policy.nextAction(at: 75, eligible: true), .preserveActiveLink)
         XCTAssertNil(policy.nextAction(at: 99, eligible: true))
-        XCTAssertEqual(policy.nextAction(at: 100, eligible: true), .restartTransport)
+        XCTAssertEqual(policy.nextAction(at: 100, eligible: true), .preserveSilentLink)
     }
 
     func testMalformedEnvelopeDoesNotPreventRecovery() {
@@ -139,32 +141,15 @@ final class BLEStreamRecoveryTests: XCTestCase {
         XCTAssertFalse(BLEStreamRecoveryPolicy.isPacket(Data()))
     }
 
-    func testOptionalWriteDeadlineDefersOnlyWhileOtherPacketsAreFresh() {
+    func testSilentConnectedLinkDoesNotTriggerAnotherRecoveryOverFourHours() {
         var policy = BLEStreamRecoveryPolicy()
-        XCTAssertFalse(policy.hasRecentPacket(at: 0))
         policy.receivedStream(at: 0)
         XCTAssertEqual(policy.nextAction(at: 45, eligible: true), .rearmStream)
-        // ATT write has no callback, but 45/4B continues for two hours. The
-        // transport can defer each 60s deadline without advancing that write.
-        for time in stride(from: 105.0, through: 7305, by: 60) {
-            policy.receivedPacket(at: time - 1)
-            XCTAssertTrue(policy.hasRecentPacket(at: time))
+        XCTAssertEqual(policy.nextAction(at: 75, eligible: true), .preserveSilentLink)
+        for time in stride(from: 76.0, through: 14400, by: 1) {
+            XCTAssertNil(policy.nextAction(at: time, eligible: true))
         }
-        XCTAssertTrue(policy.hasRecentPacket(at: 7333.99))
-        XCTAssertFalse(policy.hasRecentPacket(at: 7334))
-        policy.reset()
-        XCTAssertFalse(policy.hasRecentPacket(at: 7334))
-    }
-
-    func testWriteDeadlineFreshnessRejectsInvalidOrReversedClock() {
-        var policy = BLEStreamRecoveryPolicy()
-        policy.receivedPacket(at: 100)
-        XCTAssertTrue(policy.hasRecentPacket(at: 100))
-        XCTAssertTrue(policy.hasRecentPacket(at: 129.99))
-        XCTAssertFalse(policy.hasRecentPacket(at: 130))
-        XCTAssertFalse(policy.hasRecentPacket(at: 99))
-        XCTAssertFalse(policy.hasRecentPacket(at: .nan))
-        XCTAssertFalse(policy.hasRecentPacket(at: .infinity))
+        XCTAssertTrue(policy.rearmUsed)
     }
 
     func testMalformedAndTruncatedFramesCannotArmWatchdog() {
@@ -174,19 +159,15 @@ final class BLEStreamRecoveryTests: XCTestCase {
         }
     }
 
-    func testRepeatedStallsRemainBoundedAcrossManyTransportAttempts() {
-        var reconnect = BLEReconnectPolicy()
-        for attempt in 0..<1000 {
-            var stream = BLEStreamRecoveryPolicy()
-            let start = Double(attempt) * 180
-            stream.receivedStream(at: start)
-            XCTAssertEqual(stream.nextAction(at: start + 45, eligible: true), .rearmStream)
-            XCTAssertEqual(stream.nextAction(at: start + 75, eligible: true), .restartTransport)
-            reconnect.requestTransportRestart()
-            let delay = reconnect.nextDelay(allowed: true, cancelled: true)
-            XCTAssertNotNil(delay)
-            XCTAssertLessThanOrEqual(delay!, 60)
-            reconnect.connectionStarted()
-        }
+    func testSecondSilenceAfterStreamReturnsDoesNotRearmAgain() {
+        var policy = BLEStreamRecoveryPolicy()
+        policy.receivedStream(at: 0)
+        XCTAssertEqual(policy.nextAction(at: 45, eligible: true), .rearmStream)
+        XCTAssertEqual(policy.nextAction(at: 75, eligible: true), .preserveSilentLink)
+        policy.receivedStream(at: 100)
+        XCTAssertNil(policy.nextAction(at: 144, eligible: true))
+        XCTAssertEqual(policy.nextAction(at: 145, eligible: true), .preserveSilentLink)
+        XCTAssertNil(policy.nextAction(at: 10000, eligible: true))
+        XCTAssertTrue(policy.rearmUsed)
     }
 }

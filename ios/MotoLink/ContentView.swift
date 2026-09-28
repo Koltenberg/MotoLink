@@ -11,6 +11,7 @@ struct ContentView: View {
     @AppStorage("MotoLink.appearance") private var appearance = "system"
     @AppStorage("MotoLink.keepScreenOn") private var keepScreenOn = false
     @State private var selectedTab = 0
+    @State private var focusedMetric: FocusedRideMetric?
     @State private var showSettings = false
     @State private var showProfile = false
     @State private var showHelp = false
@@ -64,10 +65,24 @@ struct ContentView: View {
         .sheet(isPresented: $showConnectionCheck) { connectionCheck }
         .sheet(isPresented: $showDiagnostics) { diagnostics }
         .sheet(item: $rides.exportedFiles) { files in ShareSheet(items: files.urls) }
+        .fullScreenCover(item: $focusedMetric) { metric in
+            FocusedRideMetricView(bluetooth: bluetooth, rides: rides, metric: metric,
+                                  preview: previewRide) { focusedMetric = nil }
+        }
         .onAppear {
             if rides.active != nil || bluetooth.connected { selectedTab = 1 }
             #if targetEnvironment(simulator)
             if ProcessInfo.processInfo.arguments.contains("--review-ride") { selectedTab = 1 }
+            if ProcessInfo.processInfo.arguments.contains("--review-focus-rpm") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    focusedMetric = FocusedRideMetric(id: "engine_speed")
+                }
+            }
+            if ProcessInfo.processInfo.arguments.contains("--review-focus-gps") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    focusedMetric = FocusedRideMetric(id: "gps_speed")
+                }
+            }
             if ProcessInfo.processInfo.arguments.contains("--review-history") { selectedTab = 2 }
             if ProcessInfo.processInfo.arguments.contains("--review-settings") {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { showSettings = true }
@@ -82,7 +97,12 @@ struct ContentView: View {
         .onChange(of: bluetooth.connected) { connected in if connected { selectedTab = 1 } }
         .onChange(of: scenePhase) { phase in updateScreenAwake(phase: phase) }
         .onChange(of: keepScreenOn) { enabled in updateScreenAwake(keepingScreenOn: enabled) }
-        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+        .onChange(of: focusedMetric?.id) { _ in updateScreenAwake() }
+        .onDisappear {
+            // A full-screen reading temporarily hides this view. It owns the
+            // same ride screen-awake preference while it is presented.
+            if focusedMetric == nil { UIApplication.shared.isIdleTimerDisabled = false }
+        }
     }
 
     @ToolbarContentBuilder private var settingsButton: some ToolbarContent {
@@ -115,8 +135,10 @@ struct ContentView: View {
                         if compact {
                             HStack(alignment: .top, spacing: 18) {
                                 VStack(spacing: 8) {
-                                    SpeedComparisonView(bluetooth: bluetooth, rides: rides, preview: previewRide, compact: true).equatable()
-                                    MotorcycleDashboardView(bluetooth: bluetooth, preview: previewRide, compact: true).equatable()
+                                    SpeedComparisonView(bluetooth: bluetooth, rides: rides, preview: previewRide,
+                                                        compact: true, onSelect: focusMetric).equatable()
+                                    MotorcycleDashboardView(bluetooth: bluetooth, preview: previewRide,
+                                                            compact: true, onSelect: focusMetric).equatable()
                                 }.frame(maxWidth: .infinity)
                                 VStack(spacing: 4) {
                                     BikeActivityView(bluetooth: bluetooth, preview: previewRide, compact: true).equatable()
@@ -173,9 +195,15 @@ struct ContentView: View {
 
     private var instrumentPanel: some View {
         VStack(spacing: 12) {
-            SpeedComparisonView(bluetooth: bluetooth, rides: rides, preview: previewRide).equatable()
-            MotorcycleDashboardView(bluetooth: bluetooth, preview: previewRide).equatable()
+            SpeedComparisonView(bluetooth: bluetooth, rides: rides, preview: previewRide,
+                                onSelect: focusMetric).equatable()
+            MotorcycleDashboardView(bluetooth: bluetooth, preview: previewRide,
+                                    onSelect: focusMetric).equatable()
         }
+    }
+
+    private func focusMetric(_ id: String) {
+        focusedMetric = FocusedRideMetric(id: id)
     }
 
     private var compactConnectionStatus: some View {
@@ -327,19 +355,23 @@ struct ContentView: View {
                         Text(reason).font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                     }
                     if !bluetooth.connected {
-                        Text("Мотоциклы рядом").font(MotoTheme.font(.title3))
+                        Text(bluetooth.scanning ? "Мотоциклы рядом" : "Устройства из последнего поиска")
+                            .font(MotoTheme.font(.title3))
                         ForEach(bluetooth.nearby) { device in
                             Label(device.name, systemImage: "motorcycle")
                                 .font(MotoTheme.font(.headline)).padding(14).frame(maxWidth: .infinity, alignment: .leading).pixelPanel()
                         }
-                        if bluetooth.nearby.isEmpty && !bluetooth.scanning && connectionCheckOwnsScan {
+                        if bluetooth.nearby.isEmpty && !bluetooth.scanning && bluetooth.scanFoundNothing {
                             Text("Байк не найден. Проверь зажигание и доступность Bluetooth на приборке.")
+                                .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
+                        } else if bluetooth.nearby.isEmpty && !bluetooth.scanning && connectionCheckOwnsScan {
+                            Text("Поиск прерван до завершения. Повтори проверку, когда Moto Link открыт на экране.")
                                 .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                         }
                         Button(bluetooth.scanning ? "Ищем рядом…" : "Проверить ещё раз") { checkVisibility() }
                             .buttonStyle(PixelButtonStyle(prominent: true))
                             .disabled(bluetooth.scanning || !bluetooth.canScanNearby)
-                        Text("Найденный байк виден по Bluetooth. Это ещё не подтверждение совместимости или получения показателей. Для подключения выбери его в разделе «Поездка».")
+                        Text("Появление байка в результатах поиска подтверждает видимость по Bluetooth. Это ещё не подтверждение совместимости или получения показателей. Для подключения выбери его в разделе «Поездка».")
                             .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     }
                 }.padding(20)

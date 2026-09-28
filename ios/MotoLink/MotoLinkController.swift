@@ -40,8 +40,14 @@ final class MotoLinkController: ObservableObject {
             self.connectionContext.setRecording(id != nil)
         }.store(in: &subscriptions)
         Timer.publish(every: 15, on: .main, in: .common).autoconnect().sink { [weak self] _ in
-            guard let self, self.rides.active != nil else { return }
-            self.bluetooth.recordHealthSnapshot()
+            guard let self else { return }
+            let recording = self.rides.active != nil
+            guard recording || self.bluetooth.connected || self.bluetooth.connecting || self.bluetooth.ready else { return }
+            // BLE observation and the single known stream rearm also work when
+            // the rider views live telemetry without saving a ride. Extra RSSI
+            // reads and phone/slow-value sampling remain tied to recording.
+            self.bluetooth.recordHealthSnapshot(allowRSSI: recording)
+            guard recording else { return }
             self.rides.recordPhoneHealth()
             self.bluetooth.refreshSlowMeasurements()
         }.store(in: &subscriptions)
