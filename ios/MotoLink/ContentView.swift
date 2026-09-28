@@ -3,6 +3,8 @@ import Combine
 import UIKit
 
 struct ContentView: View {
+    private enum ConnectionPrompt: Equatable { case rescan, disconnect }
+
     @ObservedObject var bluetooth: MotorcycleBluetooth
     @ObservedObject var rides: RideRecorder
     @StateObject private var companion = CompanionStore()
@@ -17,7 +19,7 @@ struct ContentView: View {
     @State private var showHelp = false
     @State private var showDiagnostics = false
     @State private var showDiscovery = false
-    @State private var showRescanConfirmation = false
+    @State private var connectionPrompt: ConnectionPrompt?
     @State private var showConnectionCheck = false
     @State private var connectionCheckOwnsScan = false
     @State private var justSaved = false
@@ -70,12 +72,22 @@ struct ContentView: View {
             FocusedRideMetricView(bluetooth: bluetooth, rides: rides, metric: metric,
                                   preview: previewRide) { focusedMetric = nil }
         }
-        .confirmationDialog("Мотоцикл остановлен и зажигание включено заново?",
-                            isPresented: $showRescanConfirmation, titleVisibility: .visible) {
-            Button("Да, повторить поиск") { bluetooth.requestUserRescan() }
-            Button("Оставить ожидание iOS", role: .cancel) {}
+        .confirmationDialog(connectionPrompt == .rescan
+                            ? "Мотоцикл остановлен и зажигание включено заново?"
+                            : "Отключить мотоцикл на стоянке?",
+                            isPresented: Binding(get: { connectionPrompt != nil },
+                                                 set: { if !$0 { connectionPrompt = nil } }),
+                            titleVisibility: .visible) {
+            if connectionPrompt == .rescan {
+                Button("Да, повторить поиск") { bluetooth.requestUserRescan() }
+            } else if connectionPrompt == .disconnect {
+                Button("Отключить байк", role: .destructive) { bluetooth.pauseConnection() }
+            }
+            Button("Оставить связь", role: .cancel) {}
         } message: {
-            Text("В движении байк может не предлагать подключение. Новый поиск отменит текущее ожидание iOS.")
+            Text(connectionPrompt == .rescan
+                 ? "В движении байк может не предлагать подключение. Новый поиск отменит текущее ожидание iOS."
+                 : "В движении новое подключение может быть недоступно до остановки и перезапуска двигателя.")
         }
         .onAppear {
             if rides.active != nil || bluetooth.connected { selectedTab = 1 }
@@ -228,8 +240,11 @@ struct ContentView: View {
             }
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 if rides.active == nil && bluetooth.canRequestUserRescan(at: context.date) && !previewRide {
-                    Button("Поиск на стоянке") { showRescanConfirmation = true }.font(MotoTheme.font(.caption))
+                    Button("Поиск на стоянке") { connectionPrompt = .rescan }.font(MotoTheme.font(.caption))
                 }
+            }
+            if bluetooth.connected && rides.active == nil && !previewRide {
+                Button("Отключить") { connectionPrompt = .disconnect }.font(MotoTheme.font(.caption))
             }
             if bluetooth.connecting && !bluetooth.connected && rides.active == nil && !previewRide {
                 Button("Отменить") { bluetooth.pauseConnection() }.font(MotoTheme.font(.subheadline))
@@ -249,6 +264,8 @@ struct ContentView: View {
                 if bluetooth.connecting { ProgressView().controlSize(.small) }
                 if bluetooth.connecting && !bluetooth.connected && rides.active == nil {
                     Button("Отменить") { bluetooth.pauseConnection() }.font(MotoTheme.font(.subheadline))
+                } else if bluetooth.connected && rides.active == nil && !previewRide {
+                    Button("Отключить") { connectionPrompt = .disconnect }.font(MotoTheme.font(.subheadline))
                 }
             }
             if !bluetooth.bluetoothPowered && !previewRide {
@@ -267,7 +284,7 @@ struct ContentView: View {
             }
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 if rides.active == nil && bluetooth.canRequestUserRescan(at: context.date) {
-                    Button("Поиск на стоянке") { showRescanConfirmation = true }
+                    Button("Поиск на стоянке") { connectionPrompt = .rescan }
                         .font(MotoTheme.font(.subheadline))
                 }
             }
