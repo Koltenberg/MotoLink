@@ -79,7 +79,7 @@ final class CompanionStore: ObservableObject {
             }
             exportedFiles = SharedFiles(urls: [destination])
             error = nil
-        } catch { error = "Не удалось сохранить копию гаража: \(error.localizedDescription)" }
+        } catch { self.error = "Не удалось сохранить копию гаража: \(error.localizedDescription)" }
     }
 
     func enableReminders() {
