@@ -53,6 +53,7 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.orientation_override = {}
         self.write_ready = True
         self.ready_override = {}
+        self.lifecycle_failure = None
 
     def fake_run(self, *args, **kwargs):
         self.calls.append(args)
@@ -110,6 +111,8 @@ class SimulatorCaptureTests(unittest.TestCase):
         # gate; its strict evidence checks and resume flow are tested below.
         def lifecycle(*args):
             (args[3] / CAPTURE.REFRESH_EVIDENCE).write_text('{"mockedByUnitTest": true}', encoding="utf-8")
+            if self.lifecycle_failure:
+                raise CAPTURE.CaptureError(self.lifecycle_failure)
         with patch.object(CAPTURE, "run", side_effect=self.fake_run), \
              patch.object(CAPTURE.time, "sleep"), patch.object(CAPTURE, "reject_blank_png"), \
              patch.object(CAPTURE, "verify_refresh_lifecycle", side_effect=lifecycle), \
@@ -466,6 +469,36 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.assertEqual(len(self.devices), 2)
         self.assertEqual(list(self.output.glob("*.png")), [])
 
+    def test_late_lifecycle_failure_keeps_evidence_without_rebooting_simulator(self):
+        self.lifecycle_failure = "UIKit must confirm background within 12s"
+        with self.assertRaisesRegex(CAPTURE.CaptureError, "UIKit must confirm background"):
+            self.execute()
+        self.assertEqual(len(self.devices), 1)
+        self.assertEqual(list(self.output.glob("*.png")), [])
+        debug = self.output / "debug-attempt1"
+        self.assertTrue((debug / "simulator-ride.png").is_file())
+        self.assertTrue((debug / CAPTURE.REFRESH_EVIDENCE).is_file())
+        self.assertFalse((self.output / "debug-attempt2" / "failure.json").exists())
+
+    def test_timed_out_launch_requires_this_launchs_visible_ready_token(self):
+        def late_launch(*args, **kwargs):
+            token = args[args.index("--visual-review-token") + 1]
+            (self.container / "Documents" / CAPTURE.READY_EVIDENCE).write_text(json.dumps({
+                "ready": True, "launchToken": token, "mode": "garage", "appearance": "light",
+                "windowWidth": 390, "windowHeight": 844,
+                "capturedAt": time.time(), "visibleSeconds": 2.1,
+            }), encoding="utf-8")
+            raise CAPTURE.CaptureError("simctl launch timed out after 90.0s")
+        with patch.object(CAPTURE, "run", side_effect=late_launch):
+            CAPTURE.launch_for_capture("simulator", "org.koltenberg.MotoLink", (), self.container,
+                                       self.root, "simulator-home.png", time.monotonic() + 100)
+        self.assertTrue((self.root / "simulator-home.ready.json").is_file())
+        with patch.object(CAPTURE, "run", side_effect=CAPTURE.CaptureError("simctl launch timed out after 90.0s")), \
+             patch.object(CAPTURE.time, "sleep"), \
+             self.assertRaisesRegex(CAPTURE.CaptureError, "readiness was not confirmed"):
+            CAPTURE.launch_for_capture("simulator", "org.koltenberg.MotoLink", (), self.container,
+                                       self.root, "simulator-home.png", time.monotonic() + 100)
+
     def test_missing_and_truncated_images_fail_validation(self):
         image = self.root / "missing.png"
         with self.assertRaises(CAPTURE.CaptureError):
@@ -619,6 +652,27 @@ class RefreshLifecycleTests(unittest.TestCase):
         self.assertTrue(CAPTURE.resumed_panels_are_ticking(result, 5))
         self.assertTrue((self.directory / CAPTURE.REFRESH_EVIDENCE).is_file())
 
+    def test_timed_out_settings_and_resume_commands_can_be_proved_by_UIKit_events(self):
+        container = self.directory / "container"
+        (container / "Documents").mkdir(parents=True)
+        source = container / "Documents" / CAPTURE.REFRESH_EVIDENCE
+        (self.directory / "simulator-ride.ready.json").write_text(
+            json.dumps({"launchToken": self.token}), encoding="utf-8")
+        def write(length):
+            evidence = self.evidence()
+            evidence["events"] = evidence["events"][:length]
+            source.write_text(json.dumps(evidence), encoding="utf-8")
+        write(4)
+        def command(*args, **kwargs):
+            self.assertEqual(kwargs["timeout"], CAPTURE.SIMCTL_DISPLAY_TIMEOUT)
+            write(5 if args[2] == "com.apple.Preferences" else 12)
+            raise CAPTURE.CaptureError("simctl launch timed out after 90.0s")
+        with patch.object(CAPTURE, "run", side_effect=command) as run:
+            result = CAPTURE.verify_refresh_lifecycle("simulator", "app.motolink", container,
+                self.directory, self.launched, time.monotonic() + 200)
+        self.assertEqual([call.args[2] for call in run.call_args_list], ["com.apple.Preferences", "app.motolink"])
+        self.assertTrue(CAPTURE.resumed_panels_are_ticking(result, 5))
+
     def test_no_observed_background_fails_instead_of_accepting_continued_ticks(self):
         container = self.directory / "container"
         (container / "Documents").mkdir(parents=True)
@@ -633,7 +687,7 @@ class RefreshLifecycleTests(unittest.TestCase):
              self.assertRaisesRegex(CAPTURE.CaptureError, "UIKit must confirm background"):
             CAPTURE.verify_refresh_lifecycle("simulator", "app.motolink", container,
                 self.directory, self.launched, time.monotonic() + 60)
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_count, 2)
 
 
 class OrientationEvidenceWaitTests(unittest.TestCase):

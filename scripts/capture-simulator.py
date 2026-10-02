@@ -39,6 +39,14 @@ class UnsupportedOrientationError(CaptureError):
     """UIKit rejected the requested orientation; a fresh simulator cannot fix it."""
 
 
+class LateLifecycleError(CaptureError):
+    """The simulator has screenshots; retry the lifecycle locally, not a full boot."""
+
+
+def launch_timed_out(error):
+    return isinstance(error, CaptureError) and str(error).startswith("simctl launch timed out")
+
+
 def version(value, label):
     if not isinstance(value, str) or not re.fullmatch(r"\d+(?:\.\d+){0,2}", value):
         raise CaptureError(f"Invalid {label}: {value!r}")
@@ -357,9 +365,17 @@ def launch_for_capture(device, bundle_id, flags, container, output, name, deadli
         (container / "Documents" / REFRESH_EVIDENCE).unlink(missing_ok=True)
     token = str(uuid.uuid4())
     started = time.time()
-    launched = run("launch", device, bundle_id, *flags, "--visual-review-token", token,
-                   timeout=45, deadline=deadline)
-    if not re.search(r":\s*[1-9][0-9]*\s*$", launched):
+    try:
+        launched = run("launch", device, bundle_id, *flags, "--visual-review-token", token,
+                       timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
+    except CaptureError as error:
+        if not launch_timed_out(error):
+            raise
+        # CoreSimulator can time out the command after launching the app.
+        # Only this launch's fresh tokenized UIKit readiness can recover it.
+        print(f"Launch command timed out for {name}; checking visible app readiness", flush=True)
+        launched = None
+    if launched is not None and not re.search(r":\s*[1-9][0-9]*\s*$", launched):
         raise CaptureError(f"App launch did not return a process ID: {launched}")
     mode = "ride" if "--review-ride" in flags else "companion" if "--companion-visual-check" in flags else "garage"
     theme = "light" if "--review-light" in flags else "dark" if "--review-ride" in flags else None
@@ -372,7 +388,7 @@ def launch_for_capture(device, bundle_id, flags, container, output, name, deadli
             destination = output / Path(name).with_suffix(".ready.json").name
             shutil.copyfile(source, destination)
             validate_visual_ready(destination, token, mode, theme, started)
-            print(f"Visible app ready: {name}: {launched}", flush=True)
+            print(f"Visible app ready: {name}: {launched or 'confirmed after command timeout'}", flush=True)
             return started
         if poll < 40:
             time.sleep(min(0.5, remaining))
@@ -473,18 +489,41 @@ def verify_refresh_lifecycle(device, bundle_id, container, output, launched_at, 
         baseline_sequence = initial["events"][-1]["sequence"]
         # Open a real second app. Do not terminate MotoLink: a fresh onAppear in
         # a new process would hide the exact foreground timer regression.
-        run("launch", device, "com.apple.Preferences", timeout=30, deadline=deadline)
-        background = wait_for_refresh(source, token, launched_at,
-            lambda value: any(event["sequence"] > baseline_sequence and event["kind"] == "background"
-                              and event["appState"] == 2 for event in value["events"]),
-            "UIKit must confirm background", deadline, identity)
+        for preference_attempt in (1, 2):
+            try:
+                run("launch", device, "com.apple.Preferences",
+                    timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
+            except CaptureError as error:
+                if not launch_timed_out(error):
+                    raise
+                print("Settings launch command timed out; checking UIKit background evidence", flush=True)
+            try:
+                background = wait_for_refresh(source, token, launched_at,
+                    lambda value: any(event["sequence"] > baseline_sequence and event["kind"] == "background"
+                                      and event["appState"] == 2 for event in value["events"]),
+                    "UIKit must confirm background", deadline, identity)
+                break
+            except CaptureError as error:
+                if preference_attempt == 2 or "within 12s" not in str(error):
+                    raise
+                print("Settings did not background MotoLink; retrying launch on the same simulator", flush=True)
         boundary = next(event["sequence"] for event in background["events"]
                         if event["sequence"] > baseline_sequence and event["kind"] == "background"
                         and event["appState"] == 2)
-        resumed = run("launch", device, bundle_id, timeout=30, deadline=deadline)
-        match = re.search(r":\s*([1-9][0-9]*)\s*$", resumed)
-        if match is None or int(match.group(1)) != identity[0]:
-            raise CaptureError("Foreground launch did not preserve the original MotoLink process")
+        try:
+            resumed = run("launch", device, bundle_id,
+                          timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
+        except CaptureError as error:
+            if not launch_timed_out(error):
+                raise
+            # The same process and fresh post-foreground timers below prove a
+            # real resume even if the simctl client stalls after dispatch.
+            print("Foreground command timed out; checking same-process timer evidence", flush=True)
+            resumed = None
+        if resumed is not None:
+            match = re.search(r":\s*([1-9][0-9]*)\s*$", resumed)
+            if match is None or int(match.group(1)) != identity[0]:
+                raise CaptureError("Foreground launch did not preserve the original MotoLink process")
         final = wait_for_refresh(source, token, launched_at,
             lambda value: resumed_panels_are_ticking(value, boundary),
             "both real panel timers must tick twice after foreground", deadline, identity)
@@ -576,8 +615,6 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
                 # so stale geometry cannot validate the next app launch.
                 orientation_source.unlink(missing_ok=True)
             launched_at = launch_for_capture(device, bundle_id, flags, container, output, name, deadline)
-            if name == "simulator-ride.png":
-                verify_refresh_lifecycle(device, bundle_id, container, output, launched_at, deadline)
             if landscape:
                 wait_for_orientation_evidence(orientation_source, deadline)
             image = output / name
@@ -596,6 +633,13 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
                 print(f"Raw landscape screenshot retained at {width}x{height}", flush=True)
             if not landscape and width >= height:
                 raise CaptureError(f"Portrait state was not restored: {name} is {width}x{height}")
+            if name == "simulator-ride.png":
+                try:
+                    verify_refresh_lifecycle(device, bundle_id, container, output, launched_at, deadline)
+                except CaptureError as error:
+                    # The screenshot and timer trace survive for diagnosis;
+                    # retrying Settings here is cheaper than another boot.
+                    raise LateLifecycleError(str(error)) from error
             images.append(image)
         return tuple(images)
     finally:
@@ -647,6 +691,9 @@ def capture(app, output):
                     print(f"Could not preserve diagnostic screenshots: {diagnostic_error}", flush=True)
                 if isinstance(error, UnsupportedOrientationError):
                     print("UIKit rejected landscape; a second fresh simulator would repeat the app-level failure", flush=True)
+                    break
+                if isinstance(error, LateLifecycleError):
+                    print("Lifecycle failed after an in-place retry; keeping the current diagnostic captures", flush=True)
                     break
                 if time.monotonic() >= deadline:
                     break
