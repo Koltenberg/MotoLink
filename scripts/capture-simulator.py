@@ -27,6 +27,7 @@ ORIENTATION_EVIDENCE = "MotoLinkVisualOrientation.json"
 READY_EVIDENCE = "MotoLinkVisualReady.json"
 REFRESH_EVIDENCE = "MotoLinkRefreshLifecycle.json"
 READY_NAMES = tuple(Path(name).with_suffix(".ready.json").name for name in SCREENSHOT_NAMES)
+SIMCTL_DISPLAY_TIMEOUT = 90  # Hosted iOS 26 snapshots and app shutdown can exceed 30s.
 
 
 class CaptureError(RuntimeError):
@@ -517,28 +518,28 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
         launch_for_capture(device, bundle_id, (), container, output, "simulator-home.png", deadline)
         home = output / "simulator-home.png"
         large = output / "simulator-large-text.png"
-        run("io", device, "screenshot", home, timeout=30, deadline=deadline)
+        run("io", device, "screenshot", home, timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
         validate_capture(home)
         # This UI command tests an actual requirement, unlike appearance: the
         # live app must render with large accessibility text before capture.
-        run("ui", device, "content_size", "accessibility-large", timeout=30, deadline=deadline)
+        run("ui", device, "content_size", "accessibility-large", timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
         time.sleep(2)
-        run("io", device, "screenshot", large, timeout=30, deadline=deadline)
+        run("io", device, "screenshot", large, timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
         validate_capture(large)
         shutil.copyfile(home.with_suffix(".ready.json"), large.with_suffix(".ready.json"))
         # Launch arguments only take effect in a new process. Reset Dynamic Type
         # so the companion's first image really checks the ordinary text size.
-        run("terminate", device, bundle_id, timeout=30, deadline=deadline)
-        run("ui", device, "content_size", "large", timeout=30, deadline=deadline)
+        run("terminate", device, bundle_id, timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
+        run("ui", device, "content_size", "large", timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
         launch_for_capture(device, bundle_id, ("--companion-visual-check",), container, output,
                            "simulator-companion.png", deadline)
         companion = output / "simulator-companion.png"
         companion_large = output / "simulator-companion-large-text.png"
-        run("io", device, "screenshot", companion, timeout=30, deadline=deadline)
+        run("io", device, "screenshot", companion, timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
         validate_capture(companion)
-        run("ui", device, "content_size", "accessibility-large", timeout=30, deadline=deadline)
+        run("ui", device, "content_size", "accessibility-large", timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
         time.sleep(2)
-        run("io", device, "screenshot", companion_large, timeout=30, deadline=deadline)
+        run("io", device, "screenshot", companion_large, timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
         validate_capture(companion_large)
         shutil.copyfile(companion.with_suffix(".ready.json"), companion_large.with_suffix(".ready.json"))
         images = [home, large, companion, companion_large]
@@ -558,8 +559,8 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
             ("simulator-ride-landscape.png", ("--review-ride", "--review-landscape"), True),
         )
         for name, flags, landscape in variants:
-            run("terminate", device, bundle_id, timeout=30, deadline=deadline)
-            run("ui", device, "content_size", "large", timeout=30, deadline=deadline)
+            run("terminate", device, bundle_id, timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
+            run("ui", device, "content_size", "large", timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
             if landscape:
                 orientation_source = container / "Documents" / ORIENTATION_EVIDENCE
                 # The prior process is terminated. Delete only our fixture file,
@@ -571,7 +572,7 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
             if landscape:
                 wait_for_orientation_evidence(orientation_source, deadline)
             image = output / name
-            run("io", device, "screenshot", image, timeout=30, deadline=deadline)
+            run("io", device, "screenshot", image, timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
             width, height = validate_capture(image)
             if landscape:
                 evidence = output / ORIENTATION_EVIDENCE
