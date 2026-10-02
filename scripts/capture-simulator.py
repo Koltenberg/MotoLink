@@ -507,7 +507,10 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
         # Appearance variants are app launch arguments, not global simulator
         # settings: global appearance/status-bar decoration has hung on
         # otherwise booted GitHub runners. Exercise the app's own theme.
-        run("install", device, app, timeout=60, deadline=deadline)
+        # A hosted iOS 26 simulator may finish booting well before its app
+        # installation service is ready. Keep the install bounded by both the
+        # per-call limit and the overall visual-capture deadline.
+        run("install", device, app, timeout=180, deadline=deadline)
         container = Path(run("get_app_container", device, bundle_id, "data", timeout=30, deadline=deadline))
         if not container.is_absolute() or not container.is_dir():
             raise CaptureError("simctl did not return an existing absolute app data container")

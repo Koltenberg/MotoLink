@@ -7,6 +7,7 @@ final class CompanionStore: ObservableObject {
     @Published private(set) var data = CompanionData()
     @Published var error: String?
     @Published var notificationStatus: String?
+    @Published var exportedFiles: SharedFiles?
     private var file: URL?
     private var readable = false
 
@@ -54,6 +55,31 @@ final class CompanionStore: ObservableObject {
         } catch {
             self.error = "Не удалось перечитать данные мотоцикла: \(error.localizedDescription). Текущие записи сохранены."
         }
+    }
+
+    /// Explicit offline backup. The normal garage file stays in Documents;
+    /// ShareSheet receives a temporary copy removed after the activity ends.
+    func export() {
+        guard readable else { error = "Данные гаража пока не открылись на iPhone."; return }
+        do {
+            try data.validate()
+            let payload = try JSONEncoder().encode(data)
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MotoLink-export-\(UUID().uuidString)", isDirectory: true)
+            let destination = root.appendingPathComponent("MotoLink-garage.json")
+            // Keep the exact Codable shape and date precision of the stored
+            // file, so this snapshot remains usable if import is added later.
+            do {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                try payload.write(to: destination,
+                    options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            } catch {
+                try? FileManager.default.removeItem(at: root)
+                throw error
+            }
+            exportedFiles = SharedFiles(urls: [destination])
+            error = nil
+        } catch { error = "Не удалось сохранить копию гаража: \(error.localizedDescription)" }
     }
 
     func enableReminders() {
@@ -383,6 +409,13 @@ struct CompanionView: View {
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }
             }
+            PixelSection("Копия данных") {
+                Button { store.export() } label: {
+                    Label("Сохранить данные гаража", systemImage: "square.and.arrow.up")
+                }
+                Text("Название байка, одометр, заправки и обслуживание одним файлом. Поездки экспортируются отдельно в истории. Ничего не отправляется автоматически.")
+                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            }
             if let error = store.error { Section { Text(error).foregroundStyle(MotoTheme.accent) } }
         }
         .font(MotoTheme.font(.body))
@@ -394,6 +427,7 @@ struct CompanionView: View {
         .sheet(isPresented: $newFuel) { FuelEditor(store: store, rides: rides, entry: nil) }
         .sheet(isPresented: $newService) { ServiceEditor(store: store, task: nil) }
         .sheet(item: $selectedService) { ServiceEditor(store: store, task: $0) }
+        .sheet(item: $store.exportedFiles) { files in ShareSheet(items: files.urls) }
     }
 }
 
