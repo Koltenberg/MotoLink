@@ -478,6 +478,8 @@ private struct RideTrend: Identifiable {
     let label: String
     let unit: String
     let buckets: [RideTrendBucket]
+    let gapBins: [Bool]
+    let gapCount: Int
     let minimum: Double
     let maximum: Double
 
@@ -495,6 +497,13 @@ private struct RideTrend: Identifiable {
         let binCount = 160
         let span = max(1, (ride.endedAt ?? ride.lastSavedAt).timeIntervalSince(ride.startedAt))
         var series = Array(repeating: Array(repeating: RideTrendBucket(), count: binCount), count: definitions.count)
+        var gapBins = Array(repeating: Array(repeating: false, count: binCount), count: definitions.count)
+        var gapCounts = Array(repeating: 0, count: definitions.count)
+        var lastSeen = Array<Date?>(repeating: nil, count: definitions.count)
+
+        func bin(_ offset: Double) -> Int {
+            min(binCount - 1, Int(offset / span * Double(binCount)))
+        }
 
         for record in records {
             let id: String
@@ -509,7 +518,21 @@ private struct RideTrend: Identifiable {
             guard let metricIndex = indices[id], value.isFinite else { continue }
             let offset = record.timestamp.timeIntervalSince(ride.startedAt)
             guard offset.isFinite, offset >= 0, offset <= span else { continue }
-            let binIndex = min(binCount - 1, Int(offset / span * Double(binCount)))
+            let binIndex = bin(offset)
+            let threshold: TimeInterval = id == "gps_speed" ? 20 : 15
+            if let previous = lastSeen[metricIndex] {
+                let silence = record.timestamp.timeIntervalSince(previous)
+                guard silence >= 0 else { continue }
+                if silence > threshold {
+                    gapCounts[metricIndex] += 1
+                    let first = bin(previous.timeIntervalSince(ride.startedAt))
+                    for index in first...binIndex { gapBins[metricIndex][index] = true }
+                }
+            } else if offset > threshold {
+                gapCounts[metricIndex] += 1
+                for index in 0...binIndex { gapBins[metricIndex][index] = true }
+            }
+            lastSeen[metricIndex] = record.timestamp
             series[metricIndex][binIndex].append(value)
         }
 
@@ -519,7 +542,8 @@ private struct RideTrend: Identifiable {
             guard let minimum = populated.map(\.minimum).min(),
                   let maximum = populated.map(\.maximum).max() else { return nil }
             return Self(id: definition.id, label: definition.label, unit: definition.unit,
-                        buckets: buckets, minimum: minimum, maximum: maximum)
+                        buckets: buckets, gapBins: gapBins[index], gapCount: gapCounts[index],
+                        minimum: minimum, maximum: maximum)
         }
     }
 }
@@ -527,6 +551,7 @@ private struct RideTrend: Identifiable {
 private struct RideTrendBucket {
     private(set) var count = 0
     private(set) var sum = 0.0
+    private(set) var last = 0.0
     private(set) var minimum = Double.infinity
     private(set) var maximum = -Double.infinity
     var mean: Double { count > 0 ? sum / Double(count) : 0 }
@@ -534,6 +559,7 @@ private struct RideTrendBucket {
     mutating func append(_ value: Double) {
         count += 1
         sum += value
+        last = value
         minimum = min(minimum, value)
         maximum = max(maximum, value)
     }
@@ -561,6 +587,10 @@ private struct RideTrendChart: View {
                     .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     .monospacedDigit()
             }
+            if trend.gapCount > 0 {
+                Text("Паузы без замеров: \(trend.gapCount)")
+                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            }
             Canvas { context, size in
                 let bounds = CGRect(origin: .zero, size: size).insetBy(dx: 3, dy: 6)
                 guard bounds.width > 0, bounds.height > 0 else { return }
@@ -571,6 +601,12 @@ private struct RideTrendChart: View {
                     grid.addLine(to: CGPoint(x: bounds.maxX, y: y))
                 }
                 context.stroke(grid, with: .color(MotoTheme.secondary.opacity(0.2)), lineWidth: 1)
+                for index in trend.gapBins.indices where trend.gapBins[index] {
+                    let step = bounds.width / CGFloat(trend.buckets.count)
+                    let stripe = CGRect(x: bounds.minX + CGFloat(index) * step, y: bounds.minY,
+                                        width: step, height: bounds.height)
+                    context.fill(Path(stripe), with: .color(MotoTheme.secondary.opacity(0.12)))
+                }
                 func point(_ index: Int, _ value: Double) -> CGPoint {
                     CGPoint(x: bounds.minX + bounds.width * (CGFloat(index) + 0.5) / CGFloat(trend.buckets.count),
                             y: bounds.maxY - bounds.height * CGFloat((value - lower) / (upper - lower)))
@@ -578,16 +614,23 @@ private struct RideTrendChart: View {
                 var line = Path()
                 var previousWasMeasured = false
                 for (index, bucket) in trend.buckets.enumerated() {
-                    guard bucket.count > 0 else { previousWasMeasured = false; continue }
+                    guard bucket.count > 0 && !trend.gapBins[index] else {
+                        previousWasMeasured = false
+                        continue
+                    }
                     var spread = Path()
                     spread.move(to: point(index, bucket.minimum))
                     spread.addLine(to: point(index, bucket.maximum))
                     context.stroke(spread, with: .color(MotoTheme.accent.opacity(0.45)), lineWidth: 2)
-                    let center = point(index, bucket.mean)
-                    context.fill(Path(ellipseIn: CGRect(x: center.x - 1.5, y: center.y - 1.5,
-                                                        width: 3, height: 3)), with: .color(MotoTheme.accent))
-                    if previousWasMeasured { line.addLine(to: center) }
-                    else { line.move(to: center) }
+                    let center = point(index, trend.id == "gear_position" ? bucket.last : bucket.mean)
+                    context.fill(Path(CGRect(x: center.x - 2, y: center.y - 2,
+                                             width: 4, height: 4)), with: .color(MotoTheme.accent))
+                    // A gear is a category. Mark the last observed gear in each
+                    // bucket instead of inventing fractional intermediate gears.
+                    if trend.id != "gear_position" {
+                        if previousWasMeasured { line.addLine(to: center) }
+                        else { line.move(to: center) }
+                    }
                     previousWasMeasured = true
                 }
                 context.stroke(line, with: .color(MotoTheme.accent),

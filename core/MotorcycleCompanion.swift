@@ -101,7 +101,7 @@ struct RecordedTripDistance: Equatable {
 }
 
 struct OdometerEstimate: Equatable {
-    enum AnchorSource: Equatable { case profile, fuel(UUID) }
+    enum AnchorSource: Equatable { case profile, fuel(UUID), service(UUID) }
 
     let kilometers: Double
     let anchorKilometers: Double
@@ -289,11 +289,24 @@ struct CompanionData: Codable, Identifiable, Equatable {
             return Anchor(kilometers: entry.odometerKm, date: entry.date,
                           source: .fuel(entry.id), snapshot: entry.rideSnapshot)
         }
+        anchors += serviceTasks.compactMap { task in
+            guard (try? task.validate()) != nil, let date = task.lastDoneAt,
+                  date <= now else { return nil }
+            return Anchor(kilometers: task.lastDoneOdometerKm, date: date,
+                          source: .service(task.id), snapshot: nil)
+        }
         guard let anchor = anchors.max(by: {
             $0.date == $1.date ? $0.kilometers < $1.kilometers : $0.date < $1.date
         }) else { return nil }
-        // A newer undated profile value has unknown relation to saved rides.
-        if odometerRecordedAt == nil, let odometerKm, odometerKm > anchor.kilometers { return nil }
+        // Higher undated physical readings cannot be placed before or after
+        // the anchor. Suppress the estimate rather than show less than a
+        // confirmed odometer value or count the same distance twice.
+        if odometerRecordedAt == nil, let odometerKm, odometerKm.isFinite,
+           odometerKm > anchor.kilometers { return nil }
+        if serviceTasks.contains(where: { task in
+            task.lastDoneAt == nil && (try? task.validate()) != nil
+                && task.lastDoneOdometerKm > anchor.kilometers
+        }) { return nil }
 
         var unique: [UUID: RecordedTripDistance] = [:]
         for trip in trips where trip.distanceMeters.isFinite && trip.distanceMeters >= 0

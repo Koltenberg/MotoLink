@@ -282,6 +282,14 @@ struct CompanionView: View {
         store.data.estimatedOdometer(from: recordedTrips(rides))
     }
 
+    private func anchorLabel(_ source: OdometerEstimate.AnchorSource) -> String {
+        switch source {
+        case .profile: return "показание в гараже"
+        case .fuel(_): return "заправка"
+        case .service(_): return "обслуживание"
+        }
+    }
+
     var body: some View {
         List {
             Section {
@@ -305,7 +313,7 @@ struct CompanionView: View {
                         Text(String(format: "≈ %.0f км", estimate.kilometers))
                             .font(MotoTheme.font(.title3)).monospacedDigit()
                         Text(String(format: "Расчёт: %@ %@ · %.0f км + %.1f км по GPS iPhone%@. Пропуски GPS не включены.",
-                                    estimate.anchorSource == .profile ? "показание в гараже" : "заправка",
+                                    anchorLabel(estimate.anchorSource),
                                     estimate.anchorDate.formatted(date: .abbreviated, time: .shortened),
                                     estimate.anchorKilometers, estimate.addedGPSKilometers,
                                     estimate.includesActiveRide ? ", включая текущую запись" : ""))
