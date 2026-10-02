@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var focusedMetric: FocusedRideMetric?
     @State private var showSettings = false
     @State private var showProfile = false
+    @State private var showFuelEditor = false
     @State private var showHelp = false
     @State private var showDiagnostics = false
     @State private var showDiscovery = false
@@ -62,7 +63,8 @@ struct ContentView: View {
             }.tabItem { Label("История", systemImage: "clock.arrow.circlepath") }.tag(2)
         }
         .sheet(isPresented: $showSettings) { settings }
-        .sheet(isPresented: $showProfile) { BikeProfileEditor(store: companion) }
+        .sheet(isPresented: $showProfile) { BikeProfileEditor(store: companion, rides: rides) }
+        .sheet(isPresented: $showFuelEditor) { FuelEditor(store: companion, rides: rides, entry: nil) }
         .sheet(isPresented: $showHelp) { help }
         .sheet(isPresented: $showDiscovery) { discoverySheet }
         .sheet(isPresented: $showConnectionCheck) { connectionCheck }
@@ -308,6 +310,10 @@ struct ContentView: View {
                         Label("GPS временно недоступен", systemImage: "location.slash").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     }
                 }
+                Button { showFuelEditor = true } label: {
+                    Label("Заправка", systemImage: "fuelpump")
+                }.buttonStyle(PixelButtonStyle())
+                .accessibilityHint("Добавить заправку, не завершая запись поездки")
             }
         }
     }
@@ -466,6 +472,7 @@ struct ContentView: View {
                         .init(value: "dark", label: "Тёмная")
                     ])
                     Toggle("Не гасить экран при записи", isOn: $keepScreenOn)
+                    NavigationLink("Цветовые шкалы показателей") { MetricVisualSettingsView() }
                     Text("Светлая тема удобнее на солнце. Экран остаётся включённым только пока Moto Link открыт.")
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }

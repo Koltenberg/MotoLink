@@ -91,6 +91,91 @@ final class MotorcycleCompanionTests: XCTestCase {
         XCTAssertNil(CompanionData(odometerKm: .nan).currentOdometerKm)
     }
 
+    func testEstimateAddsEachTripOnceAfterDatedInstrumentReading() throws {
+        let anchor = epoch.addingTimeInterval(100)
+        let before = RecordedTripDistance(id: UUID(), startedAt: epoch, endedAt: epoch.addingTimeInterval(80), distanceMeters: 12_000)
+        let first = RecordedTripDistance(id: UUID(), startedAt: epoch.addingTimeInterval(120),
+                                         endedAt: epoch.addingTimeInterval(200), distanceMeters: 10_000)
+        let second = RecordedTripDistance(id: UUID(), startedAt: epoch.addingTimeInterval(220),
+                                          endedAt: nil, distanceMeters: 2_500)
+        let data = CompanionData(odometerKm: 25_000, odometerRecordedAt: anchor)
+        let estimate = try XCTUnwrap(data.estimatedOdometer(from: [before, first, first, second],
+                                                            now: epoch.addingTimeInterval(300)))
+        XCTAssertEqual(estimate.anchorSource, .profile)
+        XCTAssertEqual(estimate.anchorKilometers, 25_000)
+        XCTAssertEqual(estimate.addedGPSKilometers, 12.5)
+        XCTAssertEqual(estimate.kilometers, 25_012.5)
+        XCTAssertEqual(estimate.rideCount, 2)
+        XCTAssertTrue(estimate.includesActiveRide)
+        XCTAssertEqual(data.currentOdometerKm, 25_000)
+    }
+
+    func testReadingMidRideCountsOnlyDistanceAfterSnapshotAndCorrectionResetsAnchor() throws {
+        let rideID = UUID()
+        let startedAt = epoch.addingTimeInterval(10)
+        let halfway = epoch.addingTimeInterval(100)
+        let finished = epoch.addingTimeInterval(200)
+        let ride = RecordedTripDistance(id: rideID, startedAt: startedAt, endedAt: finished, distanceMeters: 24_000)
+        var data = CompanionData(odometerKm: 10_000, odometerRecordedAt: halfway,
+            odometerRideSnapshot: RideDistanceSnapshot(rideID: rideID, distanceMeters: 9_000))
+        XCTAssertEqual(data.estimatedOdometer(from: [ride], now: finished)?.kilometers, 10_015)
+
+        data.odometerKm = 10_024
+        data.odometerRecordedAt = finished.addingTimeInterval(1)
+        data.odometerRideSnapshot = nil
+        XCTAssertEqual(data.estimatedOdometer(from: [ride], now: finished.addingTimeInterval(2))?.kilometers, 10_024)
+        let next = RecordedTripDistance(id: UUID(), startedAt: finished.addingTimeInterval(3),
+                                        endedAt: finished.addingTimeInterval(4), distanceMeters: 4_000)
+        XCTAssertEqual(data.estimatedOdometer(from: [ride, next], now: finished.addingTimeInterval(5))?.kilometers, 10_028)
+    }
+
+    func testFuelReadingBecomesAnchorButGPSBasedFuelEntryDoesNot() throws {
+        let ride = RecordedTripDistance(id: UUID(), startedAt: epoch.addingTimeInterval(110),
+                                        endedAt: epoch.addingTimeInterval(300), distanceMeters: 18_000)
+        var data = CompanionData(odometerKm: 20_000, odometerRecordedAt: epoch.addingTimeInterval(100))
+        let estimatedFill = FuelEntry(date: epoch.addingTimeInterval(200), odometerKm: 20_009,
+                                      liters: 8, odometerSource: .gpsEstimate)
+        data.fuelEntries.append(estimatedFill)
+        let before = try XCTUnwrap(data.estimatedOdometer(from: [ride], now: epoch.addingTimeInterval(400)))
+        XCTAssertEqual(before.anchorSource, .profile)
+        XCTAssertEqual(before.kilometers, 20_018)
+        XCTAssertEqual(data.currentOdometerKm, 20_000)
+
+        let actualFill = FuelEntry(date: epoch.addingTimeInterval(400), odometerKm: 20_019,
+                                   liters: 7, rideSnapshot: nil)
+        data.fuelEntries.append(actualFill)
+        let after = try XCTUnwrap(data.estimatedOdometer(from: [ride], now: epoch.addingTimeInterval(500)))
+        XCTAssertEqual(after.anchorSource, .fuel(actualFill.id))
+        XCTAssertEqual(after.kilometers, 20_019)
+        data.fuelEntries.removeAll { $0.id == actualFill.id }
+        XCTAssertEqual(data.estimatedOdometer(from: [ride], now: epoch.addingTimeInterval(500))?.kilometers, 20_018)
+    }
+
+    func testLegacyUndatedManualReadingIsNotSilentlyCombinedWithTrips() throws {
+        let trip = RecordedTripDistance(id: UUID(), startedAt: epoch.addingTimeInterval(200),
+                                        endedAt: epoch.addingTimeInterval(300), distanceMeters: 10_000)
+        XCTAssertNil(CompanionData(odometerKm: 25_000).estimatedOdometer(from: [trip], now: epoch.addingTimeInterval(400)))
+        let olderFuel = fill(0, 24_000, 10)
+        let data = CompanionData(odometerKm: 25_000, fuelEntries: [olderFuel])
+        XCTAssertNil(data.estimatedOdometer(from: [trip], now: epoch.addingTimeInterval(400)))
+        let legacy = try JSONDecoder().decode(FuelEntry.self, from: JSONEncoder().encode(olderFuel))
+        XCTAssertTrue(legacy.hasInstrumentOdometer)
+        XCTAssertNil(legacy.rideSnapshot)
+    }
+
+    func testEstimatedFuelBoundariesMarkConsumptionApproximateAndSnapshotValidation() throws {
+        let start = FuelEntry(date: epoch, odometerKm: 1000, liters: 10)
+        let end = FuelEntry(date: epoch.addingTimeInterval(100), odometerKm: 1300,
+                            liters: 9, odometerSource: .gpsEstimate)
+        let data = CompanionData(fuelEntries: [start, end])
+        XCTAssertTrue(try XCTUnwrap(data.fuelConsumptions.first).usesEstimatedOdometer)
+        XCTAssertEqual(data.currentOdometerKm, 1000)
+        XCTAssertThrowsError(try FuelEntry(odometerKm: 10, rideSnapshot:
+            RideDistanceSnapshot(rideID: UUID(), distanceMeters: .nan)).validate())
+        XCTAssertThrowsError(try FuelEntry(odometerKm: 10, odometerSource: .gpsEstimate,
+            rideSnapshot: RideDistanceSnapshot(rideID: UUID(), distanceMeters: 0)).validate())
+    }
+
     func testServiceUsesWhicheverUserDefinedLimitComesFirstAndCalendarMonths() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -339,6 +424,9 @@ final class MotorcycleCompanionTests: XCTestCase {
         XCTAssertEqual(fuel.liters, 9.25)
         XCTAssertEqual(fuel.cost, 650)
         XCTAssertEqual(fuel.date, epoch)
+        XCTAssertTrue(fuel.hasInstrumentOdometer)
+        XCTAssertNil(fuel.rideSnapshot)
+        XCTAssertNil(restored.odometerRecordedAt)
         let task = try XCTUnwrap(restored.serviceTasks.first)
         XCTAssertNil(task.intervalStartKm)
         XCTAssertEqual(task.dueOdometerKm, 26_000)

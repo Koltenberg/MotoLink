@@ -3,6 +3,7 @@ import Foundation
 enum CompanionValidationError: Error, LocalizedError, Equatable {
     case missingName, invalidDate, invalidOdometer, invalidLiters, invalidCost
     case nonIncreasingOdometer, duplicateIdentifier, invalidInterval, invalidIntervalRange, missingServiceDate
+    case invalidRideSnapshot
 
     var errorDescription: String? {
         switch self {
@@ -16,8 +17,29 @@ enum CompanionValidationError: Error, LocalizedError, Equatable {
         case .invalidInterval: return "Укажите хотя бы один интервал обслуживания больше нуля."
         case .invalidIntervalRange: return "Начало диапазона должно быть больше нуля и меньше его конца."
         case .missingServiceDate: return "Для интервала в месяцах нужна дата последнего обслуживания. Для пробега дата не обязательна."
+        case .invalidRideSnapshot: return "Проверьте точку отсчёта поездки для пробега."
         }
     }
+}
+
+/// Distance already included in a physical odometer reading taken during a ride.
+/// Only the later part of that same ride can be added to an estimate.
+struct RideDistanceSnapshot: Codable, Equatable {
+    var rideID: UUID
+    var distanceMeters: Double
+
+    func validate() throws {
+        guard distanceMeters.isFinite, distanceMeters >= 0 else {
+            throw CompanionValidationError.invalidRideSnapshot
+        }
+    }
+}
+
+/// A fuel entry can use a GPS-based odometer estimate when the instrument
+/// reading was unavailable. A missing value means instrument for legacy data.
+enum FuelOdometerSource: String, Codable {
+    case instrument
+    case gpsEstimate
 }
 
 struct FuelEntry: Codable, Identifiable, Equatable {
@@ -29,15 +51,22 @@ struct FuelEntry: Codable, Identifiable, Equatable {
     var liters: Double?
     var cost: Double?
     var fullTank: Bool
+    var odometerSource: FuelOdometerSource?
+    var rideSnapshot: RideDistanceSnapshot?
+
+    var hasInstrumentOdometer: Bool { odometerSource != .gpsEstimate }
 
     init(id: UUID = UUID(), date: Date = Date(), odometerKm: Double,
-         liters: Double? = nil, cost: Double? = nil, fullTank: Bool = true) {
+         liters: Double? = nil, cost: Double? = nil, fullTank: Bool = true,
+         odometerSource: FuelOdometerSource? = nil, rideSnapshot: RideDistanceSnapshot? = nil) {
         self.id = id
         self.date = date
         self.odometerKm = odometerKm
         self.liters = liters
         self.cost = cost
         self.fullTank = fullTank
+        self.odometerSource = odometerSource
+        self.rideSnapshot = rideSnapshot
     }
 
     func validate() throws {
@@ -47,6 +76,8 @@ struct FuelEntry: Codable, Identifiable, Equatable {
             guard liters.isFinite, liters > 0 else { throw CompanionValidationError.invalidLiters }
         } else if !fullTank { throw CompanionValidationError.invalidLiters }
         if let cost, !cost.isFinite || cost < 0 { throw CompanionValidationError.invalidCost }
+        if let rideSnapshot { try rideSnapshot.validate() }
+        if !hasInstrumentOdometer && rideSnapshot != nil { throw CompanionValidationError.invalidRideSnapshot }
     }
 }
 
@@ -55,8 +86,31 @@ struct FuelConsumption: Identifiable, Equatable {
     let toEntryID: UUID
     let distanceKm: Double
     let liters: Double
+    let usesEstimatedOdometer: Bool
     var id: UUID { toEntryID }
     var litersPer100Km: Double { liters / distanceKm * 100 }
+}
+
+/// A completed or currently recording ride. Distance is accepted GPS distance;
+/// missing GPS sections are unknown and must not be manufactured here.
+struct RecordedTripDistance: Equatable {
+    var id: UUID
+    var startedAt: Date
+    var endedAt: Date?
+    var distanceMeters: Double
+}
+
+struct OdometerEstimate: Equatable {
+    enum AnchorSource: Equatable { case profile, fuel(UUID) }
+
+    let kilometers: Double
+    let anchorKilometers: Double
+    let anchorDate: Date
+    let anchorSource: AnchorSource
+    let addedGPSKilometers: Double
+    let rideCount: Int
+    let includesActiveRide: Bool
+    let skippedOverlappingRide: Bool
 }
 
 struct ServiceTask: Codable, Identifiable, Equatable {
@@ -178,19 +232,26 @@ struct ServiceTask: Codable, Identifiable, Equatable {
     }
 }
 
-/// Manual records stay separate from BLE telemetry and GPS distance estimates.
+/// Instrument readings stay separate from BLE telemetry and GPS estimates.
 struct CompanionData: Codable, Identifiable, Equatable {
     var id: UUID
     var bikeName: String
     var odometerKm: Double?
+    /// Nil for legacy undated readings: their historical GPS distance cannot
+    /// be added safely until the rider confirms a new instrument reading.
+    var odometerRecordedAt: Date?
+    var odometerRideSnapshot: RideDistanceSnapshot?
     var fuelEntries: [FuelEntry]
     var serviceTasks: [ServiceTask]
 
     init(id: UUID = UUID(), bikeName: String = "Мой мотоцикл", odometerKm: Double? = nil,
+         odometerRecordedAt: Date? = nil, odometerRideSnapshot: RideDistanceSnapshot? = nil,
          fuelEntries: [FuelEntry] = [], serviceTasks: [ServiceTask] = []) {
         self.id = id
         self.bikeName = bikeName
         self.odometerKm = odometerKm
+        self.odometerRecordedAt = odometerRecordedAt
+        self.odometerRideSnapshot = odometerRideSnapshot
         self.fuelEntries = fuelEntries
         self.serviceTasks = serviceTasks
     }
@@ -199,9 +260,75 @@ struct CompanionData: Codable, Identifiable, Equatable {
     var currentOdometerKm: Double? {
         var readings: [Double] = []
         if let odometerKm, odometerKm.isFinite, odometerKm >= 0 { readings.append(odometerKm) }
-        readings += fuelEntries.filter { (try? $0.validate()) != nil }.map(\.odometerKm)
+        readings += fuelEntries.filter { (try? $0.validate()) != nil && $0.hasInstrumentOdometer }.map(\.odometerKm)
         readings += serviceTasks.filter { (try? $0.validate()) != nil }.map(\.lastDoneOdometerKm)
         return readings.max()
+    }
+
+    /// Adds each saved ride at most once after the latest dated instrument
+    /// reading. If the reading happened mid-ride, only GPS distance after the
+    /// captured distance is counted. Undated legacy profile readings remain
+    /// visible but cannot be used as a chronological anchor.
+    func estimatedOdometer(from trips: [RecordedTripDistance], now: Date = Date()) -> OdometerEstimate? {
+        struct Anchor {
+            let kilometers: Double
+            let date: Date
+            let source: OdometerEstimate.AnchorSource
+            let snapshot: RideDistanceSnapshot?
+        }
+        var anchors: [Anchor] = []
+        if let odometerKm, odometerKm.isFinite, odometerKm >= 0,
+           let odometerRecordedAt, odometerRecordedAt.timeIntervalSince1970.isFinite,
+           odometerRecordedAt <= now {
+            anchors.append(Anchor(kilometers: odometerKm, date: odometerRecordedAt,
+                                  source: .profile, snapshot: odometerRideSnapshot))
+        }
+        anchors += fuelEntries.compactMap { entry in
+            guard entry.hasInstrumentOdometer, (try? entry.validate()) != nil,
+                  entry.date <= now else { return nil }
+            return Anchor(kilometers: entry.odometerKm, date: entry.date,
+                          source: .fuel(entry.id), snapshot: entry.rideSnapshot)
+        }
+        guard let anchor = anchors.max(by: {
+            $0.date == $1.date ? $0.kilometers < $1.kilometers : $0.date < $1.date
+        }) else { return nil }
+        // A newer undated profile value has unknown relation to saved rides.
+        if odometerRecordedAt == nil, let odometerKm, odometerKm > anchor.kilometers { return nil }
+
+        var unique: [UUID: RecordedTripDistance] = [:]
+        for trip in trips where trip.distanceMeters.isFinite && trip.distanceMeters >= 0
+            && trip.startedAt.timeIntervalSince1970.isFinite && trip.startedAt <= now
+            && (trip.endedAt.map { $0.timeIntervalSince1970.isFinite && $0 >= trip.startedAt } ?? true) {
+            if let previous = unique[trip.id], previous.distanceMeters >= trip.distanceMeters { continue }
+            unique[trip.id] = trip
+        }
+        var distanceMeters = 0.0
+        var rideCount = 0
+        var includesActiveRide = false
+        var skippedOverlappingRide = false
+        for trip in unique.values {
+            let additional: Double
+            if trip.id == anchor.snapshot?.rideID, let snapshot = anchor.snapshot {
+                additional = max(0, trip.distanceMeters - snapshot.distanceMeters)
+            } else if trip.startedAt >= anchor.date {
+                additional = trip.distanceMeters
+            } else {
+                if trip.endedAt.map({ $0 > anchor.date }) ?? true { skippedOverlappingRide = true }
+                continue
+            }
+            if additional > 0 {
+                distanceMeters += additional
+                rideCount += 1
+                includesActiveRide = includesActiveRide || trip.endedAt == nil
+            }
+        }
+        let kilometers = anchor.kilometers + distanceMeters / 1000
+        guard distanceMeters.isFinite, kilometers.isFinite else { return nil }
+        return OdometerEstimate(kilometers: kilometers, anchorKilometers: anchor.kilometers,
+                                anchorDate: anchor.date, anchorSource: anchor.source,
+                                addedGPSKilometers: distanceMeters / 1000, rideCount: rideCount,
+                                includesActiveRide: includesActiveRide,
+                                skippedOverlappingRide: skippedOverlappingRide)
     }
 
     /// Input may be entered retrospectively. Equal timestamps are ordered by odometer.
@@ -230,6 +357,16 @@ struct CompanionData: Codable, Identifiable, Equatable {
             throw CompanionValidationError.missingName
         }
         if let odometerKm, !odometerKm.isFinite || odometerKm < 0 { throw CompanionValidationError.invalidOdometer }
+        if let odometerRecordedAt, !odometerRecordedAt.timeIntervalSince1970.isFinite {
+            throw CompanionValidationError.invalidDate
+        }
+        if let odometerRideSnapshot { try odometerRideSnapshot.validate() }
+        if odometerKm == nil && (odometerRecordedAt != nil || odometerRideSnapshot != nil) {
+            throw CompanionValidationError.invalidRideSnapshot
+        }
+        if odometerRideSnapshot != nil && odometerRecordedAt == nil {
+            throw CompanionValidationError.invalidRideSnapshot
+        }
         try validateFuelEntries()
         var ids = Set<UUID>()
         for task in serviceTasks {
@@ -283,7 +420,8 @@ struct CompanionData: Codable, Identifiable, Equatable {
                 let rate = accumulatedLiters / distance * 100
                 guard distance > 0, distance.isFinite, rate.isFinite else { return [] }
                 result.append(FuelConsumption(fromEntryID: start.id, toEntryID: entry.id,
-                                              distanceKm: distance, liters: accumulatedLiters))
+                                              distanceKm: distance, liters: accumulatedLiters,
+                                              usesEstimatedOdometer: !start.hasInstrumentOdometer || !entry.hasInstrumentOdometer))
                 baseline = entry
                 accumulatedLiters = 0
             }

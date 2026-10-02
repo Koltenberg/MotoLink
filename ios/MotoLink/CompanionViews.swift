@@ -127,6 +127,20 @@ private func fuelAmountText(_ entry: FuelEntry) -> String {
     entry.liters.map { String(format: "%.1f л", $0) } ?? "объём не указан"
 }
 
+private func recordedTrips(_ rides: RideRecorder?) -> [RecordedTripDistance] {
+    guard let rides else { return [] }
+    let summaries = rides.history + (rides.active.map { [$0] } ?? [])
+    return summaries.map {
+        RecordedTripDistance(id: $0.id, startedAt: $0.startedAt, endedAt: $0.endedAt,
+                             distanceMeters: $0.distanceMeters)
+    }
+}
+
+private func currentRideSnapshot(_ rides: RideRecorder?) -> RideDistanceSnapshot? {
+    guard let active = rides?.active else { return nil }
+    return RideDistanceSnapshot(rideID: active.id, distanceMeters: active.distanceMeters)
+}
+
 private func serviceStatusColor(_ task: ServiceTask, odometerKm: Double?) -> Color {
     if task.isDue(odometerKm: odometerKm) { return .red }
     if task.isDueSoon(odometerKm: odometerKm) {
@@ -245,7 +259,9 @@ struct CompanionHomeCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Label(store.data.bikeName, systemImage: "wrench.and.screwdriver")
                     .font(MotoTheme.font(.headline))
-                Text(store.data.currentOdometerKm.map { String(format: "%.0f км", $0) }
+                Text(store.data.estimatedOdometer(from: recordedTrips(rides)).map {
+                    String(format: "≈ %.0f км · оценка GPS", $0.kilometers)
+                } ?? store.data.currentOdometerKm.map { String(format: "%.0f км с приборки", $0) }
                      ?? "Добавь пробег с приборки")
                     .font(MotoTheme.font(.title3))
                 Text("Заправки и обслуживание").font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
@@ -262,6 +278,10 @@ struct CompanionView: View {
     @State private var newService = false
     @State private var selectedService: ServiceTask?
 
+    private var odometerEstimate: OdometerEstimate? {
+        store.data.estimatedOdometer(from: recordedTrips(rides))
+    }
+
     var body: some View {
         List {
             Section {
@@ -274,10 +294,30 @@ struct CompanionView: View {
                             .accessibilityLabel("Изменить название и пробег")
                     }
                     BikeArtworkView()
-                    Text(store.data.currentOdometerKm.map { String(format: "%.0f км", $0) } ?? "Пробег пока не указан")
-                        .font(MotoTheme.font(.title2))
-                    Text("Последний известный пробег с приборки")
-                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    if let actual = odometerEstimate?.anchorKilometers ?? store.data.currentOdometerKm {
+                        Text(String(format: "%.0f км", actual)).font(MotoTheme.font(.title2))
+                        Text("Последнее подтверждённое показание с приборки")
+                            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    } else {
+                        Text("Пробег с приборки пока не указан").font(MotoTheme.font(.title2))
+                    }
+                    if let estimate = odometerEstimate {
+                        Text(String(format: "≈ %.0f км", estimate.kilometers))
+                            .font(MotoTheme.font(.title3)).monospacedDigit()
+                        Text(String(format: "Расчёт: %@ %@ · %.0f км + %.1f км по GPS iPhone%@. Пропуски GPS не включены.",
+                                    estimate.anchorSource == .profile ? "показание в гараже" : "заправка",
+                                    estimate.anchorDate.formatted(date: .abbreviated, time: .shortened),
+                                    estimate.anchorKilometers, estimate.addedGPSKilometers,
+                                    estimate.includesActiveRide ? ", включая текущую запись" : ""))
+                            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                        if estimate.skippedOverlappingRide {
+                            Text("Часть поездки до точки отсчёта неизвестна: оценка может быть занижена.")
+                                .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                        }
+                    } else if store.data.currentOdometerKm != nil {
+                        Text("Для расчётного пробега подтверди текущее показание с приборки. Старые записи без даты нельзя безопасно сложить с поездками.")
+                            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    }
                     Button("Обновить пробег") { editingBike = true }
                 }.padding(.vertical, 8)
             }
@@ -312,16 +352,20 @@ struct CompanionView: View {
             }
             PixelSection("Заправки") {
                 Button { newFuel = true } label: { Label("Добавить заправку", systemImage: "fuelpump") }
+                if rides.active != nil {
+                    Text("Заправку можно сохранить сейчас: запись поездки продолжится после остановки и нового подключения байка.")
+                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                }
                 if let consumption = store.data.latestFullTankConsumption {
                     LabeledContent("Расход между полными баками",
-                                   value: String(format: "%.2f л/100 км", consumption.litersPer100Km))
+                                   value: String(format: "%@%.2f л/100 км", consumption.usesEstimatedOdometer ? "≈ " : "", consumption.litersPer100Km))
                         .monospacedDigit()
                 }
                 if let fuel = store.data.fuelEntries.max(by: { $0.date < $1.date }) {
                     Text("Последняя — " + fuel.date.formatted(date: .abbreviated, time: .omitted)
                          + " · " + fuelAmountText(fuel))
                         .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
-                    NavigationLink("Все заправки") { FuelHistoryView(store: store) }
+                    NavigationLink("Все заправки") { FuelHistoryView(store: store, rides: rides) }
                 } else {
                     Text("Полный бак можно сохранить без литров. Для расчёта расхода записывай объём каждой заправки между полными баками.")
                         .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
@@ -338,8 +382,8 @@ struct CompanionView: View {
         .navigationTitle("Гараж")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await store.refreshFromDisk() }
-        .sheet(isPresented: $editingBike) { BikeProfileEditor(store: store) }
-        .sheet(isPresented: $newFuel) { FuelEditor(store: store, entry: nil) }
+        .sheet(isPresented: $editingBike) { BikeProfileEditor(store: store, rides: rides) }
+        .sheet(isPresented: $newFuel) { FuelEditor(store: store, rides: rides, entry: nil) }
         .sheet(isPresented: $newService) { ServiceEditor(store: store, task: nil) }
         .sheet(item: $selectedService) { ServiceEditor(store: store, task: $0) }
     }
@@ -365,9 +409,11 @@ private struct CompanionNumberField: View {
 
 struct BikeProfileEditor: View {
     @ObservedObject var store: CompanionStore
+    @ObservedObject var rides: RideRecorder
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var odometer = ""
+    @State private var confirmReading = false
     @State private var prepared = false
     var body: some View {
         NavigationStack {
@@ -379,8 +425,14 @@ struct BikeProfileEditor: View {
                 }
                 PixelSection("Пробег с приборки") {
                     CompanionNumberField(title: "Одометр, км", example: "Например, 26 500", value: $odometer)
-                    Text("Можно обновить в любой момент. Расстояние записанных поездок к одометру не прибавляется.")
+                    Text("Укажи фактическое показание. От него отдельно считаем примерный пробег по следующим записанным поездкам.")
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    if !odometer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button(confirmReading ? "Показание будет подтверждено при сохранении" : "Подтвердить это показание сейчас") {
+                            confirmReading = true
+                        }
+                        .font(MotoTheme.font(.subheadline))
+                    }
                     if let recorded = CompanionData(fuelEntries: store.data.fuelEntries,
                                                     serviceTasks: store.data.serviceTasks).currentOdometerKm {
                         Text(String(format: "В записях уже есть %.0f км. Если там ошибка, исправь соответствующую заправку или обслуживание.", recorded))
@@ -395,15 +447,22 @@ struct BikeProfileEditor: View {
                         guard odometer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || decimal(odometer) != nil else {
                             store.error = "Укажи пробег числом."; return
                         }
+                        let reading = decimal(odometer)
+                        let snapshot = currentRideSnapshot(rides)
+                        let recordedAt = Date()
                         if store.save({
                             $0.bikeName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                            $0.odometerKm = decimal(odometer)
+                            if $0.odometerKm != reading || confirmReading {
+                                $0.odometerRecordedAt = reading == nil ? nil : recordedAt
+                                $0.odometerRideSnapshot = reading == nil ? nil : snapshot
+                            }
+                            $0.odometerKm = reading
                         }) { dismiss() }
                     }.font(MotoTheme.font(.body)) }
                 }
                 .onAppear {
                     guard !prepared else { return }; prepared = true
-                    name = store.data.bikeName; odometer = numberText(store.data.odometerKm ?? store.data.currentOdometerKm)
+                    name = store.data.bikeName; odometer = numberText(store.data.odometerKm)
                 }
         }
     }
@@ -411,6 +470,7 @@ struct BikeProfileEditor: View {
 
 private struct FuelHistoryView: View {
     @ObservedObject var store: CompanionStore
+    @ObservedObject var rides: RideRecorder
     @State private var selected: FuelEntry?
     @State private var adding = false
     var body: some View {
@@ -420,7 +480,7 @@ private struct FuelHistoryView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(fuel.date.formatted(date: .abbreviated, time: .shortened))
                             .font(MotoTheme.font(.body))
-                        Text(fuelAmountText(fuel) + String(format: " · %.0f км", fuel.odometerKm)
+                        Text(fuelAmountText(fuel) + String(format: " · %@%.0f км", fuel.hasInstrumentOdometer ? "" : "≈ ", fuel.odometerKm)
                              + (fuel.fullTank ? " · полный бак" : " · долив"))
                             .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                         if let cost = fuel.cost { Text(String(format: "%.0f ₽", cost)).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary) }
@@ -431,27 +491,49 @@ private struct FuelHistoryView: View {
         }.font(MotoTheme.font(.body)).navigationTitle("Заправки").navigationBarTitleDisplayMode(.inline)
             .scrollContentBackground(.hidden).background(MotoTheme.background)
             .toolbar { ToolbarItem(placement: .primaryAction) { Button("Добавить") { adding = true }.font(MotoTheme.font(.body)) } }
-            .sheet(item: $selected) { FuelEditor(store: store, entry: $0) }
-            .sheet(isPresented: $adding) { FuelEditor(store: store, entry: nil) }
+            .sheet(item: $selected) { FuelEditor(store: store, rides: rides, entry: $0) }
+            .sheet(isPresented: $adding) { FuelEditor(store: store, rides: rides, entry: nil) }
     }
 }
 
 struct FuelEditor: View {
     @ObservedObject var store: CompanionStore
+    @ObservedObject var rides: RideRecorder
     let entry: FuelEntry?
     @Environment(\.dismiss) private var dismiss
     @State private var date = Date()
+    @State private var dateEdited = false
     @State private var odometer = ""
     @State private var liters = ""
     @State private var cost = ""
     @State private var full = true
     @State private var delete = false
     @State private var prepared = false
+    private var odometerEstimate: OdometerEstimate? {
+        store.data.estimatedOdometer(from: recordedTrips(rides))
+    }
     var body: some View {
         NavigationStack {
             Form {
-                PixelDateField(title: "Дата", selection: $date, includesTime: true)
-                CompanionNumberField(title: "Одометр, км", value: $odometer)
+                PixelDateField(title: "Дата", selection: Binding(get: { date }, set: {
+                    date = $0
+                    dateEdited = true
+                }), includesTime: true)
+                CompanionNumberField(title: "Одометр с приборки, км", example: "Если не знаешь, оставь пустым", value: $odometer)
+                if let entry, !entry.hasInstrumentOdometer {
+                    Text(String(format: "Пустое поле: оставим сохранённую оценку ≈ %.0f км. Чтобы уточнить, введи пробег с приборки.", entry.odometerKm))
+                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                } else if let estimate = odometerEstimate {
+                    Text(String(format: "Пустое поле: сохраним ≈ %.0f км по GPS и отметим как оценку. Проверь и исправь позже по приборке.", estimate.kilometers))
+                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                } else {
+                    Text("Для заправки нужен пробег с приборки. После нового показания приложение сможет показывать примерный общий пробег по записанным поездкам.")
+                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                }
+                if rides.active != nil {
+                    Text("Сохранение заправки не завершит запись поездки.")
+                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                }
                 Toggle("До полного бака", isOn: $full)
                 CompanionNumberField(title: full ? "Залито, л · необязательно" : "Залито, л", value: $liters)
                 CompanionNumberField(title: "Стоимость, ₽ · необязательно", value: $cost)
@@ -465,13 +547,38 @@ struct FuelEditor: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.font(MotoTheme.font(.body)) }
                     ToolbarItem(placement: .confirmationAction) { Button("Сохранить") {
-                        guard let km = decimal(odometer),
+                        let savedAt = Date()
+                        let fuelDate = entry == nil && !dateEdited ? savedAt : date
+                        let enteredKm = decimal(odometer)
+                        let blankOdometer = odometer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        let estimatedKm = entry?.odometerSource == .gpsEstimate ? entry?.odometerKm : odometerEstimate?.kilometers
+                        if blankOdometer, let entry, !entry.hasInstrumentOdometer,
+                           abs(fuelDate.timeIntervalSince(entry.date)) > 60 {
+                            store.error = "Для изменения даты оценочной заправки укажи пробег с приборки. Старая оценка GPS относится к прежнему времени."
+                            return
+                        }
+                        if blankOdometer && entry?.odometerSource != .gpsEstimate && abs(savedAt.timeIntervalSince(fuelDate)) > 300 {
+                            store.error = "Для заправки в другое время укажи пробег с приборки: текущая оценка GPS относится к настоящему моменту."
+                            return
+                        }
+                        guard let km = enteredKm ?? (blankOdometer ? estimatedKm : nil),
                               (full && liters.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || decimal(liters) != nil,
                               cost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || decimal(cost) != nil else {
-                            store.error = "Проверь пробег, литры и стоимость: нужны числа."; return
+                            store.error = "Проверь пробег, литры и стоимость. Если нет показания с приборки, сначала обнови пробег для оценки GPS."; return
                         }
-                        let fuel = FuelEntry(id: entry?.id ?? UUID(), date: date, odometerKm: km,
-                                             liters: decimal(liters), cost: decimal(cost), fullTank: full)
+                        let source: FuelOdometerSource = blankOdometer ? .gpsEstimate : .instrument
+                        let snapshot: RideDistanceSnapshot?
+                        if source == .instrument {
+                            if let entry, entry.hasInstrumentOdometer, entry.odometerKm == km,
+                               abs(fuelDate.timeIntervalSince(entry.date)) <= 60 {
+                                snapshot = entry.rideSnapshot
+                            } else if abs(savedAt.timeIntervalSince(fuelDate)) < 300 {
+                                snapshot = currentRideSnapshot(rides)
+                            } else { snapshot = nil }
+                        } else { snapshot = nil }
+                        let fuel = FuelEntry(id: entry?.id ?? UUID(), date: fuelDate, odometerKm: km,
+                                             liters: decimal(liters), cost: decimal(cost), fullTank: full,
+                                             odometerSource: source, rideSnapshot: snapshot)
                         if store.save({ data in
                             data.fuelEntries.removeAll { $0.id == fuel.id }; data.fuelEntries.append(fuel)
                         }) { dismiss() }
@@ -479,7 +586,8 @@ struct FuelEditor: View {
                 }
                 .onAppear {
                     guard !prepared else { return }; prepared = true
-                    date = entry?.date ?? Date(); odometer = numberText(entry?.odometerKm ?? store.data.currentOdometerKm)
+                    date = entry?.date ?? Date()
+                    odometer = entry?.hasInstrumentOdometer == true ? numberText(entry?.odometerKm) : ""
                     liters = numberText(entry?.liters); cost = numberText(entry?.cost); full = entry?.fullTank ?? true
                 }
                 .pixelConfirmationDialog("Удалить эту заправку? Расход будет пересчитан.", isPresented: $delete, titleVisibility: .visible) {

@@ -174,18 +174,26 @@ struct FocusedRideMetricView: View {
     let onDismiss: () -> Void
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("MotoLink.keepScreenOn") private var keepScreenOn = false
+    @AppStorage("MotoLink.visual.rpmRedline") private var rpmRedline = 11_000
+    @AppStorage("MotoLink.visual.speedWarm") private var speedWarm = 130
+    @AppStorage("MotoLink.visual.speedHot") private var speedHot = 190
 
     private struct Reading {
         let title: String
         let value: String
+        let number: Double?
         let unit: String
         let status: String
     }
 
     var body: some View {
         GeometryReader { geometry in
-            TimelineView(.periodic(from: .now, by: 0.5)) { context in
+            TimelineView(.periodic(from: .now, by: 1)) { context in
                 let reading = reading(at: context.date)
+                let scale = reading.number.flatMap {
+                    FocusMetricScale.make(id: metric.id, value: $0,
+                        rpmRedline: rpmRedline, speedWarm: speedWarm, speedHot: speedHot)
+                }
                 let short = geometry.size.height < 420
                 Button(action: onDismiss) {
                     VStack(spacing: 0) {
@@ -200,15 +208,19 @@ struct FocusedRideMetricView: View {
                         Spacer(minLength: 8)
                         Text(reading.value)
                             .font(MotoTheme.numberFont(size: numberSize(in: geometry.size, value: reading.value)).monospacedDigit())
-                            .foregroundStyle(reading.value == "—" ? MotoTheme.secondary : Color.primary)
+                            .foregroundStyle(scale?.currentColor ?? (reading.number == nil ? MotoTheme.secondary : Color.primary))
                             .lineLimit(1).minimumScaleFactor(0.24)
                             .frame(maxWidth: .infinity)
                         if !reading.unit.isEmpty {
                             Text(reading.unit).font(MotoTheme.font(short ? .subheadline : .title3))
                                 .foregroundStyle(MotoTheme.secondary)
                         }
+                        if let scale {
+                            FocusMetricScaleView(scale: scale, short: short)
+                                .padding(.top, short ? 8 : 18)
+                        }
                         Text(reading.status).font(MotoTheme.font(short ? .caption : .subheadline))
-                            .foregroundStyle(MotoTheme.secondary)
+                            .foregroundStyle(reading.number == nil ? Color.primary : MotoTheme.secondary)
                             .multilineTextAlignment(.center)
                             .lineLimit(2).minimumScaleFactor(0.7)
                             .padding(.top, short ? 6 : 12)
@@ -225,7 +237,7 @@ struct FocusedRideMetricView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(reading.title)
                 .accessibilityValue(reading.value == "—" ? reading.status :
-                    "\(reading.value) \(reading.unit). \(reading.status)")
+                    "\(reading.value) \(reading.unit). \(scale?.zone ?? ""). \(reading.status)")
                 .accessibilityHint("Дважды коснитесь, чтобы вернуться к общему виду")
             }
         }
@@ -243,13 +255,13 @@ struct FocusedRideMetricView: View {
 
     private func numberSize(in size: CGSize, value: String) -> CGFloat {
         let widthFactor: CGFloat = value.count <= 2 ? 0.70 : value.count <= 3 ? 0.48 : 0.33
-        return min(min(size.width * widthFactor, size.height * 0.54), 260)
+        return min(min(size.width * widthFactor, size.height * 0.42), 240)
     }
 
     private func reading(at now: Date) -> Reading {
         if metric.id == "gps_speed" {
             #if targetEnvironment(simulator)
-            if preview { return Reading(title: "Скорость GPS", value: "64", unit: "км/ч", status: "Данные поступают") }
+            if preview { return Reading(title: "Скорость GPS", value: "64", number: 64, unit: "км/ч", status: "Данные поступают") }
             #endif
             let speed: Double? = rides.lastLocationAt.flatMap { timestamp in
                 let age = now.timeIntervalSince(timestamp)
@@ -257,7 +269,7 @@ struct FocusedRideMetricView: View {
                       metersPerSecond.isFinite, metersPerSecond >= 0 else { return nil }
                 return metersPerSecond * 3.6
             }
-            return Reading(title: "Скорость GPS", value: speed.map { String(format: "%.0f", $0) } ?? "—",
+            return Reading(title: "Скорость GPS", value: speed.map { String(format: "%.0f", $0) } ?? "—", number: speed,
                            unit: "км/ч", status: speed == nil ? "Нет свежих данных GPS" : "Данные поступают")
         }
 
@@ -299,6 +311,164 @@ struct FocusedRideMetricView: View {
         case .notDecoded: status = "Формат не расшифрован"
         case .unavailable: status = "Недоступно у этого байка"
         }
-        return Reading(title: title, value: value, unit: field.unit, status: status)
+        return Reading(title: title, value: value, number: row.value, unit: field.unit, status: status)
+    }
+}
+
+/// These colors are a rider-customizable visual aid, not bike diagnostics or
+/// traffic-law limits. A missing or stale reading never receives a color zone.
+private struct FocusMetricScale {
+    enum Tone {
+        case cold, calm, rising, warm, hot
+
+        var color: Color {
+            Color(UIColor { trait in
+                let dark = trait.userInterfaceStyle == .dark
+                switch self {
+                case .cold: return dark ? UIColor(red: 0.43, green: 0.76, blue: 1, alpha: 1)
+                                   : UIColor(red: 0.06, green: 0.37, blue: 0.75, alpha: 1)
+                case .calm: return dark ? UIColor(red: 0.43, green: 0.83, blue: 0.56, alpha: 1)
+                                   : UIColor(red: 0.06, green: 0.46, blue: 0.19, alpha: 1)
+                case .rising: return dark ? UIColor(red: 1, green: 0.85, blue: 0.35, alpha: 1)
+                                     : UIColor(red: 0.56, green: 0.38, blue: 0.02, alpha: 1)
+                case .warm: return dark ? UIColor(red: 1, green: 0.63, blue: 0.31, alpha: 1)
+                                   : UIColor(red: 0.68, green: 0.28, blue: 0.03, alpha: 1)
+                case .hot: return dark ? UIColor(red: 1, green: 0.40, blue: 0.43, alpha: 1)
+                                  : UIColor(red: 0.69, green: 0.06, blue: 0.13, alpha: 1)
+                }
+            })
+        }
+    }
+
+    let value: Double
+    let minimum: Double
+    let maximum: Double
+    let stops: [(upper: Double, tone: Tone)]
+    let zone: String
+    let note: String
+    let leftLabel: String
+    let rightLabel: String
+
+    var currentColor: Color { tone(at: value).color }
+    var progress: Double { min(1, max(0, (value - minimum) / (maximum - minimum))) }
+
+    func tone(at value: Double) -> Tone {
+        stops.first { value < $0.upper }?.tone ?? .hot
+    }
+
+    static func make(id: String, value: Double, rpmRedline: Int,
+                     speedWarm: Int, speedHot: Int) -> Self? {
+        guard value.isFinite else { return nil }
+        switch id {
+        case "engine_speed":
+            let redline = Double(max(6_000, min(16_000, rpmRedline)))
+            let stops: [(Double, Tone)] = [(redline * 0.60, .calm), (redline * 0.80, .rising),
+                                           (redline, .warm), (.infinity, .hot)]
+            let zone = value >= redline ? "Выше выбранной красной зоны"
+                : value >= redline * 0.80 ? "Высокие обороты"
+                : value >= redline * 0.60 ? "Обороты растут" : "Низкие обороты"
+            return Self(value: value, minimum: 0, maximum: redline * 1.08, stops: stops,
+                        zone: zone, note: "Порог настрой по приборке", leftLabel: "0",
+                        rightLabel: String(format: "%.0f об/мин", redline))
+        case "wheel_speed", "gps_speed":
+            let first = Double(max(30, min(250, speedWarm)))
+            let second = Double(max(Int(first) + 10, min(300, speedHot)))
+            let zone = value >= second ? "Выше второго порога"
+                : value >= first ? "Между порогами" : "До первого порога"
+            return Self(value: value, minimum: 0, maximum: second + 20,
+                        stops: [(first, .calm), (second, .warm), (.infinity, .hot)],
+                        zone: zone, note: "Выбранные пороги цвета",
+                        leftLabel: "0", rightLabel: "\(Int(first)) / \(Int(second)) км/ч")
+        case "engine_water_temperature":
+            let zone = value >= 110 ? "Очень высокая зона охлаждения"
+                : value >= 100 ? "Высокая зона охлаждения"
+                : value >= 60 ? "Средняя зона охлаждения" : "Низкая зона охлаждения"
+            return Self(value: value, minimum: 0, maximum: 120,
+                        stops: [(60, .cold), (100, .calm), (110, .warm), (.infinity, .hot)],
+                        zone: zone, note: "Условная шкала охлаждения",
+                        leftLabel: "0 °C", rightLabel: "120 °C")
+        case "inlet_air_temperature":
+            let zone = value >= 40 ? "Очень тёплый воздух"
+                : value >= 30 ? "Тёплый воздух"
+                : value >= 0 ? "Умеренная температура" : "Холодный воздух"
+            return Self(value: value, minimum: -20, maximum: 60,
+                        stops: [(0, .cold), (30, .calm), (40, .warm), (.infinity, .hot)],
+                        zone: zone, note: "Воздух на впуске · не погода",
+                        leftLabel: "−20 °C", rightLabel: "60 °C")
+        default: return nil
+        }
+    }
+}
+
+private struct FocusMetricScaleView: View {
+    let scale: FocusMetricScale
+    let short: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: short ? 5 : 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(scale.zone).foregroundStyle(scale.currentColor)
+                Spacer(minLength: 4)
+                Text(scale.note).foregroundStyle(MotoTheme.secondary)
+            }
+            .font(MotoTheme.font(.caption))
+            .lineLimit(1).minimumScaleFactor(0.7)
+            HStack(spacing: 3) {
+                ForEach(0..<16, id: \.self) { index in
+                    let sample = scale.minimum + (scale.maximum - scale.minimum) * Double(index + 1) / 16
+                    Rectangle()
+                        .fill(Double(index) / 16 < scale.progress ? scale.tone(at: sample).color : MotoTheme.border)
+                        .frame(maxWidth: .infinity, minHeight: short ? 8 : 12, maxHeight: short ? 8 : 12)
+                }
+            }.accessibilityHidden(true)
+            HStack {
+                Text(scale.leftLabel)
+                Spacer(minLength: 4)
+                Text(scale.rightLabel)
+            }
+            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            .lineLimit(1).minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: 600)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Цветовая шкала: \(scale.zone). \(scale.note)")
+    }
+}
+
+struct MetricVisualSettingsView: View {
+    @AppStorage("MotoLink.visual.rpmRedline") private var rpmRedline = 11_000
+    @AppStorage("MotoLink.visual.speedWarm") private var speedWarm = 130
+    @AppStorage("MotoLink.visual.speedHot") private var speedHot = 190
+
+    var body: some View {
+        Form {
+            PixelSection("Обороты") {
+                Stepper(value: $rpmRedline, in: 6_000...16_000, step: 500) {
+                    LabeledContent("Красная зона", value: "\(rpmRedline) об/мин")
+                }
+                Text("Укажи начало красной зоны по приборной панели своего мотоцикла. Исходные 11 000 об/мин — только ориентир для цветной шкалы.")
+                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            }
+            PixelSection("Скорость") {
+                Stepper(value: $speedWarm, in: 30...max(30, min(250, speedHot - 10)), step: 10) {
+                    LabeledContent("Оранжевый от", value: "\(speedWarm) км/ч")
+                }
+                Stepper(value: $speedHot, in: min(300, speedWarm + 10)...300, step: 10) {
+                    LabeledContent("Красный от", value: "\(speedHot) км/ч")
+                }
+                Text("Это личные пороги оформления для скорости GPS и байка. Они не определяют разрешённую скорость и не исправляют показания.")
+                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            }
+            PixelSection("Температура") {
+                Text("Охлаждающая жидкость: синий ниже 60 °C, оранжевый от 100 °C, красный от 110 °C. Воздух на впуске: синий ниже 0 °C, красный от 40 °C.")
+                Text("Цвета температуры условны и не заменяют указания на приборке или в руководстве мотоцикла.")
+                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            }
+        }
+        .font(MotoTheme.font(.body))
+        .scrollContentBackground(.hidden)
+        .background(MotoTheme.background)
+        .navigationTitle("Цветовые шкалы")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

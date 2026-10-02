@@ -235,6 +235,8 @@ struct RideDetailView: View {
     @State private var showingDelete = false
     @State private var points: [TrackPoint] = []
     @State private var ranges: [RideMeasurementRange] = []
+    @State private var trends: [RideTrend] = []
+    @State private var selectedTrendID: String?
     @State private var gaps: [GPSGap] = []
     @State private var showGapBoundaries = false
     @State private var loading = true
@@ -299,6 +301,24 @@ struct RideDetailView: View {
                 }
                 Text("Расстояние и скорость здесь — по GPS iPhone. Неизвестные участки не входят в расстояние. Данные байка сохраняются независимо от GPS.")
                     .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                if !trends.isEmpty {
+                    Text("Графики поездки").font(MotoTheme.font(.title3))
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(trends) { trend in
+                                Button(trend.label) { selectedTrendID = trend.id }
+                                    .buttonStyle(PixelButtonStyle(prominent: selectedTrendID == trend.id))
+                            }
+                        }
+                    }
+                    if let trend = trends.first(where: { $0.id == selectedTrendID }) ?? trends.first {
+                        RideTrendChart(trend: trend, elapsed: ride.elapsed)
+                            .frame(height: 226)
+                            .clipShape(PixelFrame())
+                        Text("Пустые участки — данные не поступали. График построен на iPhone без сети и не дорисовывает пропуски.")
+                            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    }
+                }
                 if !ranges.isEmpty {
                     Text("Показатели за поездку").font(MotoTheme.font(.title3))
                     ForEach(ranges) { range in
@@ -353,7 +373,8 @@ struct RideDetailView: View {
             loadRequestID = requestID
             loading = true
             error = nil
-            points = []; ranges = []; gaps = []
+            points = []; ranges = []; trends = []; gaps = []
+            selectedTrendID = nil
             showGapBoundaries = false
             rides.load(ride) { result in
                 guard loadRequestID == requestID else { return }
@@ -362,6 +383,8 @@ struct RideDetailView: View {
                 case .success(let records):
                     points = records.compactMap(\.point)
                     ranges = RideMeasurementRange.summarize(records)
+                    trends = RideTrend.summarize(records, ride: ride)
+                    selectedTrendID = trends.first?.id
                     gaps = gpsGaps(in: records, ride: ride)
                 case .failure(let failure): error = failure.localizedDescription
                 }
@@ -444,6 +467,143 @@ private struct RideMeasurementRange: Identifiable {
             }
         }
         return values.values.sorted { $0.id < $1.id }
+    }
+}
+
+/// A fixed-size summary for the on-device graphs. Large JSONL rides do not
+/// leave another copy of every measurement in SwiftUI state. Empty time bins
+/// remain empty, so a Bluetooth or GPS outage cannot look like valid data.
+private struct RideTrend: Identifiable {
+    let id: String
+    let label: String
+    let unit: String
+    let buckets: [RideTrendBucket]
+    let minimum: Double
+    let maximum: Double
+
+    static func summarize(_ records: [RideRecord], ride: RideSummary) -> [Self] {
+        let definitions: [(id: String, label: String, unit: String)] = [
+            ("gps_speed", "Скорость GPS", "км/ч"),
+            ("wheel_speed", "Скорость байка", "км/ч"),
+            ("engine_speed", "Обороты", "об/мин"),
+            ("gear_position", "Передача", ""),
+            ("throttle_position", "Дроссель", "%"),
+            ("engine_water_temperature", "Охлаждение", "°C"),
+            ("inlet_air_temperature", "Воздух", "°C")
+        ]
+        let indices = Dictionary(uniqueKeysWithValues: definitions.enumerated().map { ($0.element.id, $0.offset) })
+        let binCount = 160
+        let span = max(1, (ride.endedAt ?? ride.lastSavedAt).timeIntervalSince(ride.startedAt))
+        var series = Array(repeating: Array(repeating: RideTrendBucket(), count: binCount), count: definitions.count)
+
+        for record in records {
+            let id: String
+            let value: Double
+            if let measurement = record.measurement {
+                id = measurement.id
+                value = measurement.value
+            } else if ride.gpsSpeedQualityVersion != nil, let speed = record.point?.speed {
+                id = "gps_speed"
+                value = speed * 3.6
+            } else { continue }
+            guard let metricIndex = indices[id], value.isFinite else { continue }
+            let offset = record.timestamp.timeIntervalSince(ride.startedAt)
+            guard offset.isFinite, offset >= 0, offset <= span else { continue }
+            let binIndex = min(binCount - 1, Int(offset / span * Double(binCount)))
+            series[metricIndex][binIndex].append(value)
+        }
+
+        return definitions.enumerated().compactMap { index, definition in
+            let buckets = series[index]
+            let populated = buckets.filter { $0.count > 0 }
+            guard let minimum = populated.map(\.minimum).min(),
+                  let maximum = populated.map(\.maximum).max() else { return nil }
+            return Self(id: definition.id, label: definition.label, unit: definition.unit,
+                        buckets: buckets, minimum: minimum, maximum: maximum)
+        }
+    }
+}
+
+private struct RideTrendBucket {
+    private(set) var count = 0
+    private(set) var sum = 0.0
+    private(set) var minimum = Double.infinity
+    private(set) var maximum = -Double.infinity
+    var mean: Double { count > 0 ? sum / Double(count) : 0 }
+
+    mutating func append(_ value: Double) {
+        count += 1
+        sum += value
+        minimum = min(minimum, value)
+        maximum = max(maximum, value)
+    }
+}
+
+private struct RideTrendChart: View {
+    let trend: RideTrend
+    let elapsed: TimeInterval
+
+    private var lower: Double {
+        if trend.id == "engine_water_temperature" || trend.id == "inlet_air_temperature" {
+            return floor(trend.minimum / 10) * 10 - 5
+        }
+        return 0
+    }
+
+    private var upper: Double { max(lower + 1, trend.maximum + max(1, (trend.maximum - lower) * 0.05)) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(trend.label).font(MotoTheme.font(.headline))
+                Spacer()
+                Text(String(format: "%.0f–%.0f %@", trend.minimum, trend.maximum, trend.unit))
+                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    .monospacedDigit()
+            }
+            Canvas { context, size in
+                let bounds = CGRect(origin: .zero, size: size).insetBy(dx: 3, dy: 6)
+                guard bounds.width > 0, bounds.height > 0 else { return }
+                var grid = Path()
+                for fraction in [0.25, 0.5, 0.75] {
+                    let y = bounds.minY + bounds.height * CGFloat(fraction)
+                    grid.move(to: CGPoint(x: bounds.minX, y: y))
+                    grid.addLine(to: CGPoint(x: bounds.maxX, y: y))
+                }
+                context.stroke(grid, with: .color(MotoTheme.secondary.opacity(0.2)), lineWidth: 1)
+                func point(_ index: Int, _ value: Double) -> CGPoint {
+                    CGPoint(x: bounds.minX + bounds.width * (CGFloat(index) + 0.5) / CGFloat(trend.buckets.count),
+                            y: bounds.maxY - bounds.height * CGFloat((value - lower) / (upper - lower)))
+                }
+                var line = Path()
+                var previousWasMeasured = false
+                for (index, bucket) in trend.buckets.enumerated() {
+                    guard bucket.count > 0 else { previousWasMeasured = false; continue }
+                    var spread = Path()
+                    spread.move(to: point(index, bucket.minimum))
+                    spread.addLine(to: point(index, bucket.maximum))
+                    context.stroke(spread, with: .color(MotoTheme.accent.opacity(0.45)), lineWidth: 2)
+                    let center = point(index, bucket.mean)
+                    context.fill(Path(ellipseIn: CGRect(x: center.x - 1.5, y: center.y - 1.5,
+                                                        width: 3, height: 3)), with: .color(MotoTheme.accent))
+                    if previousWasMeasured { line.addLine(to: center) }
+                    else { line.move(to: center) }
+                    previousWasMeasured = true
+                }
+                context.stroke(line, with: .color(MotoTheme.accent),
+                               style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+            }
+            HStack {
+                Text("СТАРТ")
+                Spacer()
+                Text(duration(elapsed))
+            }
+            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+        }
+        .padding(14)
+        .background(MotoTheme.panel)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(trend.label): минимум \(Int(trend.minimum)), максимум \(Int(trend.maximum)) \(trend.unit). Пробелы означают отсутствие данных.")
     }
 }
 

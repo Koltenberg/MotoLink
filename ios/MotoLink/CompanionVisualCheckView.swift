@@ -20,7 +20,7 @@ struct CompanionVisualCheckView: View {
         .sheet(isPresented: $showFuelEditor) {
             // The real new-entry defaults: full tank, no liters or price, and
             // the fixture profile's odometer. Do not manufacture form values.
-            FuelEditor(store: store, entry: nil)
+            FuelEditor(store: store, rides: rides, entry: nil)
         }
         .onAppear {
             guard !prepared else { return }
