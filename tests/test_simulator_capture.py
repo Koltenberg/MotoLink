@@ -277,17 +277,17 @@ class SimulatorCaptureTests(unittest.TestCase):
             screenshot(self.output / name)
         with self.assertRaisesRegex(CAPTURE.CaptureError, "Landscape rotation was not applied"):
             self.execute()
-        self.assertEqual(len(self.devices), 2)
+        self.assertEqual(len(self.devices), 1)
         self.assertEqual(list(self.output.glob("*.png")), [])
-        for attempt in (1, 2):
-            debug = self.output / f"debug-attempt{attempt}"
-            # The first of two landscape states must fail immediately; the
-            # later ride-landscape screenshot must never be treated as proof.
-            self.assertEqual(len(list(debug.glob("*.png"))), len(CAPTURE.SCREENSHOT_NAMES) - 1)
-            manifest = json.loads((debug / "failure.json").read_text())
-            self.assertEqual(manifest["status"], "failed")
-            self.assertIn("Landscape rotation was not applied", manifest["error"])
-            self.assertFalse(json.loads((debug / CAPTURE.ORIENTATION_EVIDENCE).read_text())["interfaceLandscape"])
+        debug = self.output / "debug-attempt1"
+        # The first landscape state fails immediately. Rebooting and reinstalling
+        # a second simulator cannot fix UIKit's portrait-only presentation.
+        self.assertEqual(len(list(debug.glob("*.png"))), len(CAPTURE.SCREENSHOT_NAMES) - 1)
+        manifest = json.loads((debug / "failure.json").read_text())
+        self.assertEqual(manifest["status"], "failed")
+        self.assertIn("Landscape rotation was not applied", manifest["error"])
+        self.assertFalse(json.loads((debug / CAPTURE.ORIENTATION_EVIDENCE).read_text())["interfaceLandscape"])
+        self.assertFalse((self.output / "debug-attempt2" / "failure.json").exists())
         for device in self.devices:
             self.assertIn(("delete", device), self.calls)
 

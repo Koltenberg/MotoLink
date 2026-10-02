@@ -143,6 +143,14 @@ final class ProductVisualReadyView: UIView {
             visibleSince = nil; return
         }
         let arguments = ProcessInfo.processInfo.arguments
+        // The focused reading is a full-screen presentation. A visible root
+        // dashboard alone must not satisfy its screenshot readiness handshake.
+        if arguments.contains("--review-focus-rpm") || arguments.contains("--review-focus-gps") {
+            guard let presented = window.rootViewController?.presentedViewController,
+                  presented.viewIfLoaded?.window === window else {
+                visibleSince = nil; return
+            }
+        }
         let expected: UIUserInterfaceStyle = arguments.contains("--review-light") ? .light
             : arguments.contains("--review-ride") ? .dark : .unspecified
         // Simulator-only capture preference. Never changes the user's stored theme.

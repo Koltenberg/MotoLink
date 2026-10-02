@@ -106,7 +106,11 @@ struct ContentView: View {
             #if targetEnvironment(simulator)
             if ProcessInfo.processInfo.arguments.contains("--review-ride") { selectedTab = 1 }
             if ProcessInfo.processInfo.arguments.contains("--review-focus-rpm") {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                // Simulator landscape review rotates the root scene first.
+                // A full-screen cover presented before the geometry request
+                // can report portrait-only support on hosted iOS 26 runners.
+                let delay = ProcessInfo.processInfo.arguments.contains("--review-landscape") ? 3.0 : 0.4
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                     focusedMetric = FocusedRideMetric(id: "engine_speed")
                 }
             }

@@ -35,6 +35,10 @@ class CaptureError(RuntimeError):
     pass
 
 
+class UnsupportedOrientationError(CaptureError):
+    """UIKit rejected the requested orientation; a fresh simulator cannot fix it."""
+
+
 def version(value, label):
     if not isinstance(value, str) or not re.fullmatch(r"\d+(?:\.\d+){0,2}", value):
         raise CaptureError(f"Invalid {label}: {value!r}")
@@ -323,7 +327,7 @@ def validate_landscape_evidence(path, launched_at):
             or not all(finite_number(value) for value in dimensions)
             or not dimensions[0] > dimensions[1] > 0
             or not dimensions[2] > dimensions[3] > 0):
-        raise CaptureError(f"Landscape rotation was not applied: UIKit geometry {evidence}")
+        raise UnsupportedOrientationError(f"Landscape rotation was not applied: UIKit geometry {evidence}")
     captured_at = evidence.get("capturedAt")
     if not finite_number(captured_at) or captured_at < launched_at or captured_at > time.time() + 5:
         raise CaptureError("Landscape geometry evidence does not belong to this launch")
@@ -641,6 +645,9 @@ def capture(app, output):
                     preserve_failed_attempt(Path(temporary), output, attempt, error)
                 except OSError as diagnostic_error:
                     print(f"Could not preserve diagnostic screenshots: {diagnostic_error}", flush=True)
+                if isinstance(error, UnsupportedOrientationError):
+                    print("UIKit rejected landscape; a second fresh simulator would repeat the app-level failure", flush=True)
+                    break
                 if time.monotonic() >= deadline:
                     break
                 continue
