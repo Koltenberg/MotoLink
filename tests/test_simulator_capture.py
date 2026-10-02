@@ -191,11 +191,13 @@ class SimulatorCaptureTests(unittest.TestCase):
             ("simulator-ride.png", "ride", "default", False),
             ("simulator-ride-light.png", "ride", "light", False),
             ("simulator-focus-rpm.png", "ride", "default", False),
+            ("simulator-focus-rpm-light.png", "ride", "light", False),
             ("simulator-focus-gps.png", "ride", "light", False),
             ("simulator-settings.png", "home", "light", False),
             ("simulator-service-editor.png", "companion", "light", False),
             ("simulator-fuel-editor.png", "companion", "light", False),
             ("simulator-history.png", "home", "light", False),
+            ("simulator-focus-rpm-landscape.png", "ride", "default", True),
             ("simulator-ride-landscape.png", "ride", "default", True),
         ]
         for name, mode, theme, landscape in expected:
@@ -241,6 +243,27 @@ class SimulatorCaptureTests(unittest.TestCase):
                 self.assertEqual(evidence["appearance"], "light")
         self.assertEqual(captured[-1], "simulator-ride-landscape.png")
 
+    def test_tachometer_uses_fresh_portrait_and_landscape_launches(self):
+        self.execute()
+        launches = {}
+        flags = ()
+        for call in self.calls:
+            if call[0] == "launch":
+                flags = call[3:call.index("--visual-review-token")]
+            elif call[0] == "io":
+                launches[Path(call[-1]).name] = flags
+        expected = {
+            "simulator-focus-rpm.png": ("--review-ride", "--review-focus-rpm"),
+            "simulator-focus-rpm-light.png": ("--review-ride", "--review-focus-rpm", "--review-light"),
+            "simulator-focus-rpm-landscape.png": ("--review-ride", "--review-focus-rpm", "--review-landscape"),
+        }
+        for name, selected in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(launches[name], selected)
+                ready = json.loads((self.output / Path(name).with_suffix(".ready.json")).read_text())
+                self.assertEqual(ready["mode"], "ride")
+                self.assertEqual(ready["appearance"], "light" if "--review-light" in selected else "dark")
+
     def test_unapplied_landscape_rotation_rejects_entire_set_not_portrait_as_landscape(self):
         self.orientation_override = {"interfaceLandscape": False, "interfaceOrientation": 1,
                                      "windowWidth": 390, "windowHeight": 844,
@@ -258,7 +281,9 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.assertEqual(list(self.output.glob("*.png")), [])
         for attempt in (1, 2):
             debug = self.output / f"debug-attempt{attempt}"
-            self.assertEqual(len(list(debug.glob("*.png"))), len(CAPTURE.SCREENSHOT_NAMES))
+            # The first of two landscape states must fail immediately; the
+            # later ride-landscape screenshot must never be treated as proof.
+            self.assertEqual(len(list(debug.glob("*.png"))), len(CAPTURE.SCREENSHOT_NAMES) - 1)
             manifest = json.loads((debug / "failure.json").read_text())
             self.assertEqual(manifest["status"], "failed")
             self.assertIn("Landscape rotation was not applied", manifest["error"])
@@ -268,7 +293,8 @@ class SimulatorCaptureTests(unittest.TestCase):
 
     def test_last_ride_launch_failure_does_not_publish_earlier_views(self):
         def fail(args):
-            if args[0] == "launch" and "--review-landscape" in args:
+            if (args[0] == "launch" and "--review-landscape" in args
+                    and "--review-focus-rpm" not in args):
                 raise CAPTURE.CaptureError("ride landscape launch failed")
         self.failure = fail
         with self.assertRaisesRegex(CAPTURE.CaptureError, "ride landscape launch failed"):

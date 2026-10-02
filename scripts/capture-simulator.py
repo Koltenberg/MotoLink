@@ -20,9 +20,10 @@ SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
                     "simulator-companion.png", "simulator-companion-large-text.png",
                     "simulator-garage-light.png", "simulator-ride.png",
                     "simulator-ride-light.png", "simulator-focus-rpm.png",
+                    "simulator-focus-rpm-light.png",
                     "simulator-focus-gps.png", "simulator-settings.png",
                     "simulator-service-editor.png", "simulator-fuel-editor.png", "simulator-history.png",
-                    "simulator-ride-landscape.png")
+                    "simulator-focus-rpm-landscape.png", "simulator-ride-landscape.png")
 ORIENTATION_EVIDENCE = "MotoLinkVisualOrientation.json"
 READY_EVIDENCE = "MotoLinkVisualReady.json"
 REFRESH_EVIDENCE = "MotoLinkRefreshLifecycle.json"
@@ -551,11 +552,15 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
             ("simulator-ride.png", ("--review-ride",), False),
             ("simulator-ride-light.png", ("--review-ride", "--review-light"), False),
             ("simulator-focus-rpm.png", ("--review-ride", "--review-focus-rpm"), False),
+            ("simulator-focus-rpm-light.png",
+             ("--review-ride", "--review-focus-rpm", "--review-light"), False),
             ("simulator-focus-gps.png", ("--review-ride", "--review-focus-gps", "--review-light"), False),
             ("simulator-settings.png", ("--review-settings", "--review-light"), False),
             ("simulator-service-editor.png", ("--companion-visual-check", "--review-service-editor", "--review-light"), False),
             ("simulator-fuel-editor.png", ("--companion-visual-check", "--review-fuel-editor", "--review-light"), False),
             ("simulator-history.png", ("--review-history", "--review-light"), False),
+            ("simulator-focus-rpm-landscape.png",
+             ("--review-ride", "--review-focus-rpm", "--review-landscape"), True),
             ("simulator-ride-landscape.png", ("--review-ride", "--review-landscape"), True),
         )
         for name, flags, landscape in variants:

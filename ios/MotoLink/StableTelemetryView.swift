@@ -195,6 +195,7 @@ struct FocusedRideMetricView: View {
                         rpmRedline: rpmRedline, speedWarm: speedWarm, speedHot: speedHot)
                 }
                 let short = geometry.size.height < 420
+                    || (metric.id == "engine_speed" && geometry.size.height < 620)
                 Button(action: onDismiss) {
                     VStack(spacing: 0) {
                         HStack(alignment: .top, spacing: 12) {
@@ -207,7 +208,9 @@ struct FocusedRideMetricView: View {
                         }
                         Spacer(minLength: 8)
                         Text(reading.value)
-                            .font(MotoTheme.numberFont(size: numberSize(in: geometry.size, value: reading.value)).monospacedDigit())
+                            .font(MotoTheme.numberFont(size: metric.id == "engine_speed" && short
+                                ? min(numberSize(in: geometry.size, value: reading.value), geometry.size.height * 0.25)
+                                : numberSize(in: geometry.size, value: reading.value)).monospacedDigit())
                             .foregroundStyle(scale?.currentColor ?? (reading.number == nil ? MotoTheme.secondary : Color.primary))
                             .lineLimit(1).minimumScaleFactor(0.24)
                             .frame(maxWidth: .infinity)
@@ -215,7 +218,10 @@ struct FocusedRideMetricView: View {
                             Text(reading.unit).font(MotoTheme.font(short ? .subheadline : .title3))
                                 .foregroundStyle(MotoTheme.secondary)
                         }
-                        if let scale {
+                        if metric.id == "engine_speed" {
+                            TachometerGaugeView(scale: scale, redline: rpmRedline, short: short)
+                                .padding(.top, short ? 5 : 12)
+                        } else if let scale {
                             FocusMetricScaleView(scale: scale, short: short)
                                 .padding(.top, short ? 8 : 18)
                         }
@@ -312,6 +318,96 @@ struct FocusedRideMetricView: View {
         case .unavailable: status = "Недоступно у этого байка"
         }
         return Reading(title: title, value: value, number: row.value, unit: field.unit, status: status)
+    }
+}
+
+/// Drawn only when the focused screen's existing one-second sample changes.
+/// The dial has no animation clock or flashing state, so it does not add BLE,
+/// location or display wakeups. An unavailable reading leaves the dial unlit.
+private struct TachometerGaugeView: View {
+    let scale: FocusMetricScale?
+    let redline: Int
+    let short: Bool
+
+    private var selectedLimit: Double { Double(max(6_000, min(16_000, redline))) }
+
+    var body: some View {
+        VStack(spacing: short ? 3 : 7) {
+            Canvas { context, size in
+                let center = CGPoint(x: size.width / 2, y: size.height - 5)
+                let radius = min(size.width * 0.45, size.height - 12)
+                guard radius > 0 else { return }
+                let divisions = 33
+                let extent = selectedLimit * 1.08
+                let tickLength: CGFloat = short ? 13 : 22
+                for index in 0..<divisions {
+                    let fraction = Double(index) / Double(divisions - 1)
+                    let angle = Double.pi * (1 - fraction)
+                    let direction = CGPoint(x: CGFloat(cos(angle)), y: -CGFloat(sin(angle)))
+                    let inner = CGPoint(x: center.x + direction.x * (radius - tickLength),
+                                        y: center.y + direction.y * (radius - tickLength))
+                    let outer = CGPoint(x: center.x + direction.x * radius,
+                                        y: center.y + direction.y * radius)
+                    var tick = Path()
+                    tick.move(to: inner)
+                    tick.addLine(to: outer)
+                    let color = fraction <= (scale?.progress ?? -1)
+                        ? scale?.tone(at: extent * fraction).color ?? MotoTheme.border
+                        : MotoTheme.border
+                    context.stroke(tick, with: .color(color),
+                                   style: StrokeStyle(lineWidth: short ? 3 : 5, lineCap: .square))
+                }
+
+                // The red mark is the rider's chosen display threshold, not a
+                // claimed ECU limit for every Kawasaki model.
+                let limitFraction = selectedLimit / extent
+                let limitAngle = Double.pi * (1 - limitFraction)
+                let limitDirection = CGPoint(x: CGFloat(cos(limitAngle)), y: -CGFloat(sin(limitAngle)))
+                var mark = Path()
+                mark.move(to: CGPoint(x: center.x + limitDirection.x * (radius - tickLength - 7),
+                                      y: center.y + limitDirection.y * (radius - tickLength - 7)))
+                mark.addLine(to: CGPoint(x: center.x + limitDirection.x * (radius + 2),
+                                         y: center.y + limitDirection.y * (radius + 2)))
+                context.stroke(mark, with: .color(scale == nil ? MotoTheme.border : FocusMetricScale.Tone.hot.color),
+                               style: StrokeStyle(lineWidth: 2, lineCap: .square))
+
+                if let scale {
+                    let angle = Double.pi * (1 - scale.progress)
+                    var needle = Path()
+                    needle.move(to: center)
+                    needle.addLine(to: CGPoint(x: center.x + CGFloat(cos(angle)) * (radius - tickLength - 11),
+                                               y: center.y - CGFloat(sin(angle)) * (radius - tickLength - 11)))
+                    context.stroke(needle, with: .color(scale.currentColor),
+                                   style: StrokeStyle(lineWidth: short ? 2 : 4, lineCap: .square))
+                    context.fill(Path(CGRect(x: center.x - 4, y: center.y - 4, width: 8, height: 8)),
+                                 with: .color(scale.currentColor))
+                }
+            }
+            .frame(height: short ? 74 : 180)
+
+            HStack {
+                Text("0")
+                Spacer(minLength: 4)
+                Text("\(Int(selectedLimit / 2))")
+                Spacer(minLength: 4)
+                Text("Порог \(Int(selectedLimit))")
+            }
+            .font(MotoTheme.font(.caption))
+            .foregroundStyle(MotoTheme.secondary)
+            .lineLimit(1).minimumScaleFactor(0.65)
+
+            if let scale, scale.value >= selectedLimit * 0.9 {
+                Text(scale.value >= selectedLimit ? "ВЫБРАННАЯ КРАСНАЯ ЗОНА" : "БЛИЗКО К ПОРОГУ ОБОРОТОВ")
+                    .font(MotoTheme.font(.caption))
+                    .foregroundStyle(scale.currentColor)
+                    .lineLimit(1).minimumScaleFactor(0.65)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(short ? 9 : 15)
+        .frame(maxWidth: 620)
+        .pixelPanel(accent: scale.map { $0.value >= selectedLimit } ?? false)
+        .accessibilityHidden(true)
     }
 }
 

@@ -9,6 +9,11 @@ struct NearbyMotorcycle: Identifiable {
     var rssi: Int
 }
 
+struct SignalStrengthReading {
+    let dBm: Int
+    let measuredAt: Date
+}
+
 /// CoreBluetooth delegates run on the main queue. Background operation relies
 /// on the system's pending connection/restoration, never a background timer.
 final class MotorcycleBluetooth: NSObject, ObservableObject {
@@ -45,6 +50,10 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private var rssiPending = false
     private var lastRSSI: Int?
     private var lastRSSIAt: Date?
+    private var lastManualRSSIRequestAt: Date?
+    private var signalStrengthCompletion: ((SignalStrengthReading?, String?) -> Void)?
+    private var signalStrengthTimeout: DispatchWorkItem?
+    private var signalStrengthTimedOut = false
     private var userRescanAfterCancellation: CBPeripheral?
     private var userRescanMayStartScan = false
     private var cancelResume = BLECancelResumePolicy()
@@ -523,7 +532,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         }.map { Int(ceil($0)) } ?? 0
         record("ble_health", "connected=\(connected); ready=\(ready); connecting=\(connecting); waitSeconds=\(waiting); waitOrigin=\(connecting ? connectionWaitOrigin : "none"); packetAgeSeconds=\(packetAge); streamAgeSeconds=\(streamAge); peripheralState=\(current?.state.rawValue ?? -1); reconnectAttempt=\(reconnectAttempt); retryCooldownSeconds=\(cooldown); systemReconnectPending=\(nativeReconnect.systemOwnsPendingConnection); cancelPending=\(nativeReconnect.awaitingCancellation); appState=\(UIApplication.shared.applicationState.rawValue); centralState=\(central.state.rawValue); protectedDataAvailable=\(UIApplication.shared.isProtectedDataAvailable); lastRSSIdBm=\(rssiValue); rssiAgeSeconds=\(rssiAge)")
         checkStreamRecovery()
-        // One local RSSI read per minute, only while visible and between commands.
+        // Automatic RSSI reads at most once per minute, only while visible and between commands.
         if allowRSSI, UIApplication.shared.applicationState == .active, ready, !busy,
            !diagnosticRunning, !rssiPending, let current, isCurrent(current),
            lastRSSIRequestAt == nil || now.timeIntervalSince(lastRSSIRequestAt!) >= 60 {
@@ -531,6 +540,48 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             rssiPending = true
             current.readRSSI()
         }
+    }
+
+    /// A single read for the parked-bike position check. Never starts or changes a connection.
+    func measureSignalStrength(completion: @escaping (SignalStrengthReading?, String?) -> Void) {
+        guard UIApplication.shared.applicationState == .active else {
+            completion(nil, "Открой Moto Link на экране и повтори замер.")
+            return
+        }
+        guard ready, !busy, !diagnosticRunning, let current, isCurrent(current) else {
+            completion(nil, "Замер доступен при готовом соединении с байком.")
+            return
+        }
+        guard !rssiPending else {
+            completion(nil, signalStrengthTimedOut
+                ? "iOS ещё не ответила на прошлый замер. Повтори после ответа или нового подключения."
+                : "Предыдущий замер ещё выполняется. Повтори через несколько секунд.")
+            return
+        }
+        let now = Date()
+        if let lastManualRSSIRequestAt, now.timeIntervalSince(lastManualRSSIRequestAt) < 5 {
+            completion(nil, "Подожди 5 секунд между замерами.")
+            return
+        }
+        lastManualRSSIRequestAt = now
+        lastRSSIRequestAt = now
+        rssiPending = true
+        signalStrengthCompletion = completion
+        let requestSession = session
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.session == requestSession,
+                  let completion = self.signalStrengthCompletion else { return }
+            self.signalStrengthCompletion = nil
+            self.signalStrengthTimeout = nil
+            // Keep the read occupied until its callback (or a new connection).
+            // A late callback must never be attributed to a different phone position.
+            self.signalStrengthTimedOut = true
+            self.record("rssi_error", "source=signal_check; timeout=8s")
+            completion(nil, "iOS не ответила за 8 секунд. Новый замер возможен после ответа или нового подключения.")
+        }
+        signalStrengthTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: timeout)
+        current.readRSSI()
     }
 
     private static func errorDetails(_ error: Error?) -> String {
@@ -794,6 +845,12 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private func clearTransport(resetGATTRecovery: Bool = true) {
         cancelScheduledReconnect()
         session = UUID()
+        signalStrengthTimeout?.cancel()
+        signalStrengthTimeout = nil
+        let signalCompletion = signalStrengthCompletion
+        signalStrengthCompletion = nil
+        signalStrengthTimedOut = false
+        signalCompletion?(nil, "Замер прерван. Повтори при готовом соединении.")
         if resetGATTRecovery { gattRecovery = BLEGATTRecoveryPolicy() }
         discoveredGATTService = nil
         invalidatedGATTServices.removeAll()
@@ -1312,11 +1369,25 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
         guard isCurrent(peripheral) else { return }
         rssiPending = false
+        if signalStrengthTimedOut {
+            signalStrengthTimedOut = false
+            record("rssi_late", "source=signal_check; discarded_after_timeout")
+            return
+        }
+        signalStrengthTimeout?.cancel()
+        signalStrengthTimeout = nil
+        let signalCompletion = signalStrengthCompletion
+        signalStrengthCompletion = nil
         if let error { record("rssi_error", Self.errorDetails(error)) }
         else {
+            let measuredAt = Date()
             lastRSSI = RSSI.intValue
-            lastRSSIAt = Date()
+            lastRSSIAt = measuredAt
             record("rssi", "dBm=\(RSSI.intValue)")
+            signalCompletion?(SignalStrengthReading(dBm: RSSI.intValue, measuredAt: measuredAt), nil)
+        }
+        if error != nil {
+            signalCompletion?(nil, "iOS не смогла измерить сигнал. Повтори замер.")
         }
     }
 
