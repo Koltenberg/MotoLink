@@ -236,7 +236,8 @@ struct RideDetailView: View {
     @State private var points: [TrackPoint] = []
     @State private var ranges: [RideMeasurementRange] = []
     @State private var trends: [RideTrend] = []
-    @State private var selectedTrendID: String?
+    @State private var selectedTrendIDs: Set<String> = []
+    @State private var showingExpandedTrends = false
     @State private var gaps: [GPSGap] = []
     @State private var showGapBoundaries = false
     @State private var loading = true
@@ -302,22 +303,21 @@ struct RideDetailView: View {
                 Text("Расстояние и скорость здесь — по GPS iPhone. Неизвестные участки не входят в расстояние. Данные байка сохраняются независимо от GPS.")
                     .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 if !trends.isEmpty {
-                    Text("Графики поездки").font(MotoTheme.font(.title3))
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(trends) { trend in
-                                Button(trend.label) { selectedTrendID = trend.id }
-                                    .buttonStyle(PixelButtonStyle(prominent: selectedTrendID == trend.id))
-                            }
+                    HStack {
+                        Text("Графики поездки").font(MotoTheme.font(.title3))
+                        Spacer(minLength: 8)
+                        Button { showingExpandedTrends = true } label: {
+                            Label("На весь экран", systemImage: "arrow.up.left.and.arrow.down.right")
                         }
+                        .font(MotoTheme.font(.caption))
                     }
-                    if let trend = trends.first(where: { $0.id == selectedTrendID }) ?? trends.first {
-                        RideTrendChart(trend: trend, elapsed: ride.elapsed)
-                            .frame(height: 226)
-                            .clipShape(PixelFrame())
-                        Text("Пустые участки — данные не поступали. График построен на iPhone без сети и не дорисовывает пропуски.")
-                            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-                    }
+                    RideTrendPicker(trends: trends, selectedIDs: $selectedTrendIDs)
+                    RideTrendPlot(trends: trends.filter { selectedTrendIDs.contains($0.id) }, elapsed: ride.elapsed)
+                        .frame(height: 224)
+                        .clipShape(PixelFrame())
+                    RideTrendLegend(trends: trends.filter { selectedTrendIDs.contains($0.id) })
+                    Text("У каждой линии свой масштаб. Разрывы означают отсутствие замеров; график построен на iPhone без сети.")
+                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }
                 if !ranges.isEmpty {
                     Text("Показатели за поездку").font(MotoTheme.font(.title3))
@@ -360,6 +360,9 @@ struct RideDetailView: View {
             }
         }
         .sheet(isPresented: $showingEditor) { RideMetadataEditor(rides: rides, ride: ride) }
+        .fullScreenCover(isPresented: $showingExpandedTrends) {
+            RideTrendFullscreen(trends: trends, selectedIDs: $selectedTrendIDs, elapsed: ride.elapsed)
+        }
         .pixelConfirmationDialog("Удалить поездку?", isPresented: $showingDelete, titleVisibility: .visible) {
             Button("Удалить поездку", role: .destructive) {
                 rides.deleteCompletedRides([ride.id]) { success in if success { dismiss() } }
@@ -374,7 +377,7 @@ struct RideDetailView: View {
             loading = true
             error = nil
             points = []; ranges = []; trends = []; gaps = []
-            selectedTrendID = nil
+            selectedTrendIDs = []
             showGapBoundaries = false
             rides.load(ride) { result in
                 guard loadRequestID == requestID else { return }
@@ -384,7 +387,9 @@ struct RideDetailView: View {
                     points = records.compactMap(\.point)
                     ranges = RideMeasurementRange.summarize(records)
                     trends = RideTrend.summarize(records, ride: ride)
-                    selectedTrendID = trends.first?.id
+                    let preferred = ["gps_speed", "throttle_position"]
+                    selectedTrendIDs = Set(preferred.filter { id in trends.contains { $0.id == id } })
+                    for trend in trends where selectedTrendIDs.count < 2 { selectedTrendIDs.insert(trend.id) }
                     gaps = gpsGaps(in: records, ride: ride)
                 case .failure(let failure): error = failure.localizedDescription
                 }
@@ -477,11 +482,32 @@ private struct RideTrend: Identifiable {
     let id: String
     let label: String
     let unit: String
-    let buckets: [RideTrendBucket]
-    let gapBins: [Bool]
-    let gapCount: Int
+    let series: RideChartSeries
     let minimum: Double
     let maximum: Double
+
+    var color: Color {
+        switch id {
+        case "gps_speed": return Color(red: 1.00, green: 0.31, blue: 0.37)
+        case "wheel_speed": return Color(red: 1.00, green: 0.77, blue: 0.30)
+        case "engine_speed": return Color(red: 0.75, green: 0.61, blue: 1.00)
+        case "gear_position": return Color(red: 0.58, green: 0.89, blue: 0.51)
+        case "throttle_position": return Color(red: 0.31, green: 0.83, blue: 0.93)
+        case "engine_water_temperature": return Color(red: 1.00, green: 0.56, blue: 0.30)
+        default: return Color(red: 0.52, green: 0.69, blue: 1.00)
+        }
+    }
+
+    var plotMinimum: Double {
+        if id == "engine_water_temperature" || id == "inlet_air_temperature" {
+            return floor(minimum / 10) * 10 - 5
+        }
+        return min(0, floor(minimum / 10) * 10)
+    }
+
+    var plotMaximum: Double {
+        ceil(max(plotMinimum + 1, maximum + max(1, (maximum - plotMinimum) * 0.05)))
+    }
 
     static func summarize(_ records: [RideRecord], ride: RideSummary) -> [Self] {
         let definitions: [(id: String, label: String, unit: String)] = [
@@ -496,16 +522,23 @@ private struct RideTrend: Identifiable {
         let indices = Dictionary(uniqueKeysWithValues: definitions.enumerated().map { ($0.element.id, $0.offset) })
         let binCount = 160
         let span = max(1, (ride.endedAt ?? ride.lastSavedAt).timeIntervalSince(ride.startedAt))
-        var series = Array(repeating: Array(repeating: RideTrendBucket(), count: binCount), count: definitions.count)
-        var gapBins = Array(repeating: Array(repeating: false, count: binCount), count: definitions.count)
-        var gapCounts = Array(repeating: 0, count: definitions.count)
-        var lastSeen = Array<Date?>(repeating: nil, count: definitions.count)
-
-        func bin(_ offset: Double) -> Int {
-            min(binCount - 1, Int(offset / span * Double(binCount)))
+        var series = definitions.map { definition in
+            RideChartSeries(binCount: binCount, span: span,
+                            maximumSilence: definition.id == "gps_speed" ? 20 : 15)
         }
+        var interrupted = Array(repeating: false, count: definitions.count)
+        var previousGPSSegment: Int?
 
         for record in records {
+            if record.kind == "gap" {
+                interrupted = Array(repeating: true, count: definitions.count)
+            } else if record.kind == "bluetooth", record.detail == "disconnected" {
+                for index in definitions.indices where definitions[index].id != "gps_speed" {
+                    interrupted[index] = true
+                }
+            } else if record.kind == "gps_gap_started" || record.kind == "gps_gap" {
+                if let speedIndex = indices["gps_speed"] { interrupted[speedIndex] = true }
+            }
             let id: String
             let value: Double
             if let measurement = record.measurement {
@@ -517,82 +550,118 @@ private struct RideTrend: Identifiable {
             } else { continue }
             guard let metricIndex = indices[id], value.isFinite else { continue }
             let offset = record.timestamp.timeIntervalSince(ride.startedAt)
-            guard offset.isFinite, offset >= 0, offset <= span else { continue }
-            let binIndex = bin(offset)
-            let threshold: TimeInterval = id == "gps_speed" ? 20 : 15
-            if let previous = lastSeen[metricIndex] {
-                let silence = record.timestamp.timeIntervalSince(previous)
-                guard silence >= 0 else { continue }
-                if silence > threshold {
-                    gapCounts[metricIndex] += 1
-                    let first = bin(previous.timeIntervalSince(ride.startedAt))
-                    for index in first...binIndex { gapBins[metricIndex][index] = true }
-                }
-            } else if offset > threshold {
-                gapCounts[metricIndex] += 1
-                for index in 0...binIndex { gapBins[metricIndex][index] = true }
+            if id == "gps_speed", let segment = record.point?.segment,
+               let previousGPSSegment, segment != previousGPSSegment {
+                interrupted[metricIndex] = true
             }
-            lastSeen[metricIndex] = record.timestamp
-            series[metricIndex][binIndex].append(value)
+            if series[metricIndex].append(offset: offset, value: value,
+                                          interrupted: interrupted[metricIndex]) {
+                interrupted[metricIndex] = false
+                if id == "gps_speed" { previousGPSSegment = record.point?.segment }
+            }
         }
 
         return definitions.enumerated().compactMap { index, definition in
-            let buckets = series[index]
-            let populated = buckets.filter { $0.count > 0 }
+            let populated = series[index].buckets.filter { $0.count > 0 }
             guard let minimum = populated.map(\.minimum).min(),
                   let maximum = populated.map(\.maximum).max() else { return nil }
             return Self(id: definition.id, label: definition.label, unit: definition.unit,
-                        buckets: buckets, gapBins: gapBins[index], gapCount: gapCounts[index],
-                        minimum: minimum, maximum: maximum)
+                        series: series[index], minimum: minimum, maximum: maximum)
         }
     }
 }
 
-private struct RideTrendBucket {
-    private(set) var count = 0
-    private(set) var sum = 0.0
-    private(set) var last = 0.0
-    private(set) var minimum = Double.infinity
-    private(set) var maximum = -Double.infinity
-    var mean: Double { count > 0 ? sum / Double(count) : 0 }
+private struct RideTrendPicker: View {
+    let trends: [RideTrend]
+    @Binding var selectedIDs: Set<String>
+    var vertical = false
 
-    mutating func append(_ value: Double) {
-        count += 1
-        sum += value
-        last = value
-        minimum = min(minimum, value)
-        maximum = max(maximum, value)
+    var body: some View {
+        Group {
+            if vertical {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(trends) { trend in option(trend) }
+                }
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(trends) { trend in option(trend) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func option(_ trend: RideTrend) -> some View {
+        let selected = selectedIDs.contains(trend.id)
+        return Button {
+            if selected {
+                if selectedIDs.count > 1 { selectedIDs.remove(trend.id) }
+            } else {
+                selectedIDs.insert(trend.id)
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Capsule().fill(trend.color).frame(width: 19, height: 3)
+                Text(trend.label).lineLimit(1)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? trend.color : MotoTheme.secondary)
+            }
+            .font(MotoTheme.font(.caption))
+            .padding(.horizontal, 10)
+            .frame(minHeight: 44)
+            .background(selected ? trend.color.opacity(0.15) : MotoTheme.panel)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8)
+                .stroke(selected ? trend.color.opacity(0.7) : MotoTheme.secondary.opacity(0.3)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(trend.label)
+        .accessibilityValue(selected ? "Показан" : "Скрыт")
     }
 }
 
-private struct RideTrendChart: View {
-    let trend: RideTrend
-    let elapsed: TimeInterval
-
-    private var lower: Double {
-        if trend.id == "engine_water_temperature" || trend.id == "inlet_air_temperature" {
-            return floor(trend.minimum / 10) * 10 - 5
-        }
-        return 0
-    }
-
-    private var upper: Double { max(lower + 1, trend.maximum + max(1, (trend.maximum - lower) * 0.05)) }
+private struct RideTrendLegend: View {
+    let trends: [RideTrend]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(trend.label).font(MotoTheme.font(.headline))
-                Spacer()
-                Text(String(format: "%.0f–%.0f %@", trend.minimum, trend.maximum, trend.unit))
-                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-                    .monospacedDigit()
+            ForEach(trends) { trend in
+                HStack(alignment: .top, spacing: 8) {
+                    Capsule().fill(trend.color).frame(width: 20, height: 3).padding(.top, 8)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(trend.label).font(MotoTheme.font(.subheadline))
+                        Text(detail(for: trend))
+                            .font(MotoTheme.font(.caption))
+                            .foregroundStyle(MotoTheme.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
-            if trend.gapCount > 0 {
-                Text("Паузы без замеров: \(trend.gapCount)")
-                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func range(_ lower: Double, _ upper: Double, unit: String) -> String {
+        String(format: "%.0f–%.0f", lower, upper) + (unit.isEmpty ? "" : " \(unit)")
+    }
+
+    private func detail(for trend: RideTrend) -> String {
+        let scale = range(trend.plotMinimum, trend.plotMaximum, unit: trend.unit)
+        let shown = range(trend.minimum, trend.maximum, unit: trend.unit)
+        let gaps = trend.series.gapCount > 0 ? " · пропуски \(trend.series.gapCount)" : ""
+        return "Шкала \(scale) · показано \(shown)\(gaps)"
+    }
+}
+
+private struct RideTrendPlot: View {
+    let trends: [RideTrend]
+    let elapsed: TimeInterval
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
             Canvas { context, size in
-                let bounds = CGRect(origin: .zero, size: size).insetBy(dx: 3, dy: 6)
+                let bounds = CGRect(origin: .zero, size: size).insetBy(dx: 8, dy: 8)
                 guard bounds.width > 0, bounds.height > 0 else { return }
                 var grid = Path()
                 for fraction in [0.25, 0.5, 0.75] {
@@ -601,52 +670,115 @@ private struct RideTrendChart: View {
                     grid.addLine(to: CGPoint(x: bounds.maxX, y: y))
                 }
                 context.stroke(grid, with: .color(MotoTheme.secondary.opacity(0.2)), lineWidth: 1)
-                for index in trend.gapBins.indices where trend.gapBins[index] {
-                    let step = bounds.width / CGFloat(trend.buckets.count)
-                    let stripe = CGRect(x: bounds.minX + CGFloat(index) * step, y: bounds.minY,
-                                        width: step, height: bounds.height)
-                    context.fill(Path(stripe), with: .color(MotoTheme.secondary.opacity(0.12)))
-                }
-                func point(_ index: Int, _ value: Double) -> CGPoint {
-                    CGPoint(x: bounds.minX + bounds.width * (CGFloat(index) + 0.5) / CGFloat(trend.buckets.count),
-                            y: bounds.maxY - bounds.height * CGFloat((value - lower) / (upper - lower)))
-                }
-                var line = Path()
-                var previousWasMeasured = false
-                for (index, bucket) in trend.buckets.enumerated() {
-                    guard bucket.count > 0 && !trend.gapBins[index] else {
-                        previousWasMeasured = false
-                        continue
+
+                for trend in trends {
+                    let buckets = trend.series.buckets
+                    var line = Path()
+                    var previousIndex: Int?
+                    var previousPoint: CGPoint?
+                    for (index, bucket) in buckets.enumerated() where bucket.count > 0 {
+                        let value = trend.id == "gear_position" ? bucket.last : bucket.mean
+                        let point = CGPoint(
+                            x: bounds.minX + bounds.width * (CGFloat(index) + 0.5) / CGFloat(buckets.count),
+                            y: bounds.maxY - bounds.height
+                                * CGFloat((value - trend.plotMinimum) / (trend.plotMaximum - trend.plotMinimum))
+                        )
+                        if trend.series.connects(previousIndex, to: index) {
+                            if trend.id == "gear_position", let previousPoint {
+                                // Gear is a category; a step avoids fractional gears.
+                                line.addLine(to: CGPoint(x: point.x, y: previousPoint.y))
+                            }
+                            line.addLine(to: point)
+                        } else {
+                            line.move(to: point)
+                        }
+                        context.fill(Path(ellipseIn: CGRect(x: point.x - 1.5, y: point.y - 1.5,
+                                                           width: 3, height: 3)),
+                                     with: .color(trend.color))
+                        previousIndex = index
+                        previousPoint = point
                     }
-                    var spread = Path()
-                    spread.move(to: point(index, bucket.minimum))
-                    spread.addLine(to: point(index, bucket.maximum))
-                    context.stroke(spread, with: .color(MotoTheme.accent.opacity(0.45)), lineWidth: 2)
-                    let center = point(index, trend.id == "gear_position" ? bucket.last : bucket.mean)
-                    context.fill(Path(CGRect(x: center.x - 2, y: center.y - 2,
-                                             width: 4, height: 4)), with: .color(MotoTheme.accent))
-                    // A gear is a category. Mark the last observed gear in each
-                    // bucket instead of inventing fractional intermediate gears.
-                    if trend.id != "gear_position" {
-                        if previousWasMeasured { line.addLine(to: center) }
-                        else { line.move(to: center) }
-                    }
-                    previousWasMeasured = true
+                    context.stroke(line, with: .color(trend.color),
+                                   style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
                 }
-                context.stroke(line, with: .color(MotoTheme.accent),
-                               style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
             }
+            .frame(maxHeight: .infinity)
             HStack {
                 Text("СТАРТ")
                 Spacer()
                 Text(duration(elapsed))
             }
-            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            .font(MotoTheme.font(.caption))
+            .foregroundStyle(MotoTheme.secondary)
         }
-        .padding(14)
+        .padding(12)
         .background(MotoTheme.panel)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(trend.label): минимум \(Int(trend.minimum)), максимум \(Int(trend.maximum)) \(trend.unit). Пробелы означают отсутствие данных.")
+        .accessibilityLabel("График поездки: \(trends.map(\.label).joined(separator: ", ")). Каждая линия имеет свой масштаб; пробелы означают отсутствие данных.")
+    }
+}
+
+private struct RideTrendFullscreen: View {
+    let trends: [RideTrend]
+    @Binding var selectedIDs: Set<String>
+    let elapsed: TimeInterval
+    @Environment(\.dismiss) private var dismiss
+
+    private var selectedTrends: [RideTrend] {
+        trends.filter { selectedIDs.contains($0.id) }
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let landscape = geometry.size.width > geometry.size.height
+            VStack(spacing: landscape ? 8 : 14) {
+                HStack {
+                    Text("Графики поездки").font(MotoTheme.font(.title3))
+                    Spacer()
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Закрыть график")
+                }
+                if landscape {
+                    HStack(alignment: .top, spacing: 12) {
+                        RideTrendPlot(trends: selectedTrends, elapsed: elapsed)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 12) {
+                                RideTrendPicker(trends: trends, selectedIDs: $selectedIDs, vertical: true)
+                                RideTrendLegend(trends: selectedTrends)
+                                explanation
+                            }
+                        }
+                        .frame(width: min(300, geometry.size.width * 0.34))
+                    }
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            RideTrendPicker(trends: trends, selectedIDs: $selectedIDs)
+                            RideTrendPlot(trends: selectedTrends, elapsed: elapsed)
+                                .frame(height: max(300, geometry.size.height * 0.48))
+                            RideTrendLegend(trends: selectedTrends)
+                            explanation
+                        }
+                    }
+                }
+            }
+            .padding(landscape ? 10 : 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(MotoTheme.background.ignoresSafeArea())
+    }
+
+    private var explanation: some View {
+        Text("Каждая линия использует собственную шкалу. Разрывы означают отсутствие замеров; данные построены на iPhone без сети.")
+            .font(MotoTheme.font(.caption))
+            .foregroundStyle(MotoTheme.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

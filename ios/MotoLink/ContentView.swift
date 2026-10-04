@@ -4,7 +4,7 @@ import UIKit
 
 struct ContentView: View {
     private enum ConnectionPrompt: Equatable { case rescan, disconnect, stopWaiting }
-    private enum SignalPosition: Equatable { case dash, seat }
+    private enum SignalPosition: Equatable { case firstDash, seat, returnDash }
 
     @ObservedObject var bluetooth: MotorcycleBluetooth
     @ObservedObject var rides: RideRecorder
@@ -24,8 +24,9 @@ struct ContentView: View {
     @State private var connectionPrompt: ConnectionPrompt?
     @State private var showConnectionCheck = false
     @State private var connectionCheckOwnsScan = false
-    @State private var dashSignals: [SignalStrengthReading] = []
-    @State private var seatSignals: [SignalStrengthReading] = []
+    @State private var firstDashSignals: [SignalComparisonPolicy.Reading] = []
+    @State private var seatSignals: [SignalComparisonPolicy.Reading] = []
+    @State private var returnDashSignals: [SignalComparisonPolicy.Reading] = []
     @State private var measuringSignalAt: SignalPosition?
     @State private var signalCheckMessage: String?
     @State private var signalCheckGeneration = UUID()
@@ -403,17 +404,35 @@ struct ContentView: View {
                     }
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Сравнить уровень сигнала").font(MotoTheme.font(.title3))
-                        Text("На стоянке с включённым зажиганием замерь сигнал с iPhone у приборки, затем у переднего края сиденья водителя. Байк должен оставаться на том же месте.")
+                        Text("На стоянке с включённым зажиганием замерь сигнал у приборки (A1), у переднего края сиденья (B), затем снова у приборки (A2). Байк должен оставаться на месте.")
                             .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                         TimelineView(.periodic(from: .now, by: 1)) { context in
                             VStack(alignment: .leading, spacing: 12) {
-                                signalPosition("У приборки", readings: dashSignals, at: context.date, position: .dash)
-                                signalPosition("У переднего края сиденья", readings: seatSignals,
+                                signalPosition("У приборки · A1", readings: firstDashSignals,
+                                               at: context.date, position: .firstDash)
+                                signalPosition("У переднего края сиденья · B", readings: seatSignals,
                                                at: context.date, position: .seat)
+                                signalPosition("Снова у приборки · A2", readings: returnDashSignals,
+                                               at: context.date, position: .returnDash)
+                                if let comparison = SignalComparisonPolicy.summary(
+                                    firstDash: firstDashSignals, seat: seatSignals, returnDash: returnDashSignals,
+                                    at: context.date, sessionID: signalCheckGeneration,
+                                    connected: bluetooth.ready) {
+                                    Text(signalComparisonText(comparison))
+                                        .font(MotoTheme.font(.subheadline))
+                                } else if !firstDashSignals.isEmpty || !seatSignals.isEmpty || !returnDashSignals.isEmpty {
+                                    Text("Для сравнения нужны по 2 свежих замера A1 → B → A2 за 2 минуты в одном подключении.")
+                                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                                }
                             }
                         }
                         Text("В каждой строке — до трёх замеров по порядку.")
                             .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                        if !firstDashSignals.isEmpty || !seatSignals.isEmpty || !returnDashSignals.isEmpty {
+                            Button("Новый тест") { resetSignalReadings() }
+                                .buttonStyle(PixelButtonStyle())
+                                .disabled(measuringSignalAt != nil)
+                        }
                         if measuringSignalAt != nil { ProgressView("Измеряем сигнал…") }
                         if let signalCheckMessage {
                             Text(signalCheckMessage).foregroundStyle(MotoTheme.secondary)
@@ -453,8 +472,11 @@ struct ContentView: View {
                 .navigationTitle("Проверить связь").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showConnectionCheck = false } } }
         }.onAppear { resetSignalReadings(); checkVisibility() }
-            .onChange(of: bluetooth.connected) { connected in
+            .onReceive(bluetooth.$connected) { connected in
                 if !connected { resetSignalReadings() }
+            }
+            .onChange(of: scenePhase) { phase in
+                if phase != .active { resetSignalReadings() }
             }
             .onDisappear {
                 resetSignalReadings()
@@ -469,7 +491,7 @@ struct ContentView: View {
         bluetooth.scan()
     }
 
-    private func signalPosition(_ title: String, readings: [SignalStrengthReading], at now: Date,
+    private func signalPosition(_ title: String, readings: [SignalComparisonPolicy.Reading], at now: Date,
                                 position: SignalPosition) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 10) {
@@ -477,16 +499,23 @@ struct ContentView: View {
                 Spacer(minLength: 4)
                 Button("Замерить") { measureSignal(at: position) }
                     .buttonStyle(PixelButtonStyle())
-                    .disabled(!bluetooth.ready || bluetooth.busy || bluetooth.diagnosticRunning || measuringSignalAt != nil)
+                    .disabled(!bluetooth.ready || bluetooth.busy || bluetooth.diagnosticRunning ||
+                              measuringSignalAt != nil || !canMeasureSignal(at: position, now: now))
                     .accessibilityLabel("Замерить сигнал: \(title)")
             }
             if let latest = readings.last {
                 Text(readings.map { String($0.dBm) }.joined(separator: " → ") + " dBm")
                     .font(MotoTheme.font(.headline))
                 let age = now.timeIntervalSince(latest.measuredAt)
-                Text("Последний \(latest.measuredAt.formatted(date: .omitted, time: .shortened)) · " +
-                     (age.isFinite && age >= 0 ? "\(Int(age)) с назад" : "время неизвестно"))
+                let ageDescription = age.isFinite && age >= 0
+                    ? (age < 60 ? "\(Int(age)) с назад" : "\(Int(age / 60)) мин назад")
+                    : "время неизвестно"
+                Text("Последний \(latest.measuredAt.formatted(date: .omitted, time: .shortened)) · \(ageDescription)")
                     .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                if !SignalComparisonPolicy.isRecent(latest, at: now, sessionID: signalCheckGeneration) {
+                    Text("Замер старше 2 минут · начни новый тест")
+                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                }
             } else {
                 Text("Нет замера").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
             }
@@ -495,23 +524,60 @@ struct ContentView: View {
 
     private func resetSignalReadings() {
         signalCheckGeneration = UUID()
-        dashSignals = []
+        firstDashSignals = []
         seatSignals = []
+        returnDashSignals = []
         measuringSignalAt = nil
         signalCheckMessage = nil
     }
 
+    private func signalComparisonText(_ comparison: SignalComparisonPolicy.Summary) -> String {
+        let difference = comparison.seatImprovementDB.magnitude
+            .formatted(.number.precision(.fractionLength(0...1)))
+        if comparison.seatImprovementDB > 0 { return "У сиденья сильнее на \(difference) дБ (медиана)." }
+        if comparison.seatImprovementDB < 0 { return "У сиденья слабее на \(difference) дБ (медиана)." }
+        return "Медианный уровень сигнала одинаков."
+    }
+
+    private func canMeasureSignal(at position: SignalPosition, now: Date) -> Bool {
+        switch position {
+        case .firstDash:
+            return firstDashSignals.count < 3 && seatSignals.isEmpty && returnDashSignals.isEmpty
+        case .seat:
+            return SignalComparisonPolicy.hasEnoughRecentReadings(firstDashSignals, at: now,
+                                                                  sessionID: signalCheckGeneration) &&
+                seatSignals.count < 3 && returnDashSignals.isEmpty
+        case .returnDash:
+            return SignalComparisonPolicy.hasEnoughRecentReadings(firstDashSignals, at: now,
+                                                                  sessionID: signalCheckGeneration) &&
+                SignalComparisonPolicy.hasEnoughRecentReadings(seatSignals, at: now,
+                                                               sessionID: signalCheckGeneration) &&
+                returnDashSignals.count < 3
+        }
+    }
+
     private func measureSignal(at position: SignalPosition) {
-        guard measuringSignalAt == nil else { return }
+        guard measuringSignalAt == nil, bluetooth.ready,
+              canMeasureSignal(at: position, now: Date()) else { return }
         measuringSignalAt = position
         signalCheckMessage = nil
         let generation = signalCheckGeneration
         bluetooth.measureSignalStrength { reading, message in
-            guard generation == signalCheckGeneration else { return }
+            guard generation == signalCheckGeneration, bluetooth.connected else { return }
             measuringSignalAt = nil
             if let reading {
-                if position == .dash { dashSignals = Array((dashSignals + [reading]).suffix(3)) }
-                else { seatSignals = Array((seatSignals + [reading]).suffix(3)) }
+                guard SignalComparisonPolicy.isValidRSSI(reading.dBm) else {
+                    signalCheckMessage = "iOS не вернула доступный RSSI. Повтори замер."
+                    return
+                }
+                let sample = SignalComparisonPolicy.Reading(dBm: reading.dBm,
+                                                            measuredAt: reading.measuredAt,
+                                                            sessionID: generation)
+                switch position {
+                case .firstDash: firstDashSignals.append(sample)
+                case .seat: seatSignals.append(sample)
+                case .returnDash: returnDashSignals.append(sample)
+                }
             }
             signalCheckMessage = message
         }

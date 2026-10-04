@@ -3,6 +3,60 @@ import XCTest
 @testable import MotoLinkCore
 
 final class BLEStreamRecoveryTests: XCTestCase {
+    func testCompletedInitialProfileWriteErrorAllowsOneIdleRetryAfterGrace() {
+        var policy = BLEStreamRecoveryPolicy()
+        XCTAssertTrue(policy.initialProfileWriteFailed(at: 100))
+        XCTAssertTrue(policy.initialProfileRetryPending)
+        XCTAssertNil(policy.nextAction(at: 144.99, eligible: true))
+        // The caller passes false while a write, diagnostic, or other request is active.
+        XCTAssertNil(policy.nextAction(at: 145, eligible: false))
+        XCTAssertTrue(policy.initialProfileRetryPending)
+        XCTAssertEqual(policy.nextAction(at: 160, eligible: true), .retryInitialProfile)
+        XCTAssertFalse(policy.initialProfileRetryPending)
+        XCTAssertFalse(policy.initialProfileWriteFailed(at: 161))
+        XCTAssertNil(policy.nextAction(at: 1000, eligible: true))
+    }
+
+    func testFirstValidStreamCancelsPendingStartupRetry() {
+        var policy = BLEStreamRecoveryPolicy()
+        policy.initialProfileWriteFailed(at: 100)
+        policy.receivedStream(at: 110)
+        XCTAssertFalse(policy.initialProfileRetryPending)
+        for time in stride(from: 110.0, through: 200, by: 1) {
+            policy.receivedStream(at: time)
+            XCTAssertNil(policy.nextAction(at: time, eligible: true))
+        }
+    }
+
+    func testWriteErrorAfterWorkingStreamCannotScheduleAnotherProfile() {
+        var policy = BLEStreamRecoveryPolicy()
+        policy.receivedStream(at: 100)
+        XCTAssertFalse(policy.initialProfileWriteFailed(at: 101))
+        XCTAssertFalse(policy.initialProfileRetryPending)
+        for time in stride(from: 101.0, through: 140, by: 1) {
+            policy.receivedStream(at: time)
+            XCTAssertNil(policy.nextAction(at: time, eligible: true))
+        }
+    }
+
+    func testAnotherProfileAttemptSupersedesPendingStartupRetry() {
+        var policy = BLEStreamRecoveryPolicy()
+        policy.initialProfileWriteFailed(at: 100)
+        policy.initialProfileStarted()
+        XCTAssertFalse(policy.initialProfileRetryPending)
+        XCTAssertNil(policy.nextAction(at: 1000, eligible: true))
+        XCTAssertFalse(policy.initialProfileWriteFailed(at: 1001))
+        XCTAssertNil(policy.nextAction(at: 2000, eligible: true))
+    }
+
+    func testMissingWriteCallbackNeverArmsStartupRetry() {
+        var policy = BLEStreamRecoveryPolicy()
+        for time in stride(from: 0.0, through: 7200, by: 15) {
+            XCTAssertFalse(policy.initialProfileRetryPending)
+            XCTAssertNil(policy.nextAction(at: time, eligible: false))
+        }
+    }
+
     func testNoPreviouslyObservedStreamNeverChangesProfile() {
         var policy = BLEStreamRecoveryPolicy()
         for time in stride(from: 0.0, through: 7200, by: 15) {

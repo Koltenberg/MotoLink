@@ -4,7 +4,7 @@ import Foundation
 /// These are app recovery windows, not Kawasaki keepalive intervals. Callers use
 /// monotonic uptime and report only structurally valid 4A frames.
 struct BLEStreamRecoveryPolicy {
-    enum Action: Equatable { case rearmStream, preserveActiveLink, preserveSilentLink }
+    enum Action: Equatable { case retryInitialProfile, rearmStream, preserveActiveLink, preserveSilentLink }
 
     static let staleInterval: TimeInterval = 45
     static let rearmGraceInterval: TimeInterval = 30
@@ -15,6 +15,29 @@ struct BLEStreamRecoveryPolicy {
     private var lastObservedAt: TimeInterval?
     private var reportedActiveLink = false
     private var reportedSilentLink = false
+    private var initialProfileRetryAt: TimeInterval?
+    private var initialProfileRetryUsed = false
+
+    var initialProfileRetryPending: Bool { initialProfileRetryAt != nil }
+
+    /// Only a completed write-error callback can arm this retry. A missing ATT
+    /// callback still owns its write and must never allow another command.
+    @discardableResult
+    mutating func initialProfileWriteFailed(at now: TimeInterval) -> Bool {
+        guard now.isFinite, now >= 0, (now + Self.staleInterval).isFinite,
+              lastStreamAt == nil, !initialProfileRetryUsed,
+              initialProfileRetryAt == nil else { return false }
+        initialProfileRetryAt = now + Self.staleInterval
+        return true
+    }
+
+    /// A manual or restoration-triggered profile supersedes a scheduled retry.
+    mutating func initialProfileStarted() {
+        if initialProfileRetryAt != nil {
+            initialProfileRetryAt = nil
+            initialProfileRetryUsed = true
+        }
+    }
 
     static func isPacket(_ data: Data) -> Bool {
         let bytes = Array(data)
@@ -31,6 +54,7 @@ struct BLEStreamRecoveryPolicy {
         guard now.isFinite, now >= 0 else { return }
         receivedPacket(at: now)
         lastStreamAt = now
+        initialProfileRetryAt = nil
         rearmedAt = nil
         reportedActiveLink = false
         reportedSilentLink = false
@@ -53,9 +77,17 @@ struct BLEStreamRecoveryPolicy {
             if lastStreamAt != nil { lastStreamAt = now }
             if lastPacketAt != nil { lastPacketAt = now }
             if rearmedAt != nil { rearmedAt = now }
+            if initialProfileRetryAt != nil { initialProfileRetryAt = now + Self.staleInterval }
         }
         lastObservedAt = now
-        guard eligible, let lastStreamAt,
+        guard eligible else { return nil }
+        if let initialProfileRetryAt, lastStreamAt == nil,
+           now >= initialProfileRetryAt {
+            self.initialProfileRetryAt = nil
+            initialProfileRetryUsed = true
+            return .retryInitialProfile
+        }
+        guard let lastStreamAt,
               now - lastStreamAt >= Self.staleInterval else { return nil }
         if let rearmedAt {
             guard now - rearmedAt >= Self.rearmGraceInterval else { return nil }

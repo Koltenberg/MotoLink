@@ -80,6 +80,8 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     var onConfirmedTransportBoundary: ((UUID) -> Void)?
     private var captureProfileSession: UUID?
     private var captureProfileRequested = false
+    private var captureProfileAutomatic = false
+    private var captureProfileAwaitingLateStream = false
     private var resumeCaptureAfterGATTRecovery = false
     private var scanGeneration = UUID()
 
@@ -318,6 +320,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         // Keep current's identity until a terminal callback. A racing didConnect
         // sees connectionWanted=false and cancels instead of preparing telemetry.
         nativeReconnect.cancellationRequested()
+        recordCancelRequest(current, reason: "user_rescan")
         central.cancelPeripheralConnection(current)
     }
 
@@ -380,6 +383,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             } else {
                 cancelResume.requestedCancellation(for: current.identifier)
                 nativeReconnect.cancellationRequested()
+                recordCancelRequest(current, reason: "auto_reconnect_disabled_while_connecting")
                 central.cancelPeripheralConnection(current)
             }
         }
@@ -412,6 +416,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             } else {
                 cancelResume.requestedCancellation(for: current.identifier)
                 nativeReconnect.cancellationRequested()
+                recordCancelRequest(current, reason: "user_pause")
                 central.cancelPeripheralConnection(current)
             }
         } else {
@@ -456,13 +461,20 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     func startCaptureProfileIfNeeded() {
         guard ready, captureProfileSession != session else { return }
         captureProfileRequested = true
-        runFullDiagnostic()
+        runFullDiagnostic(automatic: true)
     }
 
     func runFullDiagnostic() {
+        runFullDiagnostic(automatic: false)
+    }
+
+    private func runFullDiagnostic(automatic: Bool) {
         guard ready, !busy, !diagnosticRunning else { return }
+        streamRecovery.initialProfileStarted()
         captureProfileSession = session
         captureProfileRequested = false
+        captureProfileAutomatic = automatic
+        captureProfileAwaitingLateStream = false
         diagnosticRunning = true
         diagnosticPhase = 1
         streamPackets = 0
@@ -487,6 +499,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
                 self.request([0x03, 0x40, 0x1A, 0x1D, 0x47, 0x0B, 0x41, 0x1B, 0x48, 0x1E, 0x08, 0x45])
             } else {
                 self.diagnosticRunning = false
+                self.captureProfileAutomatic = false
                 if self.decodedStreamFrames > 0 {
                     self.diagnosticStatus = "Поток получен. Экспериментальные значения отмечены."
                 } else if self.streamPackets > 0 {
@@ -603,6 +616,15 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         record("ble_disconnect_context", "connected=\(connected); ready=\(ready); busy=\(busy); diagnosticRunning=\(diagnosticRunning); lastRSSIdBm=\(rssi); rssiAgeSeconds=\(age(lastRSSIAt)); packetAgeSeconds=\(age(lastPacketAt)); streamAgeSeconds=\(age(lastStreamAt)); peripheralState=\(current?.state.rawValue ?? -1); systemReconnectPending=\(nativeReconnect.systemOwnsPendingConnection); cancelPending=\(nativeReconnect.awaitingCancellation); transportRestartPending=\(reconnectPolicy.transportRestartPending); appState=\(UIApplication.shared.applicationState.rawValue); protectedDataAvailable=\(UIApplication.shared.isProtectedDataAvailable); \(Self.errorDetails(error))")
     }
 
+    private func recordCancelRequest(_ peripheral: CBPeripheral, reason: String) {
+        record("cancel_requested", "reason=\(reason); sessionAtRequest=\(session.uuidString); peripheralID=\(peripheral.identifier.uuidString); peripheralState=\(peripheral.state.rawValue); appState=\(UIApplication.shared.applicationState.rawValue); connectionWanted=\(connectionWanted); connected=\(connected); ready=\(ready); systemReconnectPending=\(nativeReconnect.systemOwnsPendingConnection)")
+    }
+
+    private func resetLinkSignal() {
+        lastRSSI = nil
+        lastRSSIAt = nil
+    }
+
     @objc private func enteredBackground() {
         // A foreground request must not turn into a delayed background scan.
         userRescanMayStartScan = false
@@ -630,12 +652,15 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     private func checkStreamRecovery() {
         let eligible = connectionWanted && ready && !busy && !diagnosticRunning
-            && captureProfileSession == session
+            && (captureProfileSession == session || streamRecovery.initialProfileRetryPending)
             && UserDefaults.standard.bool(forKey: "MotoLink.resumeTelemetry")
             && current.map(isCurrent) == true
         guard let action = streamRecovery.nextAction(at: ProcessInfo.processInfo.systemUptime,
                                                       eligible: eligible) else { return }
         switch action {
+        case .retryInitialProfile:
+            record("capture_profile_retry", "Первый профиль прервался после ошибки подтверждённой BLE-записи; за 45 секунд 4A не появился. Один повтор на том же соединении.")
+            startCaptureProfileIfNeeded()
         case .rearmStream:
             record("stream_recovery", "Нет структурно корректного 4A не менее 45 секунд. Один повтор известного профиля 08; соединение сохраняется.")
             request([0x08])
@@ -698,10 +723,10 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         connecting = true
         connected = false
         packetCount = 0
+        // The previous link's RSSI was already captured in its disconnect event.
+        resetLinkSignal()
         // Preserve the last receive time across reconnection to the same bike.
         if lastPacketPeripheralID != peripheral.identifier {
-            lastRSSI = nil
-            lastRSSIAt = nil
             lastPacketAt = nil
             lastPacketPeripheralID = peripheral.identifier
         }
@@ -787,9 +812,11 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     private func prepare(_ peripheral: CBPeripheral, inPlaceRecovery: Bool = false,
                          invalidatedServices: [CBService] = []) {
+        if !inPlaceRecovery { resetLinkSignal() }
         let preserveCaptureProfile = inPlaceRecovery && captureProfileSession == session && !diagnosticRunning
         let resumeInterruptedProfile = inPlaceRecovery && (diagnosticRunning || captureProfileRequested)
         let previousStreamRecovery = inPlaceRecovery ? streamRecovery : nil
+        let previousLateStreamWait = inPlaceRecovery && captureProfileAwaitingLateStream
         let previousCapabilities = inPlaceRecovery ? capabilities : []
         nativeDisconnectLogged = false
         onTransportIdentity?(peripheral.identifier)
@@ -799,6 +826,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         if preserveCaptureProfile { captureProfileSession = session }
         resumeCaptureAfterGATTRecovery = resumeInterruptedProfile
         if let previousStreamRecovery { streamRecovery = previousStreamRecovery }
+        captureProfileAwaitingLateStream = previousLateStreamWait
         if inPlaceRecovery { capabilities = previousCapabilities }
         invalidatedGATTServices = Set(invalidatedServices.map { ObjectIdentifier($0) })
         connected = true
@@ -855,6 +883,8 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         discoveredGATTService = nil
         invalidatedGATTServices.removeAll()
         captureProfileRequested = false
+        captureProfileAutomatic = false
+        captureProfileAwaitingLateStream = false
         resumeCaptureAfterGATTRecovery = false
         streamRecovery.reset()
         lastStreamAt = nil
@@ -908,6 +938,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             if diagnosticRunning { diagnosticStatus = "Проверка прервана; журнал сохранён" }
             diagnosticRunning = false
             captureProfileRequested = false
+            captureProfileAutomatic = false
             if activeWrite == nil { busy = false }
         } else {
             clearTransport(resetGATTRecovery: false)
@@ -953,6 +984,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         // cancel, and ignore late GATT callbacks from the closing session.
         if let current {
             nativeReconnect.cancellationRequested()
+            recordCancelRequest(current, reason: "setup_failure")
             central.cancelPeripheralConnection(current)
         }
     }
@@ -1133,6 +1165,7 @@ extension MotorcycleBluetooth {
                 paused: connectionPaused, autoReconnect: autoReconnect,
                 isConnected: peripheral.state == .connected,
                 isConnecting: peripheral.state == .connecting) else {
+                recordCancelRequest(peripheral, reason: "restored_peripheral_rejected")
                 central.cancelPeripheralConnection(peripheral)
                 continue
             }
@@ -1173,6 +1206,7 @@ extension MotorcycleBluetooth {
         guard current === peripheral, connectionWanted,
               !nativeReconnect.awaitingCancellation, !reconnectPolicy.transportRestartPending else {
             if current === peripheral { nativeReconnect.cancellationRequested() }
+            recordCancelRequest(peripheral, reason: "unwanted_did_connect")
             central.cancelPeripheralConnection(peripheral)
             return
         }
@@ -1276,6 +1310,7 @@ extension MotorcycleBluetooth {
             connected = false
             connecting = false
             nativeReconnect.cancellationRequested()
+            recordCancelRequest(peripheral, reason: "native_reconnect_not_permitted")
             central.cancelPeripheralConnection(peripheral)
         }
     }
@@ -1283,12 +1318,14 @@ extension MotorcycleBluetooth {
     private func recordNativeDisconnection(_ error: Error?, reconnect: Bool) {
         guard !nativeDisconnectLogged else { return }
         recordDisconnectContext(error)
+        resetLinkSignal()
         nativeDisconnectLogged = true
         record("connection", "Отключено; \(Self.errorDetails(error)); reconnect=\(reconnect); systemOwnership=true")
     }
 
     private func completeDisconnection(_ peripheral: CBPeripheral, error: Error?) {
         if !nativeDisconnectLogged { recordDisconnectContext(error) }
+        resetLinkSignal()
         onConfirmedTransportBoundary?(peripheral.identifier)
         if completeUserRescanCancellation(peripheral, error: error) { return }
         let resumeRemembered = cancelResume.completedCancellation(for: peripheral.identifier,
@@ -1378,16 +1415,18 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
         signalStrengthTimeout = nil
         let signalCompletion = signalStrengthCompletion
         signalStrengthCompletion = nil
-        if let error { record("rssi_error", Self.errorDetails(error)) }
-        else {
+        if let error {
+            record("rssi_error", Self.errorDetails(error))
+            signalCompletion?(nil, "iOS не смогла измерить сигнал. Повтори замер.")
+        } else if (-127 ... -1).contains(RSSI.intValue) {
             let measuredAt = Date()
             lastRSSI = RSSI.intValue
             lastRSSIAt = measuredAt
             record("rssi", "dBm=\(RSSI.intValue)")
             signalCompletion?(SignalStrengthReading(dBm: RSSI.intValue, measuredAt: measuredAt), nil)
-        }
-        if error != nil {
-            signalCompletion?(nil, "iOS не смогла измерить сигнал. Повтори замер.")
+        } else {
+            record("rssi_unavailable", "raw=\(RSSI.intValue); source=\(signalCompletion == nil ? "automatic" : "signal_check")")
+            signalCompletion?(nil, "iOS не вернула доступное значение сигнала. Повтори замер.")
         }
     }
 
@@ -1541,6 +1580,13 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             streamPackets += 1
             lastStreamAt = lastPacketAt
             streamRecovery.receivedStream(at: ProcessInfo.processInfo.systemUptime)
+            if captureProfileAwaitingLateStream {
+                // The failed write may have reached the bike despite its ATT
+                // error. A live 4A cancels the retry and satisfies this session.
+                captureProfileSession = session
+                captureProfileAwaitingLateStream = false
+                record("capture_profile_late_stream", "4A поступил после ошибки записи; повтор профиля не требуется")
+            }
             if let timestamp = lastStreamAt { onStreamFrame?(timestamp) }
         }
         let decoded = MotoProtocol.measurements(data, capabilities: capabilities)
@@ -1589,9 +1635,22 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
                 // An error callback completes this ATT operation. Drop the
                 // queued requests without voluntarily surrendering a link
                 // which may still carry telemetry.
+                let retryInitialProfile = captureProfileAutomatic && diagnosticRunning
+                    && captureProfileSession == session && streamRecovery.lastStreamAt == nil
+                if retryInitialProfile {
+                    // Only the completed error callback releases this write.
+                    // A pending callback never permits another BLE command.
+                    captureProfileSession = nil
+                    captureProfileAwaitingLateStream = true
+                    let armed = streamRecovery.initialProfileWriteFailed(at: ProcessInfo.processInfo.systemUptime)
+                    record(armed ? "capture_profile_retry_armed" : "capture_profile_retry_exhausted",
+                           armed ? "Первый профиль прервался; ждём 45 секунд без 4A перед одним повтором"
+                               : "Повторный профиль прервался; других автоматических попыток на этом соединении не будет")
+                }
                 pendingWrites.removeAll()
                 diagnosticRunning = false
                 captureProfileRequested = false
+                captureProfileAutomatic = false
                 diagnosticStatus = "BLE-запись не прошла; журнал сохранён, соединение сохраняется."
                 finishRequest(received: false, failure: "BLE-запись не прошла: \(Self.errorDetails(error)); соединение сохранено")
                 return

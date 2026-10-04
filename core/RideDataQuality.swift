@@ -46,3 +46,73 @@ struct RideTelemetryCoverage: Codable, Equatable {
 
     mutating func endSegment() { previousFrameAt = nil }
 }
+
+/// A bounded chart summary. A missing interval or an explicit interruption
+/// starts a new stroke, even when its two samples land in neighboring bins.
+/// If a gap fits inside one bin, keep only its newest segment in that bin so
+/// its average cannot mix observations from both sides of the outage.
+struct RideChartSeries {
+    struct Bucket {
+        private(set) var count = 0
+        private(set) var sum = 0.0
+        private(set) var last = 0.0
+        private(set) var minimum = Double.infinity
+        private(set) var maximum = -Double.infinity
+
+        var mean: Double { count > 0 ? sum / Double(count) : 0 }
+
+        mutating func append(_ value: Double) {
+            count += 1
+            sum += value
+            last = value
+            minimum = min(minimum, value)
+            maximum = max(maximum, value)
+        }
+    }
+
+    let span: TimeInterval
+    let maximumSilence: TimeInterval
+    private(set) var buckets: [Bucket]
+    private(set) var breakBefore: [Bool]
+    private(set) var gapCount = 0
+    private var previousOffset: TimeInterval?
+    private var previousBin: Int?
+
+    init(binCount: Int, span: TimeInterval, maximumSilence: TimeInterval) {
+        precondition(binCount > 0 && span.isFinite && span > 0 &&
+                     maximumSilence.isFinite && maximumSilence > 0)
+        self.span = span
+        self.maximumSilence = maximumSilence
+        buckets = Array(repeating: Bucket(), count: binCount)
+        breakBefore = Array(repeating: false, count: binCount)
+    }
+
+    @discardableResult
+    mutating func append(offset: TimeInterval, value: Double, interrupted: Bool = false) -> Bool {
+        guard offset.isFinite, (0...span).contains(offset), value.isFinite,
+              previousOffset.map({ offset >= $0 }) ?? true else { return false }
+        let index = min(buckets.count - 1, Int(offset / span * Double(buckets.count)))
+        let startsNewSegment: Bool
+        if let previousOffset {
+            startsNewSegment = interrupted || offset - previousOffset > maximumSilence
+        } else {
+            startsNewSegment = offset > maximumSilence
+        }
+        if startsNewSegment {
+            gapCount += 1
+            breakBefore[index] = true
+            if previousBin == index { buckets[index] = Bucket() }
+        }
+        buckets[index].append(value)
+        previousOffset = offset
+        previousBin = index
+        return true
+    }
+
+    func connects(_ previousBin: Int?, to currentBin: Int) -> Bool {
+        guard let previousBin, buckets.indices.contains(previousBin),
+              buckets.indices.contains(currentBin),
+              buckets[previousBin].count > 0, buckets[currentBin].count > 0 else { return false }
+        return currentBin == previousBin + 1 && !breakBefore[currentBin]
+    }
+}
