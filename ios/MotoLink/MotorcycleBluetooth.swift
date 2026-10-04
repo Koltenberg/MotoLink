@@ -1,6 +1,7 @@
 import Combine
 import CoreBluetooth
 import Foundation
+import OSLog
 import UIKit
 
 struct NearbyMotorcycle: Identifiable {
@@ -17,6 +18,8 @@ struct SignalStrengthReading {
 /// CoreBluetooth delegates run on the main queue. Background operation relies
 /// on the system's pending connection/restoration, never a background timer.
 final class MotorcycleBluetooth: NSObject, ObservableObject {
+    private static let correlationLog = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "app.motolink", category: "ble_correlation")
     @Published private(set) var nearby: [NearbyMotorcycle] = []
     // The full in-memory tail stays exact; only its diagnostic UI refresh is
     // coalesced. Journal writes and ride callbacks still run for every packet.
@@ -1102,6 +1105,14 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private func record(_ kind: String, _ detail: String,
                         characteristic: String? = nil, data: Data? = nil) {
         let event = DiagnosticEvent(kind: kind, detail: detail, characteristic: characteristic, data: data)
+        // A rare matching UUID in the ride JSONL and iOS unified log makes
+        // PacketLogger/sysdiagnose timelines joinable without packet logging.
+        switch kind {
+        case "connection", "native_disconnect", "ble_disconnect_context",
+             "cancel_requested", "native_reconnect_terminal":
+            Self.correlationLog.notice("MotoLink kind=\(kind, privacy: .public) eventID=\(event.id.uuidString, privacy: .public)")
+        default: break
+        }
         let now = ProcessInfo.processInfo.systemUptime
         let shouldPublishEvent = kind != "rx" || (lastEventPublicationUptime.map { now - $0 >= 1 } ?? true)
         if shouldPublishEvent {

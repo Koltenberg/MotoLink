@@ -2,6 +2,7 @@ import Combine
 import CoreLocation
 import Foundation
 import MapKit
+import OSLog
 import UIKit
 
 struct TrackPoint: Codable {
@@ -392,6 +393,8 @@ final class RideArchive {
 }
 
 final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate {
+    private static let correlationLog = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "app.motolink", category: "ride_correlation")
     // Raw diagnostic packets and valid stream frames update the journal much
     // faster than its summary needs to redraw. Keep every count in this source
     // of truth, while limiting summary-only SwiftUI invalidations to once a
@@ -447,6 +450,18 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private var segment = 0
     private var cancellables = Set<AnyCancellable>()
     private var pendingGPSGapReason: String?
+    // Main-queue CoreLocation callback workload, summarized once a minute and
+    // at BLE boundaries. This is callback timing, not GPS radio/HCI timing.
+    private var gpsCallbackWindowStartedAt: Date?
+    private var lastGPSCallbackUptime: TimeInterval?
+    private var gpsCallbackCount = 0
+    private var gpsCallbackFixCount = 0
+    private var gpsCallbackDelayedFixCount = 0
+    private var gpsCallbackMaxAgeSeconds = 0.0
+    private var gpsCallbackMaxDurationMs = 0.0
+    private var gpsCallbackSummaryCount = 0
+    private var gpsCallbackLimitReported = false
+    private var lastGPSDisconnectSummaryUptime: TimeInterval?
     private var batteryMonitoringBeforeRide: Bool?
     private var pendingFinish: (summary: RideSummary, records: [RideRecord], gaps: [GPSGap])?
 
@@ -562,7 +577,9 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         automation.userRequestedFinish(transportConnected: bluetoothConnected)
         persistAutomationFinishMarker()
         recordPhoneHealth(reason: "finished")
+        recordGPSCallbackSummary(reason: "ride_finished")
         guard var summary = active else { return }
+        Self.correlationLog.notice("MotoLink ride_finish_requested rideID=\(summary.id.uuidString, privacy: .public)")
         finishRequested = true
         location.stopUpdatingLocation()
         locationRunning = false
@@ -593,6 +610,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             self.finishingRide = false
             switch result {
             case .success:
+                Self.correlationLog.notice("MotoLink ride_saved rideID=\(finished.id.uuidString, privacy: .public)")
                 self.gaps.append(contentsOf: pendingFinish.gaps)
                 self.historyRevision &+= 1
                 self.historyRefreshStatus = nil
@@ -689,6 +707,61 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     func recordConnectionContext(_ detail: String) {
         guard active != nil, !finishRequested else { return }
         append([RideRecord(kind: "connection_context", timestamp: Date(), detail: detail)])
+    }
+
+    /// One compact workload summary per minute, at a BLE loss, or at ride end.
+    /// Only callback counts/ages/duration are saved, never extra coordinates.
+    func recordGPSCallbackSummary(reason: String) {
+        guard active != nil, !finishRequested else { return }
+        let now = Date()
+        let uptime = ProcessInfo.processInfo.systemUptime
+        if reason == "periodic" {
+            guard let start = gpsCallbackWindowStartedAt,
+                  now.timeIntervalSince(start) >= 60 else { return }
+        } else if reason == "bike_disconnected" {
+            // CoreBluetooth can report adjacent state transitions for one loss.
+            guard lastGPSDisconnectSummaryUptime.map({ uptime - $0 >= 10 }) ?? true else { return }
+            lastGPSDisconnectSummaryUptime = uptime
+        }
+        guard gpsCallbackSummaryCount < 360 else {
+            if !gpsCallbackLimitReported {
+                gpsCallbackLimitReported = true
+                append([RideRecord(kind: "gps_callback_summary", timestamp: now,
+                    detail: "event_limit=360 further_callback_summaries_omitted=true")])
+            }
+            return
+        }
+        gpsCallbackSummaryCount += 1
+        let lastAge = lastGPSCallbackUptime.map { String(format: "%.3f", max(0, uptime - $0)) }
+            ?? "unavailable"
+        let detail = "reason=\(reason); callbacks=\(gpsCallbackCount); fixes=\(gpsCallbackFixCount); "
+            + "fixesOlderThan2s=\(gpsCallbackDelayedFixCount); "
+            + "maxFixAgeSeconds=\(String(format: "%.3f", gpsCallbackMaxAgeSeconds)); "
+            + "maxCallbackDurationMs=\(String(format: "%.3f", gpsCallbackMaxDurationMs)); "
+            + "lastCallbackAgeSeconds=\(lastAge)"
+        append([RideRecord(kind: "gps_callback_summary", timestamp: now, detail: detail)])
+        gpsCallbackWindowStartedAt = nil
+        gpsCallbackCount = 0
+        gpsCallbackFixCount = 0
+        gpsCallbackDelayedFixCount = 0
+        gpsCallbackMaxAgeSeconds = 0
+        gpsCallbackMaxDurationMs = 0
+    }
+
+    private func observeGPSCallback(_ fixes: [CLLocation], receivedAt: Date,
+                                    uptime: TimeInterval, durationMs: Double) {
+        if gpsCallbackWindowStartedAt == nil { gpsCallbackWindowStartedAt = receivedAt }
+        gpsCallbackCount += 1
+        gpsCallbackFixCount += fixes.count
+        lastGPSCallbackUptime = uptime
+        gpsCallbackMaxDurationMs = max(gpsCallbackMaxDurationMs, durationMs)
+        for fix in fixes {
+            let age = receivedAt.timeIntervalSince(fix.timestamp)
+            guard age.isFinite, age >= 0 else { continue }
+            gpsCallbackMaxAgeSeconds = max(gpsCallbackMaxAgeSeconds, age)
+            if age > 2 { gpsCallbackDelayedFixCount += 1 }
+        }
+        recordGPSCallbackSummary(reason: "periodic")
     }
 
     func recordLifecycle(_ detail: String) {
@@ -873,6 +946,16 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         restoringRoute = false
         points = []; gaps = []; pendingGPSGapReason = nil
         segment = 0; previous = nil; distanceAnchor = nil; speedMS = nil; lastLocationAt = nil; lastTelemetryTimes = [:]
+        gpsCallbackWindowStartedAt = nil
+        lastGPSCallbackUptime = nil
+        gpsCallbackCount = 0
+        gpsCallbackFixCount = 0
+        gpsCallbackDelayedFixCount = 0
+        gpsCallbackMaxAgeSeconds = 0
+        gpsCallbackMaxDurationMs = 0
+        gpsCallbackSummaryCount = 0
+        gpsCallbackLimitReported = false
+        lastGPSDisconnectSummaryUptime = nil
         active = RideSummary(id: UUID(), startedAt: Date(), lastSavedAt: Date(), trigger: trigger)
         active?.recordedAppVersion = AppBuild.version
         active?.recordedAppBuild = AppBuild.number
@@ -881,6 +964,9 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         active?.streamCoverage = RideTelemetryCoverage()
         beginBatteryMonitoring()
         append([RideRecord(kind: "started", timestamp: Date(), detail: "GPS и скорость: iPhone. BLE-подключение не доказывает работу двигателя.")])
+        if let id = active?.id {
+            Self.correlationLog.notice("MotoLink ride_started rideID=\(id.uuidString, privacy: .public)")
+        }
         recordLifecycle("iOS \(UIDevice.current.systemVersion); locationPermission=\(authorization.rawValue); lowPower=\(ProcessInfo.processInfo.isLowPowerModeEnabled)")
         if authorization == .authorizedAlways ||
             (authorization == .authorizedWhenInUse && UIApplication.shared.applicationState == .active) {
@@ -945,6 +1031,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let startedAt = active?.startedAt, !finishRequested else { return }
+        let receivedAt = Date()
+        let callbackStartedUptime = ProcessInfo.processInfo.systemUptime
         var records: [RideRecord] = []
         for fix in locations.sorted(by: { $0.timestamp < $1.timestamp }) {
             records.append(RideRecord(kind: "gps_observation", timestamp: fix.timestamp,
@@ -1012,6 +1100,9 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             status = "Запись маршрута · GPS iPhone"
         }
         if !records.isEmpty { append(records) }
+        let callbackFinishedUptime = ProcessInfo.processInfo.systemUptime
+        observeGPSCallback(locations, receivedAt: receivedAt, uptime: callbackFinishedUptime,
+                           durationMs: max(0, (callbackFinishedUptime - callbackStartedUptime) * 1_000))
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
