@@ -110,16 +110,22 @@ enum ProductVisualData {
     /// location or journal is read, and the middle interval is deliberately blank.
     static let routePoints: [TrackPoint] = {
         let start = graphRide.startedAt
-        let first = (0..<35).map { index in
-            TrackPoint(timestamp: start.addingTimeInterval(Double(index * 5)),
-                latitude: 37.7749 + Double(index) * 0.00011 + sin(Double(index) / 4) * 0.00005,
-                longitude: -122.4194 + Double(index) * 0.00017,
+        let first: [TrackPoint] = (0..<35).map { index -> TrackPoint in
+            let offset = Double(index)
+            let latitude: Double = 37.7749 + offset * 0.00011 + sin(offset / 4.0) * 0.00005
+            let longitude: Double = -122.4194 + offset * 0.00017
+            return TrackPoint(timestamp: start.addingTimeInterval(offset * 5.0),
+                latitude: latitude,
+                longitude: longitude,
                 altitude: nil, accuracy: 6, speed: nil, segment: 0)
         }
-        let second = (0..<35).map { index in
-            TrackPoint(timestamp: start.addingTimeInterval(Double(400 + index * 5)),
-                latitude: 37.7810 + Double(index) * 0.00009 + sin(Double(index) / 5) * 0.00004,
-                longitude: -122.4080 + Double(index) * 0.00016,
+        let second: [TrackPoint] = (0..<35).map { index -> TrackPoint in
+            let offset = Double(index)
+            let latitude: Double = 37.7810 + offset * 0.00009 + sin(offset / 5.0) * 0.00004
+            let longitude: Double = -122.4080 + offset * 0.00016
+            return TrackPoint(timestamp: start.addingTimeInterval(400.0 + offset * 5.0),
+                latitude: latitude,
+                longitude: longitude,
                 altitude: nil, accuracy: 6, speed: nil, segment: 1)
         }
         return first + second
