@@ -392,7 +392,26 @@ final class RideArchive {
 }
 
 final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate {
-    @Published private(set) var active: RideSummary?
+    // Raw diagnostic packets and valid stream frames update the journal much
+    // faster than its summary needs to redraw. Keep every count in this source
+    // of truth, while limiting summary-only SwiftUI invalidations to once a
+    // second. The live motorcycle dashboard observes MotorcycleBluetooth.
+    private var activeStorage: RideSummary?
+    private var lastActivePublicationUptime = -Double.infinity
+    @Published private(set) var activeRideID: UUID?
+    private(set) var active: RideSummary? {
+        get { activeStorage }
+        set {
+            let now = ProcessInfo.processInfo.systemUptime
+            let changedRide = activeStorage?.id != newValue?.id
+            if changedRide || now - lastActivePublicationUptime >= 1 {
+                objectWillChange.send()
+                lastActivePublicationUptime = now
+            }
+            activeStorage = newValue
+            if changedRide { activeRideID = newValue?.id }
+        }
+    }
     @Published private(set) var history: [RideSummary] = []
     @Published private(set) var points: [TrackPoint] = []
     @Published private(set) var gaps: [GPSGap] = []

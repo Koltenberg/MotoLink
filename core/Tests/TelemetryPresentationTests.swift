@@ -4,6 +4,16 @@ import XCTest
 
 final class TelemetryPresentationTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1000)
+
+    func testDisplayCadenceTracksFastFramesWithoutPublishingEveryBurst() {
+        XCTAssertTrue(TelemetryDisplayCadence.shouldPublish(at: 10, after: nil, force: false, foreground: true))
+        XCTAssertFalse(TelemetryDisplayCadence.shouldPublish(at: 10.14, after: 10, force: false, foreground: true))
+        XCTAssertTrue(TelemetryDisplayCadence.shouldPublish(at: 10.16, after: 10, force: false, foreground: true))
+        XCTAssertFalse(TelemetryDisplayCadence.shouldPublish(at: 10.3, after: 10, force: false, foreground: false))
+        XCTAssertTrue(TelemetryDisplayCadence.shouldPublish(at: 10.5, after: 10, force: false, foreground: false))
+        XCTAssertTrue(TelemetryDisplayCadence.shouldPublish(at: 10.01, after: 10, force: true, foreground: false))
+        XCTAssertTrue(TelemetryDisplayCadence.shouldPublish(at: 9, after: 10, force: false, foreground: true))
+    }
     private var capabilities: [MotoProtocol.Capability] {
         [cap("ecu_battery12V", 0), cap("engine_water_temperature", 1), cap("inlet_air_temperature", 1),
          cap("fuel_injection", 0), cap("wheel_speed", 1), cap("engine_speed", 0), cap("gear_position", 1), cap("throttle_position", 1)]

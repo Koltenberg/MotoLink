@@ -1,5 +1,23 @@
 import Foundation
 
+/// The motorcycle's 0x4A notifications arrive about every 0.2 seconds in
+/// recorded rides. Keep the live dashboard close to that rate while avoiding
+/// an unlimited stream of SwiftUI publications, especially in the background.
+enum TelemetryDisplayCadence {
+    // 150 ms follows roughly 90–95% of the recorded 4A frames while capping
+    // rapid bursts at 6.7 display publications/s. The stream itself is untouched.
+    static let foregroundInterval: TimeInterval = 0.15
+    static let backgroundInterval: TimeInterval = 0.5
+
+    static func shouldPublish(at now: TimeInterval, after last: TimeInterval?,
+                              force: Bool, foreground: Bool) -> Bool {
+        if force || last == nil { return true }
+        guard now.isFinite, let last, last.isFinite else { return true }
+        let elapsed = now - last
+        return elapsed < 0 || elapsed >= (foreground ? foregroundInterval : backgroundInterval)
+    }
+}
+
 /// A stable catalogue is separate from transient packet values. Missing values
 /// invalidate the reading, never the identity or position of its dashboard row.
 struct TelemetryPresentation {

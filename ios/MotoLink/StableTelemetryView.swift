@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import UIKit
 
@@ -62,14 +63,20 @@ struct MotorcycleDashboardView: View, Equatable {
         .onAppear { visible = true; updateRefreshTimer(for: scenePhase) }
         .onDisappear { visible = false; stopRefreshTimer() }
         .onChange(of: scenePhase) { phase in updateRefreshTimer(for: phase) }
+        .onReceive(bluetooth.$dashboardTelemetry.dropFirst()) { latest in
+            // Render new BLE values when published. The one-second timer below
+            // remains only for freshness expiry and non-BLE state changes.
+            guard visible && scenePhase == .active else { return }
+            sample(catalogue: latest)
+        }
     }
 
-    private func sample(fromTimer: Bool = false) {
+    private func sample(fromTimer: Bool = false, catalogue latest: TelemetryPresentation? = nil) {
         #if targetEnvironment(simulator)
         defer { ProductVisualRefreshProbe.sample(panel: "telemetry", fromTimer: fromTimer) }
         if preview { catalogue = ProductVisualData.catalogue(); connected = true; ready = true; sampledAt = Date(); return }
         #endif
-        catalogue = bluetooth.dashboardTelemetry
+        catalogue = latest ?? bluetooth.dashboardTelemetry
         connected = bluetooth.connected
         ready = bluetooth.ready
         sampledAt = Date()
@@ -188,7 +195,9 @@ struct FocusedRideMetricView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            TimelineView(.periodic(from: .now, by: 1)) { context in
+            TimelineView(.periodic(from: .now, by:
+                scenePhase == .active && (metric.id == "engine_speed" || metric.id == "wheel_speed")
+                    ? TelemetryDisplayCadence.foregroundInterval : 1)) { context in
                 let reading = reading(at: context.date)
                 let scale = reading.number.flatMap {
                     FocusMetricScale.make(id: metric.id, value: $0,
@@ -321,9 +330,8 @@ struct FocusedRideMetricView: View {
     }
 }
 
-/// Drawn only when the focused screen's existing one-second sample changes.
-/// The dial has no animation clock or flashing state, so it does not add BLE,
-/// location or display wakeups. An unavailable reading leaves the dial unlit.
+/// Drawn only at the focused screen's bounded sample cadence. The dial has no
+/// animation clock or flashing state, and an unavailable reading leaves it unlit.
 private struct TachometerGaugeView: View {
     let scale: FocusMetricScale?
     let redline: Int

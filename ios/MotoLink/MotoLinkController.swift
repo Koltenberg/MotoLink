@@ -34,7 +34,7 @@ final class MotoLinkController: ObservableObject {
             self?.rides.bluetoothChanged(connected)
             self?.connectionContext.snapshot(reason: connected ? "bike_connected" : "bike_disconnected")
         }.store(in: &subscriptions)
-        rides.$active.map { $0?.id }.removeDuplicates().receive(on: DispatchQueue.main).sink { [weak self] id in
+        rides.$activeRideID.removeDuplicates().receive(on: DispatchQueue.main).sink { [weak self] id in
             guard let self, self.rides.active?.id == id else { return }
             // Restored rides resume passive observation without consuming next-ride inputs.
             self.connectionContext.setRecording(id != nil)

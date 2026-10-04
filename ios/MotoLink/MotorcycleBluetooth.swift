@@ -18,7 +18,10 @@ struct SignalStrengthReading {
 /// on the system's pending connection/restoration, never a background timer.
 final class MotorcycleBluetooth: NSObject, ObservableObject {
     @Published private(set) var nearby: [NearbyMotorcycle] = []
-    @Published private(set) var events: [DiagnosticEvent] = []
+    // The full in-memory tail stays exact; only its diagnostic UI refresh is
+    // coalesced. Journal writes and ride callbacks still run for every packet.
+    private(set) var events: [DiagnosticEvent] = []
+    private var lastEventPublicationUptime: TimeInterval?
     @Published private(set) var status = "Проверка Bluetooth…"
     @Published private(set) var bluetoothPowered = false
     @Published private(set) var scanning = false
@@ -33,9 +36,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     @Published private(set) var autoReconnect: Bool
     @Published private(set) var selectedName: String
     @Published private(set) var hasRememberedDevice: Bool
-    @Published private(set) var packetCount = 0
-    @Published private(set) var lastPacketAt: Date?
-    @Published private(set) var lastStreamAt: Date?
+    private(set) var packetCount = 0
+    private(set) var lastPacketAt: Date?
+    private(set) var lastStreamAt: Date?
     @Published private(set) var connectionRequestedAt: Date?
     private var connectionWaitOrigin = "none"
     @Published private(set) var reconnectAttempt = 0
@@ -71,7 +74,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     var measurements: [MotoProtocol.Measurement] { telemetryPresentation.measurements }
     @Published private(set) var diagnosticRunning = false
     @Published private(set) var diagnosticStatus = "Готов к полной проверке"
-    @Published private(set) var streamPackets = 0
+    private(set) var streamPackets = 0
     var onMeasurements: (([MotoProtocol.Measurement]) -> Void)?
     var onStreamFrame: ((Date) -> Void)?
     /// Synchronous ride creation before capture commands, independent of any scene.
@@ -863,9 +866,11 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     private func publishTelemetry(force: Bool = false) {
         let now = ProcessInfo.processInfo.systemUptime
-        // Two readable display updates per second; every packet is still
-        // decoded, journalled and passed to onMeasurements without this limit.
-        guard force || lastDashboardPublication == nil || now - lastDashboardPublication! >= 0.5 else { return }
+        // Foreground dashboard follows most of the motorcycle's ~5 Hz 4A stream.
+        // Background UI publications remain slower. Every notification is
+        // decoded and journalled independently of this display limit.
+        guard TelemetryDisplayCadence.shouldPublish(at: now, after: lastDashboardPublication,
+            force: force, foreground: UIApplication.shared.applicationState == .active) else { return }
         lastDashboardPublication = now
         dashboardTelemetry = telemetryPresentation
     }
@@ -1097,6 +1102,12 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private func record(_ kind: String, _ detail: String,
                         characteristic: String? = nil, data: Data? = nil) {
         let event = DiagnosticEvent(kind: kind, detail: detail, characteristic: characteristic, data: data)
+        let now = ProcessInfo.processInfo.systemUptime
+        let shouldPublishEvent = kind != "rx" || (lastEventPublicationUptime.map { now - $0 >= 1 } ?? true)
+        if shouldPublishEvent {
+            objectWillChange.send()
+            lastEventPublicationUptime = now
+        }
         events.append(event)
         if events.count > 300 { events.removeFirst(events.count - 300) }
         logStore?.append(event)

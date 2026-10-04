@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 struct SpeedComparisonView: View, Equatable {
@@ -38,6 +39,10 @@ struct SpeedComparisonView: View, Equatable {
         .onAppear { visible = true; updateTimer(for: scenePhase) }
         .onDisappear { visible = false; timer?.invalidate(); timer = nil }
         .onChange(of: scenePhase) { phase in updateTimer(for: phase) }
+        .onReceive(bluetooth.$dashboardTelemetry.dropFirst()) { latest in
+            guard visible && scenePhase == .active else { return }
+            sample(telemetry: latest)
+        }
     }
     @ViewBuilder private func reading(_ title: String, _ speed: Double?) -> some View {
         let id = title == "GPS" ? "gps_speed" : "wheel_speed"
@@ -69,7 +74,7 @@ struct SpeedComparisonView: View, Equatable {
         .accessibilityValue(speed.map { String(format: "%.0f километров в час", $0) } ?? "Нет свежих данных")
         .accessibilityHint("Дважды коснитесь, чтобы увеличить показатель")
     }
-    private func sample(fromTimer: Bool = false) {
+    private func sample(fromTimer: Bool = false, telemetry latest: TelemetryPresentation? = nil) {
         #if targetEnvironment(simulator)
         defer { ProductVisualRefreshProbe.sample(panel: "speed", fromTimer: fromTimer) }
         if preview { gps = 64; bike = 68; difference = 4; return }
@@ -80,9 +85,10 @@ struct SpeedComparisonView: View, Equatable {
             let age = now.timeIntervalSince(time)
             return age >= 0 && age <= 3 ? rides.speedMS.map { $0 * 3.6 } : nil
         }
-        let field = bluetooth.dashboardTelemetry.fields.first { $0.id == "wheel_speed" }
+        let currentTelemetry = latest ?? bluetooth.dashboardTelemetry
+        let field = currentTelemetry.fields.first { $0.id == "wheel_speed" }
             ?? TelemetryPresentation.placeholder("wheel_speed")
-        let row = bluetooth.dashboardTelemetry.row(field, connected: bluetooth.connected, ready: bluetooth.ready, now: now)
+        let row = currentTelemetry.row(field, connected: bluetooth.connected, ready: bluetooth.ready, now: now)
         bike = row.value
         if let gps, let bike, let gpsTime, let bikeTime = row.measurement?.timestamp,
            abs(gpsTime.timeIntervalSince(bikeTime)) <= 2 { difference = bike - gps }
