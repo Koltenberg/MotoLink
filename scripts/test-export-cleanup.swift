@@ -44,7 +44,8 @@ import Foundation
         try firstWrite.close()
         let discovered = try manager.contentsOfDirectory(at: rides, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
-        try require(discovered == [manifest], "Crash after first raw fsync orphaned the ride")
+        try require(discovered.map { $0.resolvingSymlinksInPath().path } == [manifest.resolvingSymlinksInPath().path],
+                    "Crash after first raw fsync orphaned the ride")
         let manifestAfterInterruptedCheckpoint = try Data(contentsOf: manifest)
         try require(manifestAfterInterruptedCheckpoint == initial, "Initial manifest was lost before checkpoint")
         try JournalInitialManifest.prepare(at: manifest, contents: Data("must not replace saved manifest".utf8))

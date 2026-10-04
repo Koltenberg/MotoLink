@@ -20,7 +20,8 @@ final class JournalRecoveryTests: XCTestCase {
         // No later manifest/checkpoint update is performed: simulate its loss.
         let history = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
-        XCTAssertEqual(history, [manifest])
+        XCTAssertEqual(history.map { $0.resolvingSymlinksInPath().path },
+                       [manifest.resolvingSymlinksInPath().path])
         XCTAssertEqual(try Data(contentsOf: manifest), initial)
         try JournalInitialManifest.prepare(at: manifest, contents: Data("new provisional summary".utf8))
         XCTAssertEqual(try Data(contentsOf: manifest), initial)
