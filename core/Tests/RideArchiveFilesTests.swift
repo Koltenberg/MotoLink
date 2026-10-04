@@ -50,6 +50,17 @@ final class RideArchiveFilesTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: path(id, "json")), before)
     }
 
+    func testNewFractionalSecondFinishCanBeEditedAndDeleted() throws {
+        let id = try fixture()
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: path(id, "json"))) as? [String: Any])
+        object["endedAt"] = "2026-09-24T11:00:00.125Z"
+        try JSONSerialization.data(withJSONObject: object).write(to: path(id, "json"))
+        let store = try RideArchiveFiles(directory: directory)
+        XCTAssertNoThrow(try store.updateMetadata(id, title: "Новый журнал", note: ""))
+        XCTAssertNoThrow(try store.deleteCompletedRide(id))
+        XCTAssertFalse(manager.fileExists(atPath: path(id, "json").path))
+    }
+
     func testDeleteRemovesOnlyThreeExactUUIDFiles() throws {
         let first = try fixture(), second = try fixture()
         let extra = directory.appendingPathComponent(first.uuidString + ".jsonl.backup")

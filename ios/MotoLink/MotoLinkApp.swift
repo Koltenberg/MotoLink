@@ -31,13 +31,18 @@ struct MotoLinkApp: App {
     private var selectedScheme: ColorScheme? {
         #if targetEnvironment(simulator)
         if ProcessInfo.processInfo.arguments.contains("--review-light") { return .light }
-        if ProcessInfo.processInfo.arguments.contains("--review-ride") { return .dark }
+        if ProcessInfo.processInfo.arguments.contains("--review-ride")
+            || ProcessInfo.processInfo.arguments.contains("--review-graphs")
+            || ProcessInfo.processInfo.arguments.contains("--review-graphs-fullscreen") { return .dark }
         #endif
         return appearance == "light" ? .light : appearance == "dark" ? .dark : nil
     }
     @ViewBuilder private var appContent: some View {
         #if targetEnvironment(simulator)
-        if ProcessInfo.processInfo.arguments.contains("--companion-visual-check") {
+        if ProcessInfo.processInfo.arguments.contains("--review-graphs")
+            || ProcessInfo.processInfo.arguments.contains("--review-graphs-fullscreen") {
+            RideGraphVisualCheckView()
+        } else if ProcessInfo.processInfo.arguments.contains("--companion-visual-check") {
             CompanionVisualCheckView(rides: delegate.controller.rides)
         } else {
             ContentView(bluetooth: delegate.controller.bluetooth, rides: delegate.controller.rides)

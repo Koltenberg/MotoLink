@@ -2,6 +2,93 @@ import XCTest
 @testable import MotoLinkCore
 
 final class BLEGATTRecoveryPolicyTests: XCTestCase {
+    func testLateDiscoveryCompletionsAfterObservationDeadlineStillReachReady() {
+        var policy = BLEGATTRecoveryPolicy()
+        policy.beginConnection()
+        // The 60-second observation may run before an original callback after
+        // pairing/background delay. It neither spends retry nor closes setup.
+        XCTAssertEqual(policy.pendingSetupAfterObservationTimeout(linkConnected: true), .discoveringServices)
+        XCTAssertTrue(policy.servicesDiscovered())
+        XCTAssertEqual(policy.pendingSetupAfterObservationTimeout(linkConnected: true), .discoveringCharacteristics)
+        XCTAssertTrue(policy.characteristicsDiscovered())
+        XCTAssertEqual(policy.pendingSetupAfterObservationTimeout(linkConnected: true), .subscribing)
+        XCTAssertEqual(policy.notificationsReady(), true)
+        XCTAssertNil(policy.pendingSetupAfterObservationTimeout(linkConnected: true))
+        XCTAssertFalse(policy.serviceRediscoveryUsed)
+    }
+
+    func testNotificationDeadlineRetainsPendingOperationUntilItsOwnCallback() {
+        var policy = readyPolicy()
+        var queue = BLENotificationQueue()
+        queue.reset(restored: ["A", "B", "C"])
+        queue.received("A", notifying: false)
+        policy.notificationLost()
+        XCTAssertTrue(policy.retryNotification("A", permitted: true))
+        queue.requested("A")
+        for _ in 0..<10 {
+            XCTAssertEqual(policy.pendingSetupAfterObservationTimeout(linkConnected: true), .subscribing)
+            XCTAssertEqual(queue.pending, "A")
+            XCTAssertNil(queue.next(in: ["A", "B", "C"]))
+        }
+        queue.received("A", notifying: true)
+        XCTAssertEqual(queue.confirmed, ["A", "B", "C"])
+        XCTAssertEqual(policy.notificationsReady(), false)
+        XCTAssertEqual(policy.commandDisposition(linkConnected: true, hasControl: true, ready: true), .send)
+        // Accepting the original callback grants no new repair budget.
+        XCTAssertFalse(policy.retryNotification("A", permitted: true))
+    }
+
+    func testObservationCannotResurrectFailedOrDisconnectedSetup() {
+        var policy = BLEGATTRecoveryPolicy()
+        XCTAssertNil(policy.pendingSetupAfterObservationTimeout(linkConnected: true))
+        policy.beginConnection()
+        XCTAssertNil(policy.pendingSetupAfterObservationTimeout(linkConnected: false))
+        policy.markUnavailable()
+        XCTAssertNil(policy.pendingSetupAfterObservationTimeout(linkConnected: true))
+        XCTAssertFalse(policy.servicesDiscovered())
+    }
+
+    func testServiceChangeDuringInitialCharacteristicsCanRepairWithoutCancel() {
+        var policy = BLEGATTRecoveryPolicy()
+        policy.beginConnection()
+        XCTAssertTrue(policy.servicesDiscovered())
+        // iOS invalidates the selected service before its characteristics
+        // complete. An old-characteristics callback cannot advance repair.
+        XCTAssertTrue(policy.beginServiceRediscovery())
+        XCTAssertFalse(policy.characteristicsDiscovered())
+        XCTAssertFalse(policy.beginServiceRediscovery())
+        XCTAssertTrue(policy.servicesDiscovered())
+        XCTAssertTrue(policy.characteristicsDiscovered())
+        XCTAssertEqual(policy.notificationsReady(), true)
+        XCTAssertFalse(policy.beginServiceRediscovery())
+    }
+
+    func testServiceChangeDuringSubscriptionRepairPreservesSingleReadyBoundary() {
+        var policy = readyPolicy()
+        policy.notificationLost()
+        XCTAssertTrue(policy.retryNotification("A", permitted: true))
+        XCTAssertTrue(policy.beginServiceRediscovery())
+        // A callback from the invalidated subscription cannot complete setup.
+        XCTAssertNil(policy.notificationsReady())
+        XCTAssertTrue(policy.servicesDiscovered())
+        XCTAssertTrue(policy.characteristicsDiscovered())
+        XCTAssertEqual(policy.notificationsReady(), false)
+        XCTAssertTrue(policy.everReady)
+        XCTAssertFalse(policy.beginServiceRediscovery())
+    }
+
+    func testInitialSubscriptionsCanBeInvalidatedBeforeFirstReady() {
+        var policy = BLEGATTRecoveryPolicy()
+        policy.beginConnection()
+        XCTAssertTrue(policy.servicesDiscovered())
+        XCTAssertTrue(policy.characteristicsDiscovered())
+        XCTAssertTrue(policy.beginServiceRediscovery())
+        XCTAssertNil(policy.notificationsReady())
+        XCTAssertTrue(policy.servicesDiscovered())
+        XCTAssertTrue(policy.characteristicsDiscovered())
+        XCTAssertEqual(policy.notificationsReady(), true)
+    }
+
     private func readyPolicy() -> BLEGATTRecoveryPolicy {
         var policy = BLEGATTRecoveryPolicy()
         policy.beginConnection()

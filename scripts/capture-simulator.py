@@ -23,6 +23,7 @@ SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
                     "simulator-focus-rpm-light.png",
                     "simulator-focus-gps.png", "simulator-settings.png",
                     "simulator-service-editor.png", "simulator-fuel-editor.png", "simulator-history.png",
+                    "simulator-graphs.png", "simulator-graphs-landscape.png",
                     "simulator-focus-rpm-landscape.png", "simulator-ride-landscape.png")
 ORIENTATION_EVIDENCE = "MotoLinkVisualOrientation.json"
 READY_EVIDENCE = "MotoLinkVisualReady.json"
@@ -377,8 +378,9 @@ def launch_for_capture(device, bundle_id, flags, container, output, name, deadli
         launched = None
     if launched is not None and not re.search(r":\s*[1-9][0-9]*\s*$", launched):
         raise CaptureError(f"App launch did not return a process ID: {launched}")
-    mode = "ride" if "--review-ride" in flags else "companion" if "--companion-visual-check" in flags else "garage"
-    theme = "light" if "--review-light" in flags else "dark" if "--review-ride" in flags else None
+    graphs = "--review-graphs" in flags or "--review-graphs-fullscreen" in flags
+    mode = "ride" if "--review-ride" in flags else "graphs" if graphs else "companion" if "--companion-visual-check" in flags else "garage"
+    theme = "light" if "--review-light" in flags else "dark" if "--review-ride" in flags or graphs else None
     until = min(deadline, time.monotonic() + 20)
     for poll in range(41):
         remaining = until - time.monotonic()
@@ -602,6 +604,9 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
             ("simulator-service-editor.png", ("--companion-visual-check", "--review-service-editor", "--review-light"), False),
             ("simulator-fuel-editor.png", ("--companion-visual-check", "--review-fuel-editor", "--review-light"), False),
             ("simulator-history.png", ("--review-history", "--review-light"), False),
+            ("simulator-graphs.png", ("--review-graphs", "--review-light"), False),
+            ("simulator-graphs-landscape.png",
+             ("--review-graphs-fullscreen", "--review-landscape"), True),
             ("simulator-focus-rpm-landscape.png",
              ("--review-ride", "--review-focus-rpm", "--review-landscape"), True),
             ("simulator-ride-landscape.png", ("--review-ride", "--review-landscape"), True),

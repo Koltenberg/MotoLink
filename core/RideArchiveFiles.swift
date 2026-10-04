@@ -67,7 +67,7 @@ struct RideArchiveFiles {
         let data = try manifest(id)
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let endedAt = object["endedAt"] as? String,
-              ISO8601DateFormatter().date(from: endedAt) != nil else { throw RideArchiveFileError.activeRide }
+              RideJournalDates.date(from: endedAt) != nil else { throw RideArchiveFileError.activeRide }
         return data
     }
 

@@ -56,6 +56,25 @@ final class BLEReconnectPolicyTests: XCTestCase {
         XCTAssertEqual(policy.nextDelay(allowed: true), 5)
     }
 
+    func testStableUnknownStreamResetsBackoffWithoutDecodedCapabilities() {
+        var policy = BLEReconnectPolicy()
+        for _ in 0..<6 { _ = policy.nextDelay(allowed: true) }
+        policy.connectionStarted()
+        // Unknown values/capabilities do not mean an unstable radio transport.
+        var bytes = [UInt8](repeating: 0xFF, count: 100)
+        bytes[0] = 0x4A
+        bytes[1] = 97
+        let packet = Data(bytes)
+        XCTAssertTrue(BLEStreamRecoveryPolicy.isStreamFrame(packet))
+        for sample in 0...75 {
+            if BLEStreamRecoveryPolicy.isStreamFrame(packet) {
+                policy.receivedTelemetry(at: start.addingTimeInterval(Double(sample) / 5))
+            }
+        }
+        XCTAssertEqual(policy.failureCount, 0)
+        XCTAssertEqual(policy.nextDelay(allowed: true), 0)
+    }
+
     func testContinuousTelemetryResetsBackoffAfterFifteenSeconds() {
         var policy = BLEReconnectPolicy()
         _ = policy.nextDelay(allowed: true)

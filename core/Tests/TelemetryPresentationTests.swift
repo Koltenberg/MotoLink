@@ -32,8 +32,9 @@ final class TelemetryPresentationTests: XCTestCase {
         bytes[14] = 0 // Zero throttle is a measured value, not missing data.
         return Data(bytes)
     }
-    private func row(_ state: TelemetryPresentation, _ id: String, at: Date? = nil, connected: Bool = true) -> TelemetryPresentation.Row {
-        state.rows(connected: connected, ready: true, now: at ?? now).first { $0.id == id }!
+    private func row(_ state: TelemetryPresentation, _ id: String, at: Date? = nil,
+                     connected: Bool = true, ready: Bool = true) -> TelemetryPresentation.Row {
+        state.rows(connected: connected, ready: ready, now: at ?? now).first { $0.id == id }!
     }
 
     func testCapabilitiesCreateEightStableRowsBeforeAnyValueArrives() {
@@ -119,6 +120,35 @@ final class TelemetryPresentationTests: XCTestCase {
         XCTAssertEqual(state.fields.map(\.id), ids)
         XCTAssertEqual(row(state, "engine_speed").state, .unavailable)
         XCTAssertNil(row(state, "engine_speed").value)
+    }
+
+    func testRoutineCapabilityRequeryKeepsFreshValuesButFormatChangeInvalidatesThem() {
+        var state = TelemetryPresentation(); state.configure(capabilities)
+        state.receive(stream(), decoded: [sample("engine_speed", value: 5000), sample("wheel_speed", value: 70)])
+        state.configure(Array(capabilities.reversed()))
+        XCTAssertEqual(row(state, "engine_speed").value, 5000)
+        XCTAssertEqual(row(state, "wheel_speed").value, 70)
+
+        let changed = capabilities.map { $0.id == "engine_speed" ? cap("engine_speed", 1) : $0 }
+        state.configure(changed)
+        XCTAssertNil(row(state, "engine_speed").measurement)
+        XCTAssertEqual(row(state, "engine_speed").state, .notDecoded)
+        XCTAssertEqual(row(state, "wheel_speed").value, 70)
+    }
+
+    func testFreshPacketsRemainVisibleDuringPartialSubscriptionFailureOnlyWhileFresh() {
+        var state = TelemetryPresentation(); state.configure(capabilities)
+        state.receive(stream(), decoded: [sample("engine_speed", value: 5000)])
+        XCTAssertEqual(row(state, "engine_speed", ready: false).value, 5000)
+        XCTAssertEqual(row(state, "engine_speed", at: now.addingTimeInterval(4), ready: false).state, .stale)
+        XCTAssertNil(row(state, "engine_speed", at: now.addingTimeInterval(4), ready: false).value)
+        XCTAssertNil(row(state, "engine_speed", connected: false, ready: false).value)
+
+        state.invalidateReadings()
+        XCTAssertEqual(row(state, "engine_speed", ready: false).state, .waiting)
+        state.receive(stream(), decoded: [sample("engine_speed", value: 5000)])
+        state.configure(capabilities.filter { $0.id != "engine_speed" })
+        XCTAssertNil(row(state, "engine_speed", ready: false).value)
     }
 
     func testUnknownSupportedFormatsAreHonestAndUnsupportedAreNotAdvertised() {

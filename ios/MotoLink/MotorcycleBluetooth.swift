@@ -860,9 +860,16 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, self.session == expectedSession, self.isCurrent(peripheral),
                   !self.ready, self.gattRecovery.phase != .unavailable else { return }
-            self.gattSetupUnavailable(peripheral,
-                "Мотоцикл не подтвердил каналы за 60 секунд",
-                preserveOtherNotifications: self.gattRecovery.phase == .subscribing)
+            self.setupTimeout = nil
+            guard let phase = self.gattRecovery.pendingSetupAfterObservationTimeout(
+                linkConnected: peripheral.state == .connected) else { return }
+            // A timer does not complete discoverServices/discoverCharacteristics
+            // or setNotifyValue. Preserve their state and original callbacks;
+            // an in-place repair can still finish after delayed iOS delivery.
+            // No replacement request or physical cancel is issued here.
+            self.status = "Bluetooth подключён; ждём подтверждения каналов…"
+            self.record("gatt_setup_pending",
+                "Нет завершения GATT за 60 секунд; phase=\(phase); сохраняем текущий запрос и BLE-соединение до callback iOS")
         }
         setupTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: timeout)
@@ -1625,6 +1632,14 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             streamPackets += 1
             lastStreamAt = lastPacketAt
             streamRecovery.receivedStream(at: ProcessInfo.processInfo.systemUptime)
+            // Transport stability is independent of our value decoder or a
+            // missing capability response. Structurally complete live frames
+            // prove the same 15-second recovery even for an unknown model.
+            reconnectPolicy.receivedTelemetry(at: lastPacketAt!)
+            if reconnectAttempt > 0, reconnectPolicy.failureCount == 0 {
+                reconnectAttempt = 0
+                record("reconnect_recovered", "Свежие пакеты телеметрии поступают не менее 15 секунд")
+            }
             if captureProfileAwaitingLateStream {
                 // The failed write may have reached the bike despite its ATT
                 // error. A live 4A cancels the retry and satisfies this session.
@@ -1643,11 +1658,6 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             if bytes.first == 0x4A {
                 decodedStreamFrames += 1
                 lastStreamAt = lastPacketAt
-                reconnectPolicy.receivedTelemetry(at: lastPacketAt!)
-                if reconnectAttempt > 0, reconnectPolicy.failureCount == 0 {
-                    reconnectAttempt = 0
-                    record("reconnect_recovered", "Свежая телеметрия поступает не менее 15 секунд")
-                }
             }
             onMeasurements?(decoded)
         }

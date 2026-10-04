@@ -19,10 +19,27 @@ struct BLEGATTRecoveryPolicy {
         phase = .discoveringServices
     }
 
-    /// One rediscovery per established ACL. Another Service Changed callback
-    /// is diagnostic evidence, but cannot start overlapping GATT operations.
+    /// A deadline without a CoreBluetooth completion is only an observation.
+    /// It cannot release the outstanding operation: pairing or background
+    /// delivery may delay the callback while the physical connection stays up.
+    /// Keep the phase and let that original callback finish setup. Starting
+    /// another request here would overlap ATT, and marking unavailable would
+    /// permanently ignore a successful late callback.
+    func pendingSetupAfterObservationTimeout(linkConnected: Bool) -> Phase? {
+        guard linkConnected else { return nil }
+        switch phase {
+        case .discoveringServices, .discoveringCharacteristics, .subscribing: return phase
+        case .idle, .ready, .unavailable: return nil
+        }
+    }
+
+    /// One rediscovery per established ACL. Service Changed invalidates the old
+    /// objects even while discovering their characteristics or subscribing.
+    /// The driver discards callbacks for those invalidated objects, so repair
+    /// must not require having reached .ready on the old service first.
     mutating func beginServiceRediscovery() -> Bool {
-        guard phase == .ready, !serviceRediscoveryUsed else { return false }
+        guard phase == .ready || phase == .discoveringCharacteristics || phase == .subscribing,
+              !serviceRediscoveryUsed else { return false }
         serviceRediscoveryUsed = true
         serviceDiscoveryRetryUsed = false
         characteristicDiscoveryRetryUsed = false

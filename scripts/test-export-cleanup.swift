@@ -27,6 +27,41 @@ import Foundation
             temporary.appendingPathComponent(prefix + UUID().uuidString, isDirectory: true)
         }
 
+        // Real first-write interruption: run the same production preparation
+        // used by RideArchive before JSONL creation, then leave only the first
+        // synchronized raw line as if the process died before its checkpoint.
+        let rides = documents.appendingPathComponent("rides", isDirectory: true)
+        try manager.createDirectory(at: rides, withIntermediateDirectories: true)
+        let rideID = UUID()
+        let manifest = rides.appendingPathComponent(rideID.uuidString + ".json")
+        let journal = rides.appendingPathComponent(rideID.uuidString + ".jsonl")
+        let initial = Data("{\"id\":\"\(rideID.uuidString)\",\"trigger\":\"capture\"}".utf8)
+        try JournalInitialManifest.prepare(at: manifest, contents: initial)
+        try require(exists(manifest) && !exists(journal), "First append was possible before its manifest existed")
+        try Data("{\"kind\":\"started\"}\n".utf8).write(to: journal)
+        let firstWrite = try FileHandle(forWritingTo: journal)
+        try firstWrite.synchronize()
+        try firstWrite.close()
+        let discovered = try manager.contentsOfDirectory(at: rides, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }
+        try require(discovered == [manifest], "Crash after first raw fsync orphaned the ride")
+        let manifestAfterInterruptedCheckpoint = try Data(contentsOf: manifest)
+        try require(manifestAfterInterruptedCheckpoint == initial, "Initial manifest was lost before checkpoint")
+        try JournalInitialManifest.prepare(at: manifest, contents: Data("must not replace saved manifest".utf8))
+        let manifestAfterLaterAppend = try Data(contentsOf: manifest)
+        try require(manifestAfterLaterAppend == initial, "Later append replaced the manifest before raw commit")
+
+        let impossibleManifest = rides.appendingPathComponent("missing-parent/\(UUID().uuidString).json")
+        let forbiddenJournal = rides.appendingPathComponent(UUID().uuidString + ".jsonl")
+        var appendReached = false
+        do {
+            try JournalInitialManifest.prepare(at: impossibleManifest, contents: initial)
+            appendReached = true
+            try Data("must not write".utf8).write(to: forbiddenJournal)
+        } catch { }
+        try require(!appendReached && !exists(forbiddenJournal), "Failed first manifest allowed raw append")
+        print("Initial ride manifest: interruption and failure cases passed")
+
         for prefix in ["MotoLink-capture-", "MotoLink-ride-", "MotoLink-export-"] {
             let directory = owned(prefix), exported = try file(in: directory)
             MotoLinkExportCleanup.removeCompletedExports([exported, exported], temporaryDirectory: temporary)

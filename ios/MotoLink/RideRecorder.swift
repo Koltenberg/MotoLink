@@ -34,7 +34,7 @@ func continuousTrackSegments(_ points: [TrackPoint]) -> [[TrackPoint]] {
     return result
 }
 
-struct RideSummary: Codable, Identifiable {
+struct RideSummary: Codable, Identifiable, JournalRecoverableSummary {
     let id: UUID
     let startedAt: Date
     var endedAt: Date?
@@ -66,6 +66,10 @@ struct RideRecord: Codable {
     // Optional to keep JSONL written by versions before GPS-gap support readable.
     var gap: GPSGap? = nil
     var diagnostic: DiagnosticEvent? = nil
+    // Optional for legacy journals. Checkpoints recover a manifest interrupted
+    // by process termination; distance totals recover GPS accepted after it.
+    var summaryCheckpoint: RideSummary? = nil
+    var distanceMeters: Double? = nil
 }
 
 /// Older JSONL has only segment IDs. Derive missing gap descriptions with stable
@@ -107,6 +111,9 @@ func gpsGaps(in records: [RideRecord], ride: RideSummary) -> [GPSGap] {
 /// loaded on demand, and routes are never silently uploaded or pruned.
 final class RideArchive {
     private let queue = DispatchQueue(label: "app.motolink.rides")
+    private let readQueue = DispatchQueue(label: "app.motolink.ride-read", attributes: .concurrent)
+    // Confined to the write queue. Keep formatter construction off each packet.
+    private let journalEncoder = RideJournalDates.encoder()
     private let directory: URL
     // Confined to queue; changing rides starts a fresh checkpoint schedule.
     private var checkpointRideID: UUID?
@@ -128,10 +135,10 @@ final class RideArchive {
     }
 
     private static var encoder: JSONEncoder {
-        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; return encoder
+        RideJournalDates.encoder()
     }
     private static var decoder: JSONDecoder {
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601; return decoder
+        RideJournalDates.decoder()
     }
 
     func summaries() throws -> [RideSummary] {
@@ -158,10 +165,16 @@ final class RideArchive {
 
     func records(_ id: UUID) throws -> [RideRecord] {
         var records: [RideRecord] = []
+        let decoder = Self.decoder
+        let file = url(id, "jsonl")
+        let reader = try FileHandle(forReadingFrom: file)
+        let length: UInt64
+        do { length = try reader.seekToEnd(); try reader.close() }
+        catch { try? reader.close(); throw error }
         // Raw diagnostics stay on disk; loading the map must not load hours of packets.
-        try CaptureJournalExport.forEachLine(in: url(id, "jsonl")) { line in
-            if let record = try? Self.decoder.decode(RideRecord.self, from: line),
-               record.kind != "diagnostic", record.kind != "gps_observation" {
+        try CaptureJournalExport.forEachLine(in: file, maximumBytes: length) { line in
+            if let record = try? decoder.decode(RideRecord.self, from: line),
+               record.kind != "diagnostic", record.kind != "gps_observation", record.kind != "summary_checkpoint" {
                 records.append(record)
             }
         }
@@ -172,6 +185,10 @@ final class RideArchive {
                 completion: ((Result<Void, Error>) -> Void)? = nil) {
         queue.async { [self] in
             do {
+                // Commit the history entry before creating/writing its JSONL.
+                // A crash after the first fsync must leave a discoverable ride.
+                try JournalInitialManifest.prepare(at: url(summary.id, "json"),
+                                                   contents: journalEncoder.encode(summary))
                 let log = url(summary.id, "jsonl")
                 if !FileManager.default.fileExists(atPath: log.path) {
                     guard FileManager.default.createFile(atPath: log.path, contents: nil,
@@ -193,7 +210,7 @@ final class RideArchive {
                 let finishesRide = summary.endedAt != nil && records.contains { $0.kind == "finished" }
                 if finishesRide {
                     let encoded = try records.map { record -> Data in
-                        var bytes = try Self.encoder.encode(record)
+                        var bytes = try journalEncoder.encode(record)
                         bytes.append(0x0A)
                         return bytes
                     }
@@ -202,7 +219,7 @@ final class RideArchive {
                     }
                 } else {
                     for record in records {
-                        var bytes = try Self.encoder.encode(record)
+                        var bytes = try journalEncoder.encode(record)
                         bytes.append(0x0A)
                         try handle.write(contentsOf: bytes)
                     }
@@ -216,8 +233,13 @@ final class RideArchive {
                 }
                 let uptime = ProcessInfo.processInfo.systemUptime
                 if checkpointPolicy.shouldCheckpoint(at: uptime, forced: forceCheckpoint || boundary) {
+                    let checkpoint = RideRecord(kind: "summary_checkpoint", timestamp: summary.lastSavedAt,
+                                                summaryCheckpoint: summary)
+                    var checkpointBytes = try journalEncoder.encode(checkpoint)
+                    checkpointBytes.append(0x0A)
+                    try handle.write(contentsOf: checkpointBytes)
                     try handle.synchronize()
-                    try Self.encoder.encode(summary).write(to: url(summary.id, "json"),
+                    try journalEncoder.encode(summary).write(to: url(summary.id, "json"),
                         options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
                     checkpointPolicy.checkpointSucceeded(at: uptime)
                 }
@@ -266,9 +288,42 @@ final class RideArchive {
     }
 
     func load(_ id: UUID, completion: @escaping (Result<[RideRecord], Error>) -> Void) {
-        queue.async { [self] in
+        readQueue.async { [self] in
             let result = Result { try records(id) }
             DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    /// Recover a snapshot off the write queue, keeping raw packets and checkpoints out
+    /// of the in-memory route. A complete finish boundary survives a failed
+    /// atomic manifest replacement and is never reopened as a live ride.
+    func recover(_ saved: RideSummary,
+                 completion: @escaping (Result<(RideSummary, [RideRecord]), Error>) -> Void) {
+        queue.async { [self] in
+            // Capture an exact pre-restart prefix before any new append runs.
+            // Replay that immutable prefix without holding up BLE disk writes.
+            let prefix = Result { () throws -> UInt64 in
+                let reader = try FileHandle(forReadingFrom: url(saved.id, "jsonl"))
+                defer { try? reader.close() }
+                return try reader.seekToEnd()
+            }
+            readQueue.async { [self] in
+                let result = Result { () throws -> (RideSummary, [RideRecord]) in
+                    var replay = JournalReplayRecovery(summary: saved)
+                    var records: [RideRecord] = []
+                    let decoder = Self.decoder
+                    try CaptureJournalExport.forEachLine(in: url(saved.id, "jsonl"), maximumBytes: prefix.get()) { line in
+                        guard let record = try? decoder.decode(RideRecord.self, from: line) else { return }
+                        replay.observe(kind: record.kind, at: record.timestamp,
+                                       checkpoint: record.summaryCheckpoint,
+                                       distanceMeters: record.distanceMeters, gpsSpeed: record.point?.speed)
+                        if record.kind != "diagnostic", record.kind != "gps_observation",
+                           record.kind != "summary_checkpoint" { records.append(record) }
+                    }
+                    return (replay.recovered, records)
+                }
+                DispatchQueue.main.async { completion(result) }
+            }
         }
     }
 
@@ -287,6 +342,7 @@ final class RideArchive {
                       completion: @escaping (Result<Void, Error>) -> Void) {
         queue.async { [self] in
             let result = Result { () throws -> Void in
+                _ = try RideArchiveFiles(directory: directory).completedManifest(rideID)
                 let path = url(rideID, "route-estimates")
                 var estimates: [GPSRouteEstimate] = []
                 if FileManager.default.fileExists(atPath: path.path) {
@@ -343,8 +399,7 @@ final class RideArchive {
                 let json = root.appendingPathComponent("ride.json")
                 let raw = root.appendingPathComponent("track-and-telemetry.jsonl")
                 let gpx = root.appendingPathComponent("phone-gps.gpx")
-                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                encoder.dateEncodingStrategy = .iso8601
+                let encoder = Self.encoder; encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 try encoder.encode(summary).write(to: json)
                 try FileManager.default.copyItem(at: url(summary.id, "jsonl"), to: raw)
                 let formatter = ISO8601DateFormatter()
@@ -450,7 +505,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private var automation = RideAutomationPolicy(stoppedPeripheralID:
         UserDefaults.standard.string(forKey: RideRecorder.automaticFinishKey).flatMap(UUID.init(uuidString:)))
     private var pendingManualStart = false
-    private var lastTelemetryTimes: [String: Date] = [:]
+    private var measurementSampling = RideMeasurementSampling()
     private var previous: CLLocation?
     private var distanceAnchor: CLLocation?
     private var locationRunning = false
@@ -471,6 +526,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private var lastGPSDisconnectSummaryUptime: TimeInterval?
     private var batteryMonitoringBeforeRide: Bool?
     private var pendingFinish: (summary: RideSummary, records: [RideRecord], gaps: [GPSGap])?
+    private var finishAfterRestoration = false
+    private var restorationFinishCompletion: ((RideSummary) -> Void)?
 
     override init() {
         super.init()
@@ -480,6 +537,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             let all = try archive?.summaries() ?? []
             history = all.filter { $0.endedAt != nil }
             if var interrupted = all.first(where: { $0.endedAt == nil }) {
+                let saved = interrupted
                 interrupted.interruptionCount += 1
                 interrupted.lastSavedAt = Date()
                 active = interrupted
@@ -487,23 +545,82 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                 let restoredID = interrupted.id
                 // Large old journals must not block AppDelegate initialization
                 // and CoreBluetooth restoration. BLE capture can continue while
-                // the serial archive queue loads the previous route.
-                archive?.load(restoredID) { [weak self] result in
+                // a separate queue loads the previous route.
+                archive?.recover(saved) { [weak self] result in
                     guard let self, self.restoringRoute, let current = self.active,
                           current.id == restoredID else { return }
                     self.restoringRoute = false
                     switch result {
-                    case .success(let records):
+                    case .success(let (recovered, records)):
+                        var repaired = recovered
+                        if recovered.endedAt == nil {
+                            repaired.interruptionCount = max(recovered.interruptionCount, saved.interruptionCount) + 1
+                            repaired.pointCount += max(0, current.pointCount - interrupted.pointCount)
+                            repaired.telemetryCount += max(0, current.telemetryCount - interrupted.telemetryCount)
+                            repaired.rawEventCount = (recovered.rawEventCount ?? 0)
+                                + max(0, (current.rawEventCount ?? 0) - (interrupted.rawEventCount ?? 0))
+                            repaired.acceptedSpeedCount = (recovered.acceptedSpeedCount ?? 0)
+                                + max(0, (current.acceptedSpeedCount ?? 0) - (interrupted.acceptedSpeedCount ?? 0))
+                            repaired.distanceMeters += max(0, current.distanceMeters - interrupted.distanceMeters)
+                            repaired.maxSpeedMS = max(recovered.maxSpeedMS, current.maxSpeedMS)
+                            repaired.lastSavedAt = max(recovered.lastSavedAt, current.lastSavedAt)
+                            if let liveCoverage = current.streamCoverage {
+                                var coverage = recovered.streamCoverage ?? RideTelemetryCoverage()
+                                coverage.mergeLiveDelta(liveCoverage, since: interrupted.streamCoverage)
+                                repaired.streamCoverage = coverage
+                            }
+                        }
                         self.points = records.compactMap(\.point)
-                        self.gaps = gpsGaps(in: records, ride: current)
+                        self.gaps = gpsGaps(in: records, ride: repaired)
                         self.lastLocationAt = self.points.last?.timestamp
                         self.segment = self.points.last?.segment ?? 0
+                        if repaired.endedAt != nil {
+                            // A complete finish line was saved before the old
+                            // process lost its atomic summary write. Keep it
+                            // completed, including after already queued writes.
+                            self.finishRequested = true
+                            self.finishingRide = true
+                            self.archive?.append([], summary: repaired, forceCheckpoint: true) { [weak self] savedResult in
+                                guard let self, self.active?.id == restoredID else { return }
+                                self.finishingRide = false
+                                switch savedResult {
+                                case .success:
+                                    self.history.insert(repaired, at: 0)
+                                    self.historyRevision &+= 1
+                                    self.active = nil
+                                    self.finishRequested = false
+                                    self.pendingGPSGapReason = nil
+                                    self.endBatteryMonitoring()
+                                    self.status = "Поездка сохранена на iPhone"
+                                    let completion = self.restorationFinishCompletion
+                                    self.restorationFinishCompletion = nil
+                                    self.finishAfterRestoration = false
+                                    completion?(repaired)
+                                    self.evaluateAutoStart()
+                                case .failure(let failure):
+                                    self.active = repaired
+                                    self.pendingFinish = (repaired, [], [])
+                                    self.error = failure.localizedDescription
+                                    self.status = "Не удалось завершить сохранение — повторите завершение."
+                                }
+                            }
+                            return
+                        }
+                        self.active = repaired
                     case .failure(let failure):
                         self.error = "Не удалось восстановить все точки поездки: \(failure.localizedDescription)"
                     }
+                    if self.finishAfterRestoration {
+                        self.finishAfterRestoration = false
+                        self.finishRequested = false
+                        let completion = self.restorationFinishCompletion
+                        self.restorationFinishCompletion = nil
+                        self.stop(completion: completion)
+                        return
+                    }
+                    self.append([RideRecord(kind: "gap", timestamp: Date(), detail: "Процесс перезапущен; маршрут возобновляется новым сегментом")])
                     self.resume()
                 }
-                append([RideRecord(kind: "gap", timestamp: Date(), detail: "Процесс перезапущен; маршрут возобновляется новым сегментом")])
                 status = "Незавершённая поездка восстановлена"
                 pendingGPSGapReason = "Приложение было перезапущено"
                 // Do not silently bridge a killed app's GPS gap or auto-start GPS from a cold launch.
@@ -557,7 +674,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             location.requestWhenInUseAuthorization()
         } else if authorization == .authorizedAlways || authorization == .authorizedWhenInUse {
             begin(trigger: "manual")
-        } else { status = "Разреши геопозицию в Настройках → MotoLink" }
+        } else { begin(trigger: "manual"); status = "Запись данных мотоцикла · без GPS" }
     }
 
     func resume() {
@@ -576,6 +693,13 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func stop(completion: ((RideSummary) -> Void)? = nil) {
+        if restoringRoute {
+            finishAfterRestoration = true
+            finishRequested = true
+            if let completion { restorationFinishCompletion = completion }
+            status = "Восстанавливаем и сохраняем поездку…"
+            return
+        }
         guard active != nil, !finishingRide, let archive else { return }
         if pendingFinish != nil {
             persistPendingFinish(using: archive, completion: completion)
@@ -685,11 +809,9 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func recordMeasurements(_ measurements: [MotoProtocol.Measurement]) {
-        guard active != nil, !finishRequested, !measurements.isEmpty else { return }
+        guard let summary = active, !finishRequested, !measurements.isEmpty else { return }
         let sampled = measurements.filter { sample in
-            guard sample.timestamp.timeIntervalSince(lastTelemetryTimes[sample.id] ?? .distantPast) >= 1 else { return false }
-            lastTelemetryTimes[sample.id] = sample.timestamp
-            return true
+            sample.timestamp >= summary.startedAt && measurementSampling.accepts(id: sample.id, at: sample.timestamp)
         }
         guard !sampled.isEmpty else { return }
         active?.telemetryCount += sampled.count
@@ -920,7 +1042,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func export(_ summary: RideSummary) {
-        guard !exporting, !changingHistory, !finishRequested, let archive else { return }
+        guard !exporting, !changingHistory, !finishRequested, !restoringRoute, let archive else { return }
         exporting = true
         archive.export(summary) { [weak self] result in
             self?.exporting = false
@@ -932,7 +1054,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func exportGPX(_ summary: RideSummary) {
-        guard !exporting, !changingHistory, !finishRequested, let archive else { return }
+        guard !exporting, !changingHistory, !finishRequested, !restoringRoute, let archive else { return }
         exporting = true
         archive.exportGPXDetails(summary) { [weak self] result in
             self?.exporting = false
@@ -952,7 +1074,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         finishRequested = false
         restoringRoute = false
         points = []; gaps = []; pendingGPSGapReason = nil
-        segment = 0; previous = nil; distanceAnchor = nil; speedMS = nil; lastLocationAt = nil; lastTelemetryTimes = [:]
+        segment = 0; previous = nil; distanceAnchor = nil; speedMS = nil; lastLocationAt = nil
+        measurementSampling = RideMeasurementSampling()
         gpsCallbackWindowStartedAt = nil
         lastGPSCallbackUptime = nil
         gpsCallbackCount = 0
@@ -980,7 +1103,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             locationRunning = true
             location.startUpdatingLocation()
         }
-        status = "Сеанс записывается на iPhone · GPS и доступные данные Bluetooth"
+        status = locationRunning ? "Запись поездки на iPhone" : "Запись данных мотоцикла · без GPS"
         if let id = active?.id { onNewRideStarted?(id) }
     }
 
@@ -1025,6 +1148,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             if active != nil { resume() }
             evaluateAutoStart()
         } else if authorization == .denied || authorization == .restricted {
+            let requestedStart = pendingManualStart
             pendingManualStart = false
             location.stopUpdatingLocation()
             locationRunning = false
@@ -1032,7 +1156,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             previous = nil
             distanceAnchor = nil
             markGPSGap("Нет разрешения на геопозицию")
-            status = "Нет доступа к геопозиции; точки маршрута не записываются"
+            if requestedStart { begin(trigger: "manual") }
+            status = active == nil ? "GPS выключен" : "Запись данных мотоцикла · без GPS"
         }
     }
 
@@ -1102,7 +1227,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                 active?.maxSpeedMS = maximum
                 active?.acceptedSpeedCount = (active?.acceptedSpeedCount ?? 0) + 1
             }
-            records.append(RideRecord(kind: "gps", timestamp: fix.timestamp, point: point))
+            records.append(RideRecord(kind: "gps", timestamp: fix.timestamp, point: point,
+                                      distanceMeters: active?.distanceMeters))
             previous = fix; speedMS = speed; lastLocationAt = fix.timestamp
             status = "Запись маршрута · GPS iPhone"
         }

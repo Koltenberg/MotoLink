@@ -3,11 +3,15 @@ import Foundation
 /// Copies an arbitrarily long ride without loading its raw packets into memory.
 /// A newline isolates a possibly truncated final record after process termination.
 enum CaptureJournalExport {
-    static func forEachLine(in source: URL, _ consume: (Data) throws -> Void) throws {
+    static func forEachLine(in source: URL, maximumBytes: UInt64? = nil,
+                            _ consume: (Data) throws -> Void) throws {
         let input = try FileHandle(forReadingFrom: source)
         defer { try? input.close() }
         var pending = Data()
-        while let chunk = try input.read(upToCount: 64 * 1024), !chunk.isEmpty {
+        var remaining = maximumBytes ?? UInt64.max
+        while remaining > 0,
+              let chunk = try input.read(upToCount: Int(min(remaining, 64 * 1024))), !chunk.isEmpty {
+            remaining -= UInt64(chunk.count)
             pending.append(chunk)
             while let newline = pending.firstIndex(of: 10) {
                 let line = Data(pending[..<newline])

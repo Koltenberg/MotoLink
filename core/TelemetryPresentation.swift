@@ -42,6 +42,7 @@ struct TelemetryPresentation {
     private(set) var fields: [Field] = []
     private var readings: [String: MotoProtocol.Measurement] = [:]
     private var supportedIDs: Set<String> = []
+    private var supportedModes: [String: UInt8] = [:]
     private var hasCapabilities = false
 
     static let primaryIDs = ["wheel_speed", "gear_position", "engine_speed", "engine_water_temperature"]
@@ -78,8 +79,15 @@ struct TelemetryPresentation {
     mutating func configure(_ capabilities: [MotoProtocol.Capability]) {
         hasCapabilities = true
         let supported = capabilities.filter(\.supported)
-        supportedIDs = Set(supported.map { $0.id == "fuel_injection" ? "fuel_injection_raw" : $0.id })
-        readings.removeAll()
+        let newModes = Dictionary(supported.map { capability in
+            (capability.id == "fuel_injection" ? "fuel_injection_raw" : capability.id, capability.mode)
+        }, uniquingKeysWith: { _, latest in latest })
+        // A routine capability requery must not blank fresh readings. If a
+        // field disappears or its wire format changes, its old value is no
+        // longer safe to display. Disconnects invalidate readings separately.
+        readings = readings.filter { supportedModes[$0.key] == newModes[$0.key] }
+        supportedModes = newModes
+        supportedIDs = Set(newModes.keys)
         var additions: [Field] = supported.map { capability in
             let id = capability.id == "fuel_injection" ? "fuel_injection_raw" : capability.id
             if let metadata = Self.known[id] {
@@ -125,7 +133,16 @@ struct TelemetryPresentation {
         let sample = readings[field.id]
         let state: State
         if !connected { state = .disconnected }
-        else if !ready { state = .waiting }
+        else if !ready {
+            // A failed subscription on one channel must not hide fresh,
+            // decoded packets still arriving on another channel of the same
+            // connected bike. `ready` continues to gate vendor writes, not
+            // the validity of a value already received from the bike.
+            if supportedIDs.contains(field.id), field.decoded, let sample {
+                let age = now.timeIntervalSince(sample.timestamp)
+                state = sample.value.isFinite && age >= 0 && age <= field.maximumAge ? .receiving : .stale
+            } else { state = .waiting }
+        }
         else if !supportedIDs.contains(field.id) { state = hasCapabilities ? .unavailable : .waiting }
         else if !field.decoded { state = .notDecoded }
         else if let sample {

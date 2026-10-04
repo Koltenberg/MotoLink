@@ -56,6 +56,39 @@ enum ProductVisualData {
         value.receive(Data(), decoded: readings)
         return value
     }
+
+    static let graphRide: RideSummary = {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        return RideSummary(id: UUID(uuidString: "10000000-0000-4000-8000-000000000001")!,
+                           startedAt: start, endedAt: start.addingTimeInterval(900),
+                           lastSavedAt: start.addingTimeInterval(900), trigger: "simulator")
+    }()
+
+    /// Synthetic bike values with a real empty interval. A graph must leave the
+    /// interval blank rather than visually joining both sides of an outage.
+    static let graphRecords: [RideRecord] = {
+        let start = graphRide.startedAt
+        var records: [RideRecord] = []
+        for second in stride(from: 0, through: 900, by: 5) {
+            let at = start.addingTimeInterval(TimeInterval(second))
+            if second == 350 {
+                records.append(RideRecord(kind: "bluetooth", timestamp: at, detail: "disconnected"))
+            }
+            if (350...430).contains(second) { continue }
+            let progress = Double(second) / 900
+            let values: [(String, String, Double, String)] = [
+                ("wheel_speed", "Скорость байка", 35 + 55 * abs(sin(progress * 12)), "км/ч"),
+                ("engine_speed", "Обороты", 2500 + 4500 * abs(sin(progress * 12 + 0.2)), "об/мин"),
+                ("throttle_position", "Дроссель", 12 + 60 * abs(sin(progress * 12 + 0.6)), "%")
+            ]
+            for value in values {
+                records.append(RideRecord(kind: "telemetry", timestamp: at,
+                    measurement: MotoProtocol.Measurement(id: value.0, label: value.1,
+                        value: value.2, unit: value.3, timestamp: at, source: "Simulator example")))
+            }
+        }
+        return records
+    }()
 }
 
 /// A capture handshake from the mounted application view, not merely its PID.
@@ -152,7 +185,8 @@ final class ProductVisualReadyView: UIView {
             }
         }
         let expected: UIUserInterfaceStyle = arguments.contains("--review-light") ? .light
-            : arguments.contains("--review-ride") ? .dark : .unspecified
+            : arguments.contains("--review-ride") || arguments.contains("--review-graphs")
+                || arguments.contains("--review-graphs-fullscreen") ? .dark : .unspecified
         // Simulator-only capture preference. Never changes the user's stored theme.
         if expected != .unspecified && window.overrideUserInterfaceStyle != expected {
             window.overrideUserInterfaceStyle = expected
@@ -165,6 +199,7 @@ final class ProductVisualReadyView: UIView {
         guard let since = visibleSince else { visibleSince = now; return }
         guard now - since >= 2 else { return }
         let mode = arguments.contains("--review-ride") ? "ride"
+            : arguments.contains("--review-graphs") || arguments.contains("--review-graphs-fullscreen") ? "graphs"
             : arguments.contains("--companion-visual-check") ? "companion" : "garage"
         let evidence: [String: Any] = [
             "ready": true, "launchToken": token, "mode": mode,

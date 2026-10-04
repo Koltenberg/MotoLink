@@ -381,21 +381,48 @@ struct RideDetailView: View {
             showGapBoundaries = false
             rides.load(ride) { result in
                 guard loadRequestID == requestID else { return }
-                loading = false
                 switch result {
                 case .success(let records):
-                    points = records.compactMap(\.point)
-                    ranges = RideMeasurementRange.summarize(records)
-                    trends = RideTrend.summarize(records, ride: ride)
-                    let preferred = ["gps_speed", "throttle_position"]
-                    selectedTrendIDs = Set(preferred.filter { id in trends.contains { $0.id == id } })
-                    for trend in trends where selectedTrendIDs.count < 2 { selectedTrendIDs.insert(trend.id) }
-                    gaps = gpsGaps(in: records, ride: ride)
-                case .failure(let failure): error = failure.localizedDescription
+                    // Archive reading is asynchronous; reducing a large JSONL
+                    // into route, ranges and chart bins must also stay off the
+                    // main thread so opening History cannot freeze the controls.
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let summary = RideDetailVisualSummary.make(records: records, ride: ride)
+                        DispatchQueue.main.async {
+                            guard loadRequestID == requestID else { return }
+                            loading = false
+                            points = summary.points
+                            ranges = summary.ranges
+                            trends = summary.trends
+                            selectedTrendIDs = summary.selectedTrendIDs
+                            gaps = summary.gaps
+                        }
+                    }
+                case .failure(let failure):
+                    loading = false
+                    error = failure.localizedDescription
                 }
             }
         }
         .onDisappear { loadRequestID = UUID() }
+    }
+}
+
+private struct RideDetailVisualSummary {
+    let points: [TrackPoint]
+    let ranges: [RideMeasurementRange]
+    let trends: [RideTrend]
+    let selectedTrendIDs: Set<String>
+    let gaps: [GPSGap]
+
+    static func make(records: [RideRecord], ride: RideSummary) -> Self {
+        let trends = RideTrend.summarize(records, ride: ride)
+        let preferred = ["gps_speed", "throttle_position"]
+        var selected = Set(preferred.filter { id in trends.contains { $0.id == id } })
+        for trend in trends where selected.count < 2 { selected.insert(trend.id) }
+        return Self(points: records.compactMap(\.point),
+                    ranges: RideMeasurementRange.summarize(records), trends: trends,
+                    selectedTrendIDs: selected, gaps: gpsGaps(in: records, ride: ride))
     }
 }
 
@@ -781,6 +808,47 @@ private struct RideTrendFullscreen: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 }
+
+#if targetEnvironment(simulator)
+/// Uses the same chart controls as a saved ride, with fictional telemetry only.
+/// The fixture is never built for a physical iPhone or written to ride history.
+struct RideGraphVisualCheckView: View {
+    @State private var selectedIDs: Set<String> = ["wheel_speed", "engine_speed", "throttle_position"]
+    private let trends = RideTrend.summarize(ProductVisualData.graphRecords,
+                                              ride: ProductVisualData.graphRide)
+
+    private var selectedTrends: [RideTrend] { trends.filter { selectedIDs.contains($0.id) } }
+    private var fullscreen: Bool {
+        ProcessInfo.processInfo.arguments.contains("--review-graphs-fullscreen")
+    }
+
+    var body: some View {
+        Group {
+            if fullscreen {
+                RideTrendFullscreen(trends: trends, selectedIDs: $selectedIDs,
+                                    elapsed: ProductVisualData.graphRide.elapsed)
+            } else {
+                NavigationStack {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text("Графики поездки").font(MotoTheme.font(.title2))
+                            RideTrendPicker(trends: trends, selectedIDs: $selectedIDs)
+                            RideTrendPlot(trends: selectedTrends,
+                                          elapsed: ProductVisualData.graphRide.elapsed)
+                                .frame(height: 260).clipShape(PixelFrame())
+                            RideTrendLegend(trends: selectedTrends)
+                            Text("Разрыв линий — отсутствие данных мотоцикла. Значения для проверки вымышлены.")
+                                .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                        }.padding(16)
+                    }
+                    .background(MotoTheme.background)
+                    .navigationTitle("Поездка · пример")
+                }
+            }
+        }
+    }
+}
+#endif
 
 private struct GPSGapCard: View {
     let gap: GPSGap

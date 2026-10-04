@@ -49,6 +49,24 @@ final class RideDataQualityTests: XCTestCase {
         XCTAssertEqual(restored.frameCount, 3)
     }
 
+    func testReplayMergesOnlyFramesArrivingWhileOlderJournalIsRestored() throws {
+        var baseline = RideTelemetryCoverage()
+        baseline.receive(at: Date(timeIntervalSince1970: 1000))
+        baseline.receive(at: Date(timeIntervalSince1970: 1001))
+        var replayed = baseline
+        replayed.receive(at: Date(timeIntervalSince1970: 1002))
+        // The process-restored baseline deliberately has no previous frame.
+        var live = try JSONDecoder().decode(RideTelemetryCoverage.self, from: JSONEncoder().encode(baseline))
+        live.receive(at: Date(timeIntervalSince1970: 2000))
+        live.receive(at: Date(timeIntervalSince1970: 2001))
+        replayed.mergeLiveDelta(live, since: baseline)
+        XCTAssertEqual(replayed.frameCount, 5)
+        XCTAssertEqual(replayed.observedSeconds, 3)
+        XCTAssertEqual(replayed.lastFrameAt, Date(timeIntervalSince1970: 2001))
+        replayed.receive(at: Date(timeIntervalSince1970: 2002))
+        XCTAssertEqual(replayed.observedSeconds, 4)
+    }
+
     func testChartSeriesConnectsOnlyAdjacentBinsWithinObservedContinuity() {
         var series = RideChartSeries(binCount: 10, span: 100, maximumSilence: 15)
         series.append(offset: 11, value: 20)

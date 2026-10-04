@@ -45,6 +45,21 @@ struct RideTelemetryCoverage: Codable, Equatable {
     }
 
     mutating func endSegment() { previousFrameAt = nil }
+
+    /// Callbacks may arrive while a previous journal is replayed off the main
+    /// queue. Add only observations captured since its initial manifest was
+    /// loaded; never bridge the process restart into the old stream segment.
+    mutating func mergeLiveDelta(_ current: Self, since baseline: Self?) {
+        let additionalFrames = max(0, current.frameCount - (baseline?.frameCount ?? 0))
+        guard additionalFrames > 0 else { return }
+        frameCount += additionalFrames
+        observedSeconds += max(0, current.observedSeconds - (baseline?.observedSeconds ?? 0))
+        if firstFrameAt == nil { firstFrameAt = current.firstFrameAt }
+        if let liveLast = current.lastFrameAt, lastFrameAt == nil || liveLast > lastFrameAt! {
+            lastFrameAt = liveLast
+        }
+        previousFrameAt = current.previousFrameAt
+    }
 }
 
 /// A bounded chart summary. A missing interval or an explicit interruption

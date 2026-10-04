@@ -75,6 +75,7 @@ class SimulatorCaptureTests(unittest.TestCase):
             self.failure(args)
         if args[0] == "launch":
             self.active_mode = ("ride" if "--review-ride" in args else
+                                "graphs" if "--review-graphs" in args or "--review-graphs-fullscreen" in args else
                                 "companion" if "--companion-visual-check" in args else "home")
             self.theme = "light" if "--review-light" in args else "default"
             self.landscape = "--review-landscape" in args
@@ -83,7 +84,7 @@ class SimulatorCaptureTests(unittest.TestCase):
                 (self.container / "Documents" / CAPTURE.READY_EVIDENCE).write_text(json.dumps({
                     "ready": True, "launchToken": token,
                     "mode": "garage" if self.active_mode == "home" else self.active_mode,
-                    "appearance": "light" if "--review-light" in args else "dark" if "--review-ride" in args else "light",
+                    "appearance": "light" if "--review-light" in args else "dark" if self.active_mode in ("ride", "graphs") else "light",
                     "windowWidth": 844 if self.landscape else 390,
                     "windowHeight": 390 if self.landscape else 844,
                     "capturedAt": time.time(), "visibleSeconds": 2.1, **self.ready_override,
@@ -200,6 +201,8 @@ class SimulatorCaptureTests(unittest.TestCase):
             ("simulator-service-editor.png", "companion", "light", False),
             ("simulator-fuel-editor.png", "companion", "light", False),
             ("simulator-history.png", "home", "light", False),
+            ("simulator-graphs.png", "graphs", "light", False),
+            ("simulator-graphs-landscape.png", "graphs", "default", True),
             ("simulator-focus-rpm-landscape.png", "ride", "default", True),
             ("simulator-ride-landscape.png", "ride", "default", True),
         ]
@@ -237,6 +240,7 @@ class SimulatorCaptureTests(unittest.TestCase):
             ("simulator-fuel-editor.png",
              ("--companion-visual-check", "--review-fuel-editor", "--review-light"), "companion"),
             ("simulator-history.png", ("--review-history", "--review-light"), "garage"),
+            ("simulator-graphs.png", ("--review-graphs", "--review-light"), "graphs"),
         ]:
             with self.subTest(name=name):
                 self.assertEqual(launches[name], expected_flags)
@@ -285,7 +289,9 @@ class SimulatorCaptureTests(unittest.TestCase):
         debug = self.output / "debug-attempt1"
         # The first landscape state fails immediately. Rebooting and reinstalling
         # a second simulator cannot fix UIKit's portrait-only presentation.
-        self.assertEqual(len(list(debug.glob("*.png"))), len(CAPTURE.SCREENSHOT_NAMES) - 1)
+        self.assertEqual({path.name for path in debug.glob("*.png")},
+                         {name for name in CAPTURE.SCREENSHOT_NAMES
+                          if not name.endswith("-landscape.png") or name == "simulator-graphs-landscape.png"})
         manifest = json.loads((debug / "failure.json").read_text())
         self.assertEqual(manifest["status"], "failed")
         self.assertIn("Landscape rotation was not applied", manifest["error"])
@@ -296,7 +302,7 @@ class SimulatorCaptureTests(unittest.TestCase):
 
     def test_last_ride_launch_failure_does_not_publish_earlier_views(self):
         def fail(args):
-            if (args[0] == "launch" and "--review-landscape" in args
+            if (args[0] == "launch" and "--review-ride" in args and "--review-landscape" in args
                     and "--review-focus-rpm" not in args):
                 raise CAPTURE.CaptureError("ride landscape launch failed")
         self.failure = fail

@@ -934,7 +934,20 @@ struct BikeActivityView: View, Equatable {
               }
             }
             .accessibilityHidden(true)
-            Text(snapshot.label).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            .overlay(alignment: .bottomLeading) {
+                if compact {
+                    Text(snapshot.live ? "Свежие данные" : "Нет свежих данных")
+                        .font(MotoTheme.font(.caption))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1).minimumScaleFactor(0.75)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(MotoTheme.panel.opacity(0.94), in: PixelFrame())
+                        .accessibilityLabel(snapshot.live ? "Свежие данные мотоцикла" : "Нет свежих данных мотоцикла")
+                }
+            }
+            if !compact {
+                Text(snapshot.label).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            }
             if !compact { HStack(spacing: 4) {
                 ForEach(0..<4) { index in
                     Rectangle().fill(snapshot.live && index < (snapshot.engineLevel ?? 0)

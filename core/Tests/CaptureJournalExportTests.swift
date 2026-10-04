@@ -3,6 +3,23 @@ import XCTest
 @testable import MotoLinkCore
 
 final class CaptureJournalExportTests: XCTestCase {
+    func testSnapshotReaderNeverConsumesLaterAppendsWhileReplayingARide() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let prefix = Data("first\nsecond\n".utf8)
+        try (prefix + Data("third\n".utf8)).write(to: file)
+        var lines: [String] = []
+        try CaptureJournalExport.forEachLine(in: file, maximumBytes: UInt64(prefix.count)) { line in
+            lines.append(String(decoding: line, as: UTF8.self))
+            let append = try FileHandle(forWritingTo: file)
+            defer { try? append.close() }
+            try append.seekToEnd()
+            try append.write(contentsOf: Data("later\n".utf8))
+        }
+        XCTAssertEqual(lines, ["first", "second"])
+        XCTAssertEqual(try Data(contentsOf: file), prefix + Data("third\nlater\nlater\n".utf8))
+    }
+
     func testLargeCapturePreservesEveryRawByteIncludingUnknownPackets() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
