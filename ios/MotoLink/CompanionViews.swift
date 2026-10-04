@@ -338,18 +338,14 @@ struct CompanionView: View {
                     if let estimate = odometerEstimate {
                         Text(String(format: "≈ %.0f км", estimate.kilometers))
                             .font(MotoTheme.font(.title3)).monospacedDigit()
-                        Text(String(format: "Расчёт: %@ %@ · %.0f км + %.1f км по GPS iPhone%@. Пропуски GPS не включены.",
-                                    anchorLabel(estimate.anchorSource),
-                                    estimate.anchorDate.formatted(date: .abbreviated, time: .shortened),
-                                    estimate.anchorKilometers, estimate.addedGPSKilometers,
-                                    estimate.includesActiveRide ? ", включая текущую запись" : ""))
+                        Text("Приборка + записанные поездки. Поездки без записи и пропуски GPS не учтены.")
                             .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                         if estimate.skippedOverlappingRide {
                             Text("Часть поездки до точки отсчёта неизвестна: оценка может быть занижена.")
                                 .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                         }
                     } else if store.data.currentOdometerKm != nil {
-                        Text("Для расчётного пробега подтверди текущее показание с приборки. Старые записи без даты нельзя безопасно сложить с поездками.")
+                        Text("Подтверди пробег с приборки, чтобы считать следующие поездки.")
                             .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     }
                     Button("Обновить пробег") { editingBike = true }
@@ -561,7 +557,10 @@ struct FuelEditor: View {
                     date = $0
                     dateEdited = true
                 }), includesTime: true)
-                CompanionNumberField(title: "Одометр с приборки, км", example: "Если не знаешь, оставь пустым", value: $odometer)
+                CompanionNumberField(title: "Одометр с приборки, км",
+                                     example: odometerEstimate != nil || entry?.odometerSource == .gpsEstimate
+                                         ? "Можно оставить пустым" : "Показание с приборки",
+                                     value: $odometer)
                 if let entry, !entry.hasInstrumentOdometer {
                     Text(String(format: "Пустое поле: оставим сохранённую оценку ≈ %.0f км. Чтобы уточнить, введи пробег с приборки.", entry.odometerKm))
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
@@ -569,7 +568,7 @@ struct FuelEditor: View {
                     Text(String(format: "Пустое поле: сохраним ≈ %.0f км по GPS и отметим как оценку. Проверь и исправь позже по приборке.", estimate.kilometers))
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 } else {
-                    Text("Для заправки нужен пробег с приборки. После нового показания приложение сможет показывать примерный общий пробег по записанным поездкам.")
+                    Text("Укажи пробег с приборки. Он станет точкой отсчёта для следующих поездок.")
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }
                 if rides.active != nil {
