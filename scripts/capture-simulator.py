@@ -19,11 +19,15 @@ from pathlib import Path
 SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
                     "simulator-companion.png", "simulator-companion-large-text.png",
                     "simulator-garage-light.png", "simulator-ride.png",
-                    "simulator-ride-light.png", "simulator-focus-rpm.png",
+                    "simulator-ride-light.png", "simulator-bike-idle.png",
+                    "simulator-bike-high-speed.png", "simulator-bike-stale.png",
+                    "simulator-bike-partial.png", "simulator-focus-rpm.png",
                     "simulator-focus-rpm-light.png",
                     "simulator-focus-gps.png", "simulator-settings.png",
+                    "simulator-scale-settings.png", "simulator-scale-editor.png", "simulator-diagnostics.png",
                     "simulator-service-editor.png", "simulator-fuel-editor.png", "simulator-history.png",
                     "simulator-graphs.png", "simulator-graphs-landscape.png",
+                    "simulator-route.png", "simulator-route-landscape.png",
                     "simulator-focus-rpm-landscape.png", "simulator-ride-landscape.png")
 ORIENTATION_EVIDENCE = "MotoLinkVisualOrientation.json"
 READY_EVIDENCE = "MotoLinkVisualReady.json"
@@ -379,8 +383,9 @@ def launch_for_capture(device, bundle_id, flags, container, output, name, deadli
     if launched is not None and not re.search(r":\s*[1-9][0-9]*\s*$", launched):
         raise CaptureError(f"App launch did not return a process ID: {launched}")
     graphs = "--review-graphs" in flags or "--review-graphs-fullscreen" in flags
-    mode = "ride" if "--review-ride" in flags else "graphs" if graphs else "companion" if "--companion-visual-check" in flags else "garage"
-    theme = "light" if "--review-light" in flags else "dark" if "--review-ride" in flags or graphs else None
+    route = "--review-route-fullscreen" in flags
+    mode = "ride" if "--review-ride" in flags else "route" if route else "graphs" if graphs else "companion" if "--companion-visual-check" in flags else "garage"
+    theme = "light" if "--review-light" in flags else "dark" if "--review-ride" in flags or graphs or route else None
     until = min(deadline, time.monotonic() + 20)
     for poll in range(41):
         remaining = until - time.monotonic()
@@ -596,17 +601,27 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
             ("simulator-garage-light.png", ("--review-light",), False),
             ("simulator-ride.png", ("--review-ride",), False),
             ("simulator-ride-light.png", ("--review-ride", "--review-light"), False),
+            ("simulator-bike-idle.png", ("--review-ride", "--review-bike-idle"), False),
+            ("simulator-bike-high-speed.png", ("--review-ride", "--review-bike-high-speed"), False),
+            ("simulator-bike-stale.png", ("--review-ride", "--review-bike-stale"), False),
+            ("simulator-bike-partial.png", ("--review-ride", "--review-bike-partial"), False),
             ("simulator-focus-rpm.png", ("--review-ride", "--review-focus-rpm"), False),
             ("simulator-focus-rpm-light.png",
              ("--review-ride", "--review-focus-rpm", "--review-light"), False),
             ("simulator-focus-gps.png", ("--review-ride", "--review-focus-gps", "--review-light"), False),
             ("simulator-settings.png", ("--review-settings", "--review-light"), False),
+            ("simulator-scale-settings.png", ("--review-scale-settings", "--review-light"), False),
+            ("simulator-scale-editor.png", ("--review-scale-editor", "--review-light"), False),
+            ("simulator-diagnostics.png", ("--review-diagnostics", "--review-light"), False),
             ("simulator-service-editor.png", ("--companion-visual-check", "--review-service-editor", "--review-light"), False),
             ("simulator-fuel-editor.png", ("--companion-visual-check", "--review-fuel-editor", "--review-light"), False),
             ("simulator-history.png", ("--review-history", "--review-light"), False),
             ("simulator-graphs.png", ("--review-graphs", "--review-light"), False),
+            ("simulator-route.png", ("--review-route-fullscreen", "--review-route-estimates", "--review-light"), False),
             ("simulator-graphs-landscape.png",
              ("--review-graphs-fullscreen", "--review-landscape"), True),
+            ("simulator-route-landscape.png",
+             ("--review-route-fullscreen", "--review-route-estimates", "--review-landscape"), True),
             ("simulator-focus-rpm-landscape.png",
              ("--review-ride", "--review-focus-rpm", "--review-landscape"), True),
             ("simulator-ride-landscape.png", ("--review-ride", "--review-landscape"), True),

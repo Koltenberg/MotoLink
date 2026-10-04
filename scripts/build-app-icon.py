@@ -29,12 +29,17 @@ def build() -> Image.Image:
     d.polygon([(8, 39), (13, 31), (19, 25), (38, 22), (49, 28), (55, 39),
                (53, 47), (11, 47)], fill=GRAPHITE)
 
-    # Oversized tires are the visual anchor. They are fully within the mask.
-    for center_x in (18, 47):
-        d.ellipse((center_x - 11, 33, center_x + 11, 55), fill=RUBBER)
-        d.ellipse((center_x - 8, 36, center_x + 8, 52), fill=SCARLET)
-        d.ellipse((center_x - 5, 39, center_x + 5, 49), fill=INK)
-        d.rectangle((center_x - 2, 42, center_x + 2, 46), fill=IVORY)
+    # The front wheel is seen at a slight angle. Its narrower, taller profile
+    # conveys the turn without making the tiny Home Screen icon busy.
+    d.ellipse((7, 35, 29, 55), fill=RUBBER)
+    d.ellipse((10, 38, 26, 52), fill=SCARLET)
+    d.ellipse((13, 41, 23, 49), fill=INK)
+    d.rectangle((16, 43, 20, 46), fill=IVORY)
+    d.ellipse((38, 32, 56, 56), fill=RUBBER)
+    d.ellipse((41, 35, 53, 53), fill=SCARLET_DARK)
+    d.ellipse((42, 36, 50, 52), fill=SCARLET)
+    d.ellipse((44, 39, 48, 49), fill=INK)
+    d.rectangle((45, 43, 48, 46), fill=IVORY)
 
     # An intentionally simple motorcycle silhouette: seat, tank, frame and fork.
     d.polygon([(14, 25), (27, 25), (31, 28), (28, 31), (14, 30), (11, 27)],
@@ -51,12 +56,15 @@ def build() -> Image.Image:
     d.rectangle((32, 35, 36, 38), fill=IVORY)
     d.rectangle((21, 39, 29, 40), fill=SCARLET)
 
-    # Fork and cockpit use just a few large squares instead of tiny mechanics.
-    d.polygon([(43, 30), (46, 30), (50, 42), (47, 42)], fill=SCARLET)
-    d.rectangle((43, 23, 45, 30), fill=SCARLET)
-    d.rectangle((40, 21, 51, 23), fill=IVORY)
+    # A broad lamp face and offset fork echo that same slight front angle.
+    # Keep only large shapes; no tiny mechanical details or decoration.
+    d.polygon([(43, 30), (47, 30), (49, 43), (46, 44)], fill=SCARLET)
+    d.rectangle((43, 23, 46, 29), fill=SCARLET)
+    d.rectangle((40, 21, 50, 23), fill=IVORY)
     d.rectangle((49, 20, 53, 22), fill=SCARLET)
-    d.rectangle((49, 30, 53, 33), fill=IVORY)
+    d.polygon([(47, 27), (53, 28), (54, 33), (49, 35), (46, 32)],
+              fill=SCARLET_DARK)
+    d.rectangle((49, 29, 53, 32), fill=IVORY)
 
     # The artwork sits optically above centre inside iOS's rounded mask.
     centered = Image.new("RGB", (64, 64), INK)

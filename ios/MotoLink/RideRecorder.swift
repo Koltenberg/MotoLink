@@ -34,7 +34,7 @@ func continuousTrackSegments(_ points: [TrackPoint]) -> [[TrackPoint]] {
     return result
 }
 
-struct RideSummary: Codable, Identifiable, JournalRecoverableSummary {
+struct RideSummary: Codable, Identifiable, JournalRecoverableSummary, RideHistoryItem {
     let id: UUID
     let startedAt: Date
     var endedAt: Date?
@@ -54,6 +54,9 @@ struct RideSummary: Codable, Identifiable, JournalRecoverableSummary {
     var title: String? = nil
     var note: String? = nil
     var metadataUpdatedAt: Date? = nil
+    // Optional so manifests and checkpoints from all earlier versions decode.
+    var favorite: Bool? = nil
+    var isFavorite: Bool { favorite ?? false }
     var elapsed: TimeInterval { max(0, (endedAt ?? Date()).timeIntervalSince(startedAt)) }
 }
 
@@ -261,6 +264,18 @@ final class RideArchive {
                 let files = try RideArchiveFiles(directory: directory)
                 let data = try files.updateMetadata(id, title: title, note: note, activeID: activeID)
                 return try Self.decoder.decode(RideSummary.self, from: data)
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func setFavorite(_ favorite: Bool, for id: UUID, activeID: UUID?,
+                     completion: @escaping (Result<RideSummary, Error>) -> Void) {
+        queue.async { [self] in
+            let result = Result { () throws -> RideSummary in
+                let files = try RideArchiveFiles(directory: directory)
+                return try Self.decoder.decode(RideSummary.self,
+                    from: files.setFavorite(favorite, for: id, activeID: activeID))
             }
             DispatchQueue.main.async { completion(result) }
         }
@@ -1000,6 +1015,28 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         }
     }
 
+    func setRideFavorite(_ favorite: Bool, for id: UUID) {
+        guard !changingHistory, !exporting, !finishRequested, !finishingRide, let archive else {
+            historyError = "Дождитесь завершения операции с журналом."; return
+        }
+        guard id != active?.id, history.contains(where: { $0.id == id && $0.endedAt != nil }) else {
+            historyError = "Сначала завершите эту поездку."; return
+        }
+        historyError = nil
+        historyRefreshStatus = nil
+        changingHistory = true
+        archive.setFavorite(favorite, for: id, activeID: active?.id) { [weak self] result in
+            guard let self else { return }
+            self.changingHistory = false
+            switch result {
+            case .success(let updated):
+                self.historyRevision &+= 1
+                if let index = self.history.firstIndex(where: { $0.id == updated.id }) { self.history[index] = updated }
+            case .failure(let failure): self.historyError = failure.localizedDescription
+            }
+        }
+    }
+
     func deleteCompletedRides(_ ids: [UUID], completion: ((Bool) -> Void)? = nil) {
         guard !changingHistory, !exporting, let archive else {
             historyError = "Дождитесь завершения операции с журналом."; completion?(false); return
@@ -1312,10 +1349,10 @@ final class RoadEstimateController: ObservableObject {
                 self.timeout?.cancel()
                 self.timeout = nil
                 self.directions = nil
-                guard let route = response?.routes.first(where: {
+                guard let route = response?.routes.filter({
                     $0.polyline.pointCount > 1 && $0.distance.isFinite && $0.distance > 0
                         && $0.distance / max(1, gap.duration) <= 100
-                }) else {
+                }).min(by: { $0.distance < $1.distance }) else {
                     self.busyGap = nil
                     self.message = "Дорожный вариант не получен. Нужен интернет и доступный маршрут Apple Maps. Повторите вручную позже. \(error?.localizedDescription ?? "Подходящего маршрута нет.")"
                     return
@@ -1329,7 +1366,7 @@ final class RoadEstimateController: ObservableObject {
                 let estimate = GPSRouteEstimate(gapID: gap.id, calculatedAt: Date(),
                     coordinates: coordinates.map { GPSCoordinate(latitude: $0.latitude, longitude: $0.longitude) },
                     distanceMeters: route.distance, expectedTravelTime: route.expectedTravelTime,
-                    source: "Apple Maps · автомобильный маршрут · предположение, не запись GPS")
+                    source: "Короткий из предложенных Apple маршрутов · предположение, не GPS")
                 recorder.saveEstimate(estimate, for: ride) { [weak self] result in
                     guard let self, self.generation == expected else { return }
                     self.busyGap = nil

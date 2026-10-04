@@ -827,8 +827,12 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private func prepare(_ peripheral: CBPeripheral, inPlaceRecovery: Bool = false,
                          invalidatedServices: [CBService] = []) {
         if !inPlaceRecovery { resetLinkSignal() }
-        let preserveCaptureProfile = inPlaceRecovery && captureProfileSession == session && !diagnosticRunning
-        let resumeInterruptedProfile = inPlaceRecovery && (diagnosticRunning || captureProfileRequested)
+        let continuation = BLEGATTRecoveryPolicy.captureContinuation(
+            sameLink: inPlaceRecovery, startedInSession: captureProfileSession == session,
+            running: diagnosticRunning, requested: captureProfileRequested,
+            interrupted: resumeCaptureAfterGATTRecovery)
+        let preserveCaptureProfile = continuation == .preserve
+        let resumeInterruptedProfile = continuation == .restart
         let previousStreamRecovery = inPlaceRecovery ? streamRecovery : nil
         let previousLateStreamWait = inPlaceRecovery && captureProfileAwaitingLateStream
         let previousCapabilities = inPlaceRecovery ? capabilities : []
@@ -951,6 +955,11 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         setupTimeout?.cancel()
         setupTimeout = nil
         if preserveOtherNotifications {
+            // A stopped diagnostic may not have reached the stream-start frame.
+            // Carry this fact through a later explicit Service Changed repair;
+            // captureProfileSession alone means started, not completed.
+            resumeCaptureAfterGATTRecovery = resumeCaptureAfterGATTRecovery
+                || diagnosticRunning || captureProfileRequested
             gattRecovery.markUnavailable()
             ready = false
             notificationQueue.stopWaiting()

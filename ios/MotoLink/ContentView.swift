@@ -52,7 +52,7 @@ struct ContentView: View {
                         if !bluetooth.hasRememberedDevice {
                             Button { showDiscovery = true; bluetooth.scan() } label: {
                                 Label("Добавить мотоцикл", systemImage: "plus").frame(maxWidth: .infinity)
-                            }.buttonStyle(PixelButtonStyle(prominent: true)).padding(14).background(MotoTheme.background)
+                            }.buttonStyle(PixelButtonStyle(prominent: true)).padding(14).background(MotoTheme.backdrop)
                         }
                     }
                     .navigationBarTitleDisplayMode(.inline)
@@ -123,6 +123,9 @@ struct ContentView: View {
             if ProcessInfo.processInfo.arguments.contains("--review-history") { selectedTab = 2 }
             if ProcessInfo.processInfo.arguments.contains("--review-settings") {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { showSettings = true }
+            }
+            if ProcessInfo.processInfo.arguments.contains("--review-diagnostics") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { showDiagnostics = true }
             }
             #endif
             updateScreenAwake()
@@ -220,11 +223,11 @@ struct ContentView: View {
                     }
                 }.padding(.horizontal, compact ? 12 : 18).padding(.vertical, compact ? 8 : 18)
             }
-            .background(MotoTheme.background)
+            .background(MotoTheme.backdrop)
             .safeAreaInset(edge: .bottom) {
                 if hasRideDisplay {
                     captureControls.padding(.horizontal, 16).padding(.vertical, 8)
-                        .background(MotoTheme.background)
+                        .background(MotoTheme.backdrop)
                 }
             }
         }
@@ -375,7 +378,7 @@ struct ContentView: View {
                             .font(MotoTheme.font(.subheadline)).padding(.top, 8)
                     }.foregroundStyle(MotoTheme.secondary)
                 }.padding(20)
-            }.background(MotoTheme.background).navigationTitle("Выбрать мотоцикл")
+            }.background(MotoTheme.backdrop).navigationTitle("Выбрать мотоцикл")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showDiscovery = false } } }
         }.onAppear { if bluetooth.hasRememberedDevice { recordAfterPairing = rides.autoRecord } }
@@ -467,7 +470,7 @@ struct ContentView: View {
                             .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     }
                 }.padding(20)
-            }.background(MotoTheme.background)
+            }.background(MotoTheme.backdrop)
                 .refreshable { checkVisibility() }
                 .navigationTitle("Проверить связь").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showConnectionCheck = false } } }
@@ -615,7 +618,7 @@ struct ContentView: View {
                         Button("Разрешить GPS в фоне") { rides.requestBackgroundPermission() }
                     }
                 } header: { Text("Автоматические поездки").font(MotoTheme.font(.caption)) }
-                footer: { Text("После первого выбора ждём байк и сохраняем запись на iPhone. Заверши поездку кнопкой после остановки. Если смахнуть приложение, открой его снова. iOS может ограничить запуск в фоне.").font(MotoTheme.font(.caption)) }
+                footer: { Text("Выбери байк один раз. Запись сохраняется на iPhone; после остановки нажми «Завершить».").font(MotoTheme.font(.caption)) }
                 PixelSection("Экран") {
                     PixelChoiceField(title: "Тема", selection: $appearance, options: [
                         .init(value: "system", label: "Как на iPhone"),
@@ -623,8 +626,8 @@ struct ContentView: View {
                         .init(value: "dark", label: "Тёмная")
                     ])
                     Toggle("Не гасить экран при записи", isOn: $keepScreenOn)
-                    NavigationLink("Цветовые шкалы показателей") { MetricVisualSettingsView() }
-                    Text("Светлая тема удобнее на солнце. Экран остаётся включённым только пока Moto Link открыт.")
+                    NavigationLink("Цвета показателей") { MetricVisualSettingsView() }
+                    Text("Светлая тема — для солнца. Удержание экрана работает, пока приложение открыто.")
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }
                 Section {
@@ -640,10 +643,10 @@ struct ContentView: View {
                 PixelSection("О Moto Link") {
                     Text("Всё для твоего байка — на телефоне.")
                     LabeledContent("Версия", value: AppBuild.version)
-                    Text("Гараж, запись и история работают без интернета. Показатели байка пока экспериментальные. Анимация иллюстрирует данные; свет фар — оформление. Скорость не корректируется автоматически.")
+                    Text("Поездки и гараж — без интернета. Рисунок иллюстрирует показания; свет и дым — оформление.")
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }
-            }.font(MotoTheme.font(.body)).scrollContentBackground(.hidden).background(MotoTheme.background)
+            }.font(MotoTheme.font(.body)).scrollContentBackground(.hidden).background(MotoTheme.backdrop)
                 .navigationTitle("Настройки").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showSettings = false } } }
         }
@@ -655,11 +658,15 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     Label("Журнал и сведения iPhone доступны без мотоцикла.", systemImage: "iphone")
                         .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
-                    ConnectionTestSettingsView()
-                    diagnosticControls
                     logSection
+                    DisclosureGroup("Условия проверки") {
+                        ConnectionTestSettingsView().padding(.top, 10)
+                    }.font(MotoTheme.font(.subheadline))
+                    DisclosureGroup("Проверка каналов") {
+                        diagnosticControls.padding(.top, 10)
+                    }.font(MotoTheme.font(.subheadline))
                 }.padding(20)
-            }.background(MotoTheme.background).navigationTitle("Диагностика")
+            }.background(MotoTheme.backdrop).navigationTitle("Диагностика")
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showDiagnostics = false } } }
                 .sheet(item: $bluetooth.exportedFiles) { files in ShareSheet(items: files.urls) }
         }
@@ -748,7 +755,7 @@ struct ContentView: View {
     private var logSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Журнал").font(MotoTheme.font(.title3))
+                Text("Журнал связи").font(MotoTheme.font(.title3))
                 Spacer()
                 Button { bluetooth.export() } label: {
                     if bluetooth.exportBusy { ProgressView() }
@@ -760,9 +767,10 @@ struct ContentView: View {
                 Text("Не удалось сохранить журнал: \(error)")
                     .font(MotoTheme.font(.caption)).foregroundStyle(.orange)
             }
-            Text("Локальный JSONL: время, каналы и исходные байты. Экспорт может содержать идентификаторы мотоцикла. Последние 5 файлов, до 10 МБ каждый; сведения подключения сохраняются отдельно.")
+            Text("Сохранён на iPhone. Экспорт — для разбора связи; он может содержать идентификаторы байка.")
                 .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-            LazyVStack(alignment: .leading, spacing: 14) {
+            DisclosureGroup("Последние события") {
+              LazyVStack(alignment: .leading, spacing: 14) {
                 ForEach(Array(bluetooth.events.suffix(40).reversed())) { event in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
@@ -783,7 +791,8 @@ struct ContentView: View {
                         Divider()
                     }
                 }
-            }
+              }.padding(.top, 12)
+            }.font(MotoTheme.font(.subheadline))
         }
         .padding(18)
         .pixelPanel()
@@ -835,7 +844,7 @@ struct ContentView: View {
                 PixelSection("Твой гараж") {
                     Text("Укажи пробег с приборки, добавь заправку и интервалы обслуживания. Если дату замены не помнишь, достаточно пробега.")
                 }
-            }.scrollContentBackground(.hidden).background(MotoTheme.background)
+            }.scrollContentBackground(.hidden).background(MotoTheme.backdrop)
                 .navigationTitle("Начать за минуту").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showHelp = false } } }
         }
@@ -857,7 +866,7 @@ private struct HistoryHubView: View {
             }.padding(.horizontal, 18).padding(.vertical, 10)
             if section == 0 { RideHistoryView(rides: rides) }
             else { RideStatisticsView(rides: rides) }
-        }.background(MotoTheme.background).navigationTitle("История")
+        }.background(MotoTheme.backdrop).navigationTitle("История")
     }
 }
 
@@ -896,8 +905,7 @@ struct BikeActivityView: View, Equatable {
     private var snapshot: BikeActivitySnapshot {
         #if targetEnvironment(simulator)
         if preview {
-            let now = Date()
-            return BikeActivitySnapshot.sample(connected: true, ready: true, measurements: ProductVisualData.measurements(at: now), now: now)
+            return ProductVisualData.bikeActivitySnapshot()
         }
         #endif
         return sampledSnapshot
@@ -905,7 +913,7 @@ struct BikeActivityView: View, Equatable {
 
     private var animating: Bool {
         visible && scenePhase == .active && !reduceMotion && !lowPower && snapshot.live
-            && (snapshot.moving || snapshot.running || (snapshot.thermalLevel ?? 0) > 0)
+            && (snapshot.moving || snapshot.running)
     }
 
     var body: some View {
@@ -920,6 +928,9 @@ struct BikeActivityView: View, Equatable {
                             let x = CGFloat(index) * size.width / 14
                             let rect = CGRect(x: x, y: size.height * 0.97, width: size.width / 20, height: 2)
                             canvas.fill(Path(rect), with: .color(Color.primary.opacity(0.12)))
+                        }
+                        if animating && snapshot.wind {
+                            drawWind(context: canvas, size: size, phase: phase)
                         }
                     }
                     Image("BikeSpriteDetail")
@@ -992,7 +1003,9 @@ struct BikeActivityView: View, Equatable {
     }
 
     private func drawEffects(context: GraphicsContext, size: CGSize, phase: Int) {
-        guard snapshot.live else { return }
+        // Decorative effects are absent in the background, Reduce Motion and
+        // Low Power Mode. The unmodified motorcycle illustration remains.
+        guard animating else { return }
         let unit = size.width / 160
         func pixel(_ x: Double, _ y: Double, _ w: Double, _ h: Double, _ color: Color) {
             let rect = CGRect(x: (x * 160).rounded() * unit, y: (y * 80).rounded() * unit,
@@ -1000,55 +1013,89 @@ struct BikeActivityView: View, Equatable {
             context.fill(Path(rect), with: .color(color))
         }
         if snapshot.running {
-            // Cosmetic head/tail lights, not decoded switches or beam state.
-            pixel(0.817, 0.345, 3, 2, Color(red: 1, green: 0.93, blue: 0.77).opacity(0.8))
-            pixel(0.838, 0.364, 6, 2, Color(red: 1, green: 0.93, blue: 0.77).opacity(0.22))
-            pixel(0.865, 0.380, 8, 3, Color(red: 1, green: 0.93, blue: 0.77).opacity(0.10))
-            pixel(0.126, 0.196, 3, 1, MotoTheme.accent.opacity(0.65))
-            // Exhaust exists at cold idle too. Density follows RPM, not a smoke sensor.
-            for index in 0..<(2 + (snapshot.engineLevel ?? 0)) {
-                let travel = Double((index + phase) % 7) / 7
-                let heat = Double(snapshot.thermalLevel ?? 0) / 8
-                pixel(0.165 - travel * 0.13, 0.49 - travel * (0.10 + heat * 0.14),
-                      3 + travel * 4, 2 + travel * 2, Color.gray.opacity(0.38 * (1 - travel)))
+            // Visible but small illustrative lights; no headlight switch is decoded.
+            let beam = Color(red: 1, green: 0.93, blue: 0.72)
+            pixel(0.831, 0.346, 5, 3, beam.opacity(0.95))
+            pixel(0.857, 0.348, 10, 3, beam.opacity(0.46))
+            pixel(0.893, 0.344, 12, 2, beam.opacity(0.18))
+            pixel(0.125, 0.195, 4, 2, MotoTheme.accent.opacity(0.85))
+            // Exhaust starts at the visible muffler outlet, even at cold idle.
+            // Heat changes the plume shape; this is not an exhaust sensor.
+            let heat = Double(snapshot.thermalLevel ?? 0) / 8
+            for index in 0..<(4 + (snapshot.engineLevel ?? 0) / 2) {
+                let travel = Double((index * 2 + phase) % 8) / 8
+                let x = 0.154 - travel * 0.125
+                let y = 0.49 - travel * (0.12 + heat * 0.07)
+                pixel(x, y, 3 + travel * 5, 2 + travel * 3,
+                      Color.primary.opacity(0.55 * (1 - travel)))
+                pixel(x - 0.008, y - 0.015, 2 + travel * 2, 1,
+                      Color.primary.opacity(0.28 * (1 - travel)))
             }
         }
         if snapshot.moving {
-            // Moving highlights on the rims; body and brake calipers stay fixed.
-            for (x, y, radius) in [(0.190, 0.698, 0.083), (0.813, 0.717, 0.088)] {
-                for offset in [0.0, 180.0] {
-                    let angle = Double(phase) * 22.5 + offset
-                    var path = Path()
-                    path.addArc(center: CGPoint(x: x * size.width, y: y * size.height),
-                                radius: radius * size.width,
-                                startAngle: .degrees(angle), endAngle: .degrees(angle + 38),
-                                clockwise: false)
-                    context.stroke(path, with: .color(Color(red: 1, green: 0.48, blue: 0.45).opacity(0.85)), lineWidth: 2 * unit)
-                }
-            }
+            drawExposedWheelHighlights(context: context, size: size, phase: phase)
             for index in 0..<4 {
                 let x = 0.22 + Double(index) * 0.18 - Double(phase) * 0.014
                 pixel(x, 0.968, 7, 1, Color.gray.opacity(0.38))
             }
         }
-        if let heat = snapshot.thermalLevel, heat > 0 {
+        if snapshot.running, let heat = snapshot.thermalLevel, heat > 0 {
             // Cosmetic warmth, never a fan, fault, smoke sensor or fire warning.
             let warmth = Double(heat) / 8
             let color = Color(red: 0.67 + 0.14 * warmth, green: 0.64,
                               blue: 0.64 - 0.14 * warmth).opacity(0.12 + 0.18 * warmth)
-            if snapshot.running {
-                for index in 0..<(2 + heat / 2) {
-                    let travel = (Double(index) + Double(phase) / 8) / 7
-                    let x = 0.16 - travel * 0.14
-                    let y = 0.49 - travel * (0.12 + 0.14 * warmth)
-                    pixel(x, y, 2 + travel * 4, 1 + warmth, color)
-                    pixel(x - 0.009, y - 0.017, 2 + travel * 2, 1, color.opacity(0.6))
-                }
-            }
             for index in 0..<(1 + heat / 3) {
                 let x = 0.46 + Double(index) * 0.043 + Double(phase % 2) * 0.006
                 pixel(x, 0.52 - Double((index + phase) % 4) * 0.026, 1, 2, color.opacity(0.55))
             }
+        }
+    }
+
+    private func drawExposedWheelHighlights(context: GraphicsContext, size: CGSize, phase: Int) {
+        // The 1774 × 887 sprite has rear/front rim centres near (0.190, 0.700)
+        // and (0.812, 0.713), with red rim radius ≈ 0.095 of its width.
+        // Clip to the exposed lower/outer arcs. In particular the rear mask
+        // excludes the muffler and the front mask excludes the fender/fork.
+        var rear = Path()
+        rear.addRect(CGRect(x: size.width * 0.07, y: size.height * 0.54,
+                            width: size.width * 0.09, height: size.height * 0.30))
+        rear.addRect(CGRect(x: size.width * 0.12, y: size.height * 0.78,
+                            width: size.width * 0.17, height: size.height * 0.14))
+        var front = Path()
+        front.addRect(CGRect(x: size.width * 0.71, y: size.height * 0.70,
+                             width: size.width * 0.20, height: size.height * 0.23))
+        front.addRect(CGRect(x: size.width * 0.85, y: size.height * 0.59,
+                             width: size.width * 0.07, height: size.height * 0.16))
+        let wheels: [(CGFloat, CGFloat, Path)] = [(0.190, 0.700, rear), (0.812, 0.713, front)]
+        for (x, y, mask) in wheels {
+            var clipped = context
+            clipped.clip(to: mask)
+            for offset in [0.0, 180.0] {
+                let angle = Double(phase) * 22.5 + offset
+                var arc = Path()
+                arc.addArc(center: CGPoint(x: x * size.width, y: y * size.height),
+                           radius: size.width * 0.095,
+                           startAngle: .degrees(angle), endAngle: .degrees(angle + 36),
+                           clockwise: false)
+                clipped.stroke(arc, with: .color(MotoTheme.accent.opacity(0.86)),
+                               lineWidth: max(1, size.width / 110))
+            }
+        }
+    }
+
+    private func drawWind(context: GraphicsContext, size: CGSize, phase: Int) {
+        // Speed lines sit behind the existing sprite. Only a fresh, decoded
+        // wheel speed ≥160 km/h can activate them; no wind sensor is claimed.
+        for index in 0..<4 {
+            let travel = CGFloat((phase + index * 2) % 8) / 8
+            let x = size.width * (0.015 + travel * 0.075)
+            let y = size.height * (0.24 + CGFloat(index) * 0.145)
+            var stroke = Path()
+            stroke.move(to: CGPoint(x: x, y: y))
+            stroke.addLine(to: CGPoint(x: x + size.width * (0.12 + CGFloat(index) * 0.016),
+                                       y: y - size.height * 0.006))
+            context.stroke(stroke, with: .color(MotoTheme.accent.opacity(0.33)),
+                           lineWidth: max(1, size.width / 220))
         }
     }
 }

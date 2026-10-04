@@ -89,6 +89,21 @@ struct RideArchiveFiles {
         return updated
     }
 
+    /// Pinning updates only the atomic manifest. It preserves names, unknown
+    /// future metadata, route estimates and every original journal byte.
+    @discardableResult
+    func setFavorite(_ favorite: Bool, for id: UUID, activeID: UUID? = nil,
+                     now: Date = Date()) throws -> Data {
+        let current = try completedManifest(id, activeID: activeID)
+        guard var object = try JSONSerialization.jsonObject(with: current) as? [String: Any],
+              let manifest = try existingFile(id, extension: "json") else { throw RideArchiveFileError.invalidManifest }
+        object["favorite"] = favorite
+        object["metadataUpdatedAt"] = ISO8601DateFormatter().string(from: now)
+        let updated = try JSONSerialization.data(withJSONObject: object)
+        try updated.write(to: manifest, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        return updated
+    }
+
     /// Validate all three exact UUID paths before removing anything. The manifest
     /// is removed last: an I/O failure leaves a visible entry which can be retried.
     func deleteCompletedRide(_ id: UUID, activeID: UUID? = nil) throws {

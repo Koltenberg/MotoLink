@@ -42,6 +42,64 @@ final class RideArchiveFilesTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: path(id, "jsonl")), raw)
     }
 
+    func testFavoritePersistsInLegacyManifestAndPreservesEveryOtherRideFile() throws {
+        let id = try fixture(), store = try RideArchiveFiles(directory: directory)
+        _ = try store.updateMetadata(id, title: "Любимый маршрут", note: "Заметка")
+        let raw = try Data(contentsOf: path(id, "jsonl"))
+        let route = try Data(contentsOf: path(id, "route-estimates"))
+        let updated = try store.setFavorite(true, for: id)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: updated) as? [String: Any])
+        XCTAssertEqual(object["favorite"] as? Bool, true)
+        XCTAssertEqual(object["title"] as? String, "Любимый маршрут")
+        XCTAssertEqual(object["note"] as? String, "Заметка")
+        XCTAssertEqual(object["lastSavedAt"] as? String, "2026-09-24T11:00:00Z")
+        XCTAssertEqual((object["futureField"] as? [String: Bool])?["keep"], true)
+        XCTAssertNotNil((object["metadataUpdatedAt"] as? String).flatMap { RideJournalDates.date(from: $0) })
+        XCTAssertEqual(try Data(contentsOf: path(id, "jsonl")), raw)
+        XCTAssertEqual(try Data(contentsOf: path(id, "route-estimates")), route)
+        let reopened = try RideArchiveFiles(directory: directory).manifest(id)
+        XCTAssertEqual(reopened, updated)
+        _ = try store.updateMetadata(id, title: "Переименована", note: "")
+        let renamed = try JSONSerialization.jsonObject(with: store.manifest(id)) as! [String: Any]
+        XCTAssertEqual(renamed["favorite"] as? Bool, true)
+    }
+
+    func testFavoriteCanBeRemovedWithoutDeletingTheRideOrItsTitle() throws {
+        let id = try fixture(), store = try RideArchiveFiles(directory: directory)
+        _ = try store.updateMetadata(id, title: "До работы", note: "")
+        _ = try store.setFavorite(true, for: id)
+        let changed = try store.setFavorite(false, for: id)
+        let object = try JSONSerialization.jsonObject(with: changed) as! [String: Any]
+        XCTAssertEqual(object["favorite"] as? Bool, false)
+        XCTAssertEqual(object["title"] as? String, "До работы")
+        for ext in ["json", "jsonl", "route-estimates"] { XCTAssertTrue(manager.fileExists(atPath: path(id, ext).path)) }
+    }
+
+    func testActiveOrMismatchedFavoriteWriteLeavesTheManifestByteForByteUntouched() throws {
+        let active = try fixture(ended: false), completed = try fixture(), other = try fixture()
+        let store = try RideArchiveFiles(directory: directory)
+        let activeBefore = try Data(contentsOf: path(active, "json"))
+        let completedBefore = try Data(contentsOf: path(completed, "json"))
+        XCTAssertThrowsError(try store.setFavorite(true, for: active))
+        XCTAssertThrowsError(try store.setFavorite(true, for: completed, activeID: completed))
+        XCTAssertEqual(try Data(contentsOf: path(active, "json")), activeBefore)
+        XCTAssertEqual(try Data(contentsOf: path(completed, "json")), completedBefore)
+        try Data(contentsOf: path(other, "json")).write(to: path(completed, "json"))
+        let mismatched = try Data(contentsOf: path(completed, "json"))
+        XCTAssertThrowsError(try store.setFavorite(true, for: completed))
+        XCTAssertEqual(try Data(contentsOf: path(completed, "json")), mismatched)
+    }
+
+    func testFavoriteRejectsSymlinkManifestWithoutTouchingExternalFile() throws {
+        let id = try fixture(), external = root.appendingPathComponent("external-manifest.json")
+        let before = try Data(contentsOf: path(id, "json"))
+        try before.write(to: external)
+        try manager.removeItem(at: path(id, "json"))
+        try manager.createSymbolicLink(at: path(id, "json"), withDestinationURL: external)
+        XCTAssertThrowsError(try RideArchiveFiles(directory: directory).setFavorite(true, for: id))
+        XCTAssertEqual(try Data(contentsOf: external), before)
+    }
+
     func testTextLimitsRejectWithoutChangingFiles() throws {
         let id = try fixture(), store = try RideArchiveFiles(directory: directory)
         let before = try Data(contentsOf: path(id, "json"))

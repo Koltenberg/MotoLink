@@ -9,6 +9,10 @@ struct SpeedComparisonView: View, Equatable {
     var onSelect: (String) -> Void = { _ in }
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var typeSize
+    @AppStorage(MetricColorPreferences.storageKey) private var scaleSettingsData = Data()
+    private var colorPreferences: MetricColorPreferences {
+        MetricColorPreferences.decoded(scaleSettingsData) ?? MetricColorPreferences.load(persistMigration: false)
+    }
     @State private var gps: Double?
     @State private var bike: Double?
     @State private var difference: Double?
@@ -20,7 +24,7 @@ struct SpeedComparisonView: View, Equatable {
     }
     private var display: (gps: Double?, bike: Double?, difference: Double?) {
         #if targetEnvironment(simulator)
-        if preview { return (64, 68, 4) }
+        if preview { return ProductVisualData.speedComparison() }
         #endif
         return (gps, bike, difference)
     }
@@ -53,6 +57,7 @@ struct SpeedComparisonView: View, Equatable {
                     Spacer(minLength: 0)
                     Text(speed.map { String(format: "%.0f", $0) } ?? "—")
                         .font(MotoTheme.numberFont(size: 42).monospacedDigit())
+                        .foregroundStyle(MetricVisualColor.color(metricID: id, value: speed, preferences: colorPreferences) ?? MotoTheme.secondary)
                         .lineLimit(1).minimumScaleFactor(0.6)
                     Text("км/ч").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }
@@ -63,6 +68,7 @@ struct SpeedComparisonView: View, Equatable {
                     Text(title).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     Text(speed.map { String(format: "%.0f", $0) } ?? "—")
                         .font(MotoTheme.numberFont(size: 60).monospacedDigit())
+                        .foregroundStyle(MetricVisualColor.color(metricID: id, value: speed, preferences: colorPreferences) ?? MotoTheme.secondary)
                         .lineLimit(1).minimumScaleFactor(0.6)
                     Text("км/ч").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(12).pixelPanel(accent: true)
@@ -77,7 +83,7 @@ struct SpeedComparisonView: View, Equatable {
     private func sample(fromTimer: Bool = false, telemetry latest: TelemetryPresentation? = nil) {
         #if targetEnvironment(simulator)
         defer { ProductVisualRefreshProbe.sample(panel: "speed", fromTimer: fromTimer) }
-        if preview { gps = 64; bike = 68; difference = 4; return }
+        if preview { let sample = ProductVisualData.speedComparison(); gps = sample.gps; bike = sample.bike; difference = sample.difference; return }
         #endif
         let now = Date()
         let gpsTime = rides.lastLocationAt

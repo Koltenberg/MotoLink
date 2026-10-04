@@ -75,6 +75,7 @@ class SimulatorCaptureTests(unittest.TestCase):
             self.failure(args)
         if args[0] == "launch":
             self.active_mode = ("ride" if "--review-ride" in args else
+                                "route" if "--review-route-fullscreen" in args else
                                 "graphs" if "--review-graphs" in args or "--review-graphs-fullscreen" in args else
                                 "companion" if "--companion-visual-check" in args else "home")
             self.theme = "light" if "--review-light" in args else "default"
@@ -84,7 +85,7 @@ class SimulatorCaptureTests(unittest.TestCase):
                 (self.container / "Documents" / CAPTURE.READY_EVIDENCE).write_text(json.dumps({
                     "ready": True, "launchToken": token,
                     "mode": "garage" if self.active_mode == "home" else self.active_mode,
-                    "appearance": "light" if "--review-light" in args else "dark" if self.active_mode in ("ride", "graphs") else "light",
+                    "appearance": "light" if "--review-light" in args else "dark" if self.active_mode in ("ride", "graphs", "route") else "light",
                     "windowWidth": 844 if self.landscape else 390,
                     "windowHeight": 390 if self.landscape else 844,
                     "capturedAt": time.time(), "visibleSeconds": 2.1, **self.ready_override,
@@ -194,14 +195,23 @@ class SimulatorCaptureTests(unittest.TestCase):
             ("simulator-garage-light.png", "home", "light", False),
             ("simulator-ride.png", "ride", "default", False),
             ("simulator-ride-light.png", "ride", "light", False),
+            ("simulator-bike-idle.png", "ride", "default", False),
+            ("simulator-bike-high-speed.png", "ride", "default", False),
+            ("simulator-bike-stale.png", "ride", "default", False),
+            ("simulator-bike-partial.png", "ride", "default", False),
             ("simulator-focus-rpm.png", "ride", "default", False),
             ("simulator-focus-rpm-light.png", "ride", "light", False),
             ("simulator-focus-gps.png", "ride", "light", False),
             ("simulator-settings.png", "home", "light", False),
+            ("simulator-scale-settings.png", "home", "light", False),
+            ("simulator-scale-editor.png", "home", "light", False),
+            ("simulator-diagnostics.png", "home", "light", False),
             ("simulator-service-editor.png", "companion", "light", False),
             ("simulator-fuel-editor.png", "companion", "light", False),
             ("simulator-history.png", "home", "light", False),
             ("simulator-graphs.png", "graphs", "light", False),
+            ("simulator-route.png", "route", "light", False),
+            ("simulator-route-landscape.png", "route", "default", True),
             ("simulator-graphs-landscape.png", "graphs", "default", True),
             ("simulator-focus-rpm-landscape.png", "ride", "default", True),
             ("simulator-ride-landscape.png", "ride", "default", True),
@@ -235,6 +245,9 @@ class SimulatorCaptureTests(unittest.TestCase):
                 captured.append(name)
         for name, expected_flags, mode in [
             ("simulator-settings.png", ("--review-settings", "--review-light"), "garage"),
+            ("simulator-scale-settings.png", ("--review-scale-settings", "--review-light"), "garage"),
+            ("simulator-scale-editor.png", ("--review-scale-editor", "--review-light"), "garage"),
+            ("simulator-diagnostics.png", ("--review-diagnostics", "--review-light"), "garage"),
             ("simulator-service-editor.png",
              ("--companion-visual-check", "--review-service-editor", "--review-light"), "companion"),
             ("simulator-fuel-editor.png",
@@ -270,6 +283,37 @@ class SimulatorCaptureTests(unittest.TestCase):
                 ready = json.loads((self.output / Path(name).with_suffix(".ready.json")).read_text())
                 self.assertEqual(ready["mode"], "ride")
                 self.assertEqual(ready["appearance"], "light" if "--review-light" in selected else "dark")
+
+    def test_bike_effect_states_use_distinct_fixtures(self):
+        self.execute()
+        launches = {}
+        flags = ()
+        for call in self.calls:
+            if call[0] == "launch":
+                flags = call[3:call.index("--visual-review-token")]
+            elif call[0] == "io":
+                launches[Path(call[-1]).name] = flags
+        for state in ("idle", "high-speed", "stale", "partial"):
+            name = f"simulator-bike-{state}.png"
+            self.assertEqual(launches[name], ("--review-ride", f"--review-bike-{state}"))
+
+    def test_route_review_is_local_and_has_fresh_portrait_and_landscape_launches(self):
+        self.execute()
+        launches = {}
+        flags = ()
+        for call in self.calls:
+            if call[0] == "launch":
+                flags = call[3:call.index("--visual-review-token")]
+            elif call[0] == "io":
+                launches[Path(call[-1]).name] = flags
+        for name, expected in [
+            ("simulator-route.png", ("--review-route-fullscreen", "--review-route-estimates", "--review-light")),
+            ("simulator-route-landscape.png", ("--review-route-fullscreen", "--review-route-estimates", "--review-landscape")),
+        ]:
+            self.assertEqual(launches[name], expected)
+            self.assertNotIn("--review-route-map", launches[name])
+            ready = json.loads((self.output / Path(name).with_suffix(".ready.json")).read_text())
+            self.assertEqual(ready["mode"], "route")
 
     def test_unapplied_landscape_rotation_rejects_entire_set_not_portrait_as_landscape(self):
         self.orientation_override = {"interfaceLandscape": False, "interfaceOrientation": 1,

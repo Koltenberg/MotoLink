@@ -39,13 +39,29 @@ enum ProductVisualData {
     }
 
     static func measurements(at now: Date = Date()) -> [MotoProtocol.Measurement] {
-        [("wheel_speed", "Скорость", 68.0, "км/ч"),
-         ("gear_position", "Передача", 3.0, ""),
-         ("engine_speed", "Обороты", 5300.0, "об/мин"),
-         ("engine_water_temperature", "Температура", 92.0, "°C")].map {
+        let arguments = ProcessInfo.processInfo.arguments
+        let idle = arguments.contains("--review-bike-idle")
+        let fast = arguments.contains("--review-bike-high-speed")
+        let timestamp = arguments.contains("--review-bike-stale") ? now.addingTimeInterval(-31) : now
+        return [("wheel_speed", "Скорость", idle ? 0.0 : fast ? 164.0 : 68.0, "км/ч"),
+         ("gear_position", "Передача", idle ? 0.0 : fast ? 6.0 : 3.0, ""),
+         ("engine_speed", "Обороты", idle ? 1200.0 : fast ? 9000.0 : 5300.0, "об/мин"),
+         ("engine_water_temperature", "Температура", idle ? 42.0 : fast ? 96.0 : 92.0, "°C")].map {
             MotoProtocol.Measurement(id: $0.0, label: $0.1, value: $0.2, unit: $0.3,
-                                     timestamp: now, source: "Simulator example")
+                                     timestamp: timestamp, source: "Simulator example")
         }
+    }
+    static func speedComparison() -> (gps: Double?, bike: Double?, difference: Double?) {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--review-bike-stale") { return (nil, nil, nil) }
+        if arguments.contains("--review-bike-idle") { return (0, 0, 0) }
+        if arguments.contains("--review-bike-high-speed") { return (160, 164, 4) }
+        return (64, 68, 4)
+    }
+    static func bikeActivitySnapshot(at now: Date = Date()) -> BikeActivitySnapshot {
+        BikeActivitySnapshot.sample(connected: true,
+            ready: !ProcessInfo.processInfo.arguments.contains("--review-bike-partial"),
+            measurements: measurements(at: now), now: now)
     }
     static func catalogue(at now: Date = Date()) -> TelemetryPresentation {
         let readings = measurements(at: now)
@@ -88,6 +104,53 @@ enum ProductVisualData {
             }
         }
         return records
+    }()
+
+    /// Public-place coordinates generated for simulator screenshots. No phone
+    /// location or journal is read, and the middle interval is deliberately blank.
+    static let routePoints: [TrackPoint] = {
+        let start = graphRide.startedAt
+        let first = (0..<35).map { index in
+            TrackPoint(timestamp: start.addingTimeInterval(Double(index * 5)),
+                latitude: 37.7749 + Double(index) * 0.00011 + sin(Double(index) / 4) * 0.00005,
+                longitude: -122.4194 + Double(index) * 0.00017,
+                altitude: nil, accuracy: 6, speed: nil, segment: 0)
+        }
+        let second = (0..<35).map { index in
+            TrackPoint(timestamp: start.addingTimeInterval(Double(400 + index * 5)),
+                latitude: 37.7810 + Double(index) * 0.00009 + sin(Double(index) / 5) * 0.00004,
+                longitude: -122.4080 + Double(index) * 0.00016,
+                altitude: nil, accuracy: 6, speed: nil, segment: 1)
+        }
+        return first + second
+    }()
+
+    static let routeRide: RideSummary = {
+        var ride = graphRide
+        ride.distanceMeters = 5_430
+        ride.pointCount = routePoints.count
+        return ride
+    }()
+
+    static let routeGaps: [GPSGap] = {
+        guard routePoints.count >= 36 else { return [] }
+        let from = routePoints[34], to = routePoints[35]
+        return [GPSGap(id: "simulator-gap", startedAt: from.timestamp, endedAt: to.timestamp,
+                       from: from.gpsCoordinate, to: to.gpsCoordinate,
+                       reason: "Вымышленный пропуск GPS для проверки интерфейса")]
+    }()
+
+    static let routeEstimates: [GPSRouteEstimate] = {
+        guard let gap = routeGaps.first, let from = gap.from, let to = gap.to else { return [] }
+        let coordinates = (0...12).map { index -> GPSCoordinate in
+            let fraction = Double(index) / 12
+            return GPSCoordinate(latitude: from.latitude + (to.latitude - from.latitude) * fraction
+                                     + sin(fraction * .pi) * 0.0005,
+                                 longitude: from.longitude + (to.longitude - from.longitude) * fraction)
+        }
+        return [GPSRouteEstimate(gapID: gap.id, calculatedAt: graphRide.startedAt,
+            coordinates: coordinates, distanceMeters: 1_850, expectedTravelTime: 300,
+            source: "Вымышленный вариант, не запись GPS")]
     }()
 }
 
@@ -186,6 +249,7 @@ final class ProductVisualReadyView: UIView {
         }
         let expected: UIUserInterfaceStyle = arguments.contains("--review-light") ? .light
             : arguments.contains("--review-ride") || arguments.contains("--review-graphs")
+                || arguments.contains("--review-route-fullscreen")
                 || arguments.contains("--review-graphs-fullscreen") ? .dark : .unspecified
         // Simulator-only capture preference. Never changes the user's stored theme.
         if expected != .unspecified && window.overrideUserInterfaceStyle != expected {
@@ -199,6 +263,7 @@ final class ProductVisualReadyView: UIView {
         guard let since = visibleSince else { visibleSince = now; return }
         guard now - since >= 2 else { return }
         let mode = arguments.contains("--review-ride") ? "ride"
+            : arguments.contains("--review-route-fullscreen") ? "route"
             : arguments.contains("--review-graphs") || arguments.contains("--review-graphs-fullscreen") ? "graphs"
             : arguments.contains("--companion-visual-check") ? "companion" : "garage"
         let evidence: [String: Any] = [

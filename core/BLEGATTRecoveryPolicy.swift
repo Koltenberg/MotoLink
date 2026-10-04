@@ -14,6 +14,20 @@ struct BLEGATTRecoveryPolicy {
     private var characteristicDiscoveryRetryUsed = false
     private var notificationRetries: Set<String> = []
 
+    enum CaptureContinuation: Equatable { case none, preserve, restart }
+
+    /// Starting a profile is not evidence it completed. A notification failure
+    /// can stop its queue before 08 while the ACL and other channels stay alive.
+    /// After an explicit GATT repair, restart that interrupted profile; preserve
+    /// a completed one without sending its setup commands again.
+    static func captureContinuation(sameLink: Bool, startedInSession: Bool,
+                                    running: Bool, requested: Bool,
+                                    interrupted: Bool) -> CaptureContinuation {
+        guard sameLink else { return .none }
+        if running || requested || interrupted { return .restart }
+        return startedInSession ? .preserve : .none
+    }
+
     mutating func beginConnection() {
         self = Self()
         phase = .discoveringServices
@@ -33,12 +47,14 @@ struct BLEGATTRecoveryPolicy {
         }
     }
 
-    /// One rediscovery per established ACL. Service Changed invalidates the old
-    /// objects even while discovering their characteristics or subscribing.
-    /// The driver discards callbacks for those invalidated objects, so repair
-    /// must not require having reached .ready on the old service first.
+    /// One rediscovery per established ACL, only after the driver confirms that
+    /// Service Changed invalidated its selected service. A completed notification
+    /// failure may leave other channels alive in .unavailable; an explicit
+    /// invalidation then gives us new GATT objects, not another retry of the old
+    /// failed subscription. Keep that one repair available in this state too.
     mutating func beginServiceRediscovery() -> Bool {
-        guard phase == .ready || phase == .discoveringCharacteristics || phase == .subscribing,
+        guard phase == .ready || phase == .discoveringCharacteristics || phase == .subscribing
+                || phase == .unavailable,
               !serviceRediscoveryUsed else { return false }
         serviceRediscoveryUsed = true
         serviceDiscoveryRetryUsed = false

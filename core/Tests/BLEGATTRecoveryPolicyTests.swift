@@ -2,6 +2,27 @@ import XCTest
 @testable import MotoLinkCore
 
 final class BLEGATTRecoveryPolicyTests: XCTestCase {
+    func testGATTRepairRestartsProfileStoppedBeforeStreamStart() {
+        // .unavailable terminated diagnosticRunning, but a profile had started
+        // and could stop before sending 08. That session marker must not cause
+        // the repair to preserve an incomplete startup as if it succeeded.
+        XCTAssertEqual(BLEGATTRecoveryPolicy.captureContinuation(sameLink: true,
+            startedInSession: true, running: false, requested: false, interrupted: true), .restart)
+        XCTAssertEqual(BLEGATTRecoveryPolicy.captureContinuation(sameLink: true,
+            startedInSession: true, running: true, requested: false, interrupted: false), .restart)
+        XCTAssertEqual(BLEGATTRecoveryPolicy.captureContinuation(sameLink: true,
+            startedInSession: false, running: false, requested: true, interrupted: false), .restart)
+    }
+
+    func testGATTRepairPreservesCompletedProfileAndNewLinkDoesNotBorrowItsProgress() {
+        XCTAssertEqual(BLEGATTRecoveryPolicy.captureContinuation(sameLink: true,
+            startedInSession: true, running: false, requested: false, interrupted: false), .preserve)
+        XCTAssertEqual(BLEGATTRecoveryPolicy.captureContinuation(sameLink: true,
+            startedInSession: false, running: false, requested: false, interrupted: false), .none)
+        XCTAssertEqual(BLEGATTRecoveryPolicy.captureContinuation(sameLink: false,
+            startedInSession: true, running: true, requested: true, interrupted: true), .none)
+    }
+
     func testLateDiscoveryCompletionsAfterObservationDeadlineStillReachReady() {
         var policy = BLEGATTRecoveryPolicy()
         policy.beginConnection()
@@ -122,6 +143,42 @@ final class BLEGATTRecoveryPolicyTests: XCTestCase {
         policy.markUnavailable()
         XCTAssertEqual(policy.phase, .unavailable)
         XCTAssertNil(policy.notificationsReady())
+        XCTAssertFalse(policy.retryNotification("notify-4A", permitted: true))
+    }
+
+    func testExplicitServiceChangeCanRepairAfterOldSubscriptionExhausted() {
+        var policy = readyPolicy()
+        policy.notificationLost()
+        XCTAssertTrue(policy.retryNotification("notify-4A", permitted: true))
+        XCTAssertFalse(policy.retryNotification("notify-4A", permitted: true))
+        policy.markUnavailable()
+        // The driver still owns the selected service and other subscriptions.
+        // iOS now invalidates that exact service: the old failure must not make
+        // a new, single discovery impossible or discard the remaining channels.
+        XCTAssertTrue(policy.beginServiceRediscovery())
+        XCTAssertEqual(policy.phase, .discoveringServices)
+        XCTAssertTrue(policy.everReady)
+        XCTAssertFalse(policy.beginServiceRediscovery())
+        XCTAssertTrue(policy.servicesDiscovered())
+        XCTAssertTrue(policy.characteristicsDiscovered())
+        XCTAssertTrue(policy.retryNotification("notify-4A", permitted: true))
+        XCTAssertEqual(policy.notificationsReady(), false)
+        policy.markUnavailable()
+        XCTAssertFalse(policy.beginServiceRediscovery())
+    }
+
+    func testServiceChangeAfterFailedInitialSubscriptionsRetainsFirstReadyBoundary() {
+        var policy = BLEGATTRecoveryPolicy()
+        policy.beginConnection()
+        XCTAssertTrue(policy.servicesDiscovered())
+        XCTAssertTrue(policy.characteristicsDiscovered())
+        XCTAssertTrue(policy.retryNotification("notify-4A", permitted: true))
+        XCTAssertFalse(policy.retryNotification("notify-4A", permitted: true))
+        policy.markUnavailable()
+        XCTAssertTrue(policy.beginServiceRediscovery())
+        XCTAssertTrue(policy.servicesDiscovered())
+        XCTAssertTrue(policy.characteristicsDiscovered())
+        XCTAssertEqual(policy.notificationsReady(), true)
         XCTAssertFalse(policy.beginServiceRediscovery())
     }
 

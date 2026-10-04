@@ -32,6 +32,7 @@ struct MotoLinkApp: App {
         #if targetEnvironment(simulator)
         if ProcessInfo.processInfo.arguments.contains("--review-light") { return .light }
         if ProcessInfo.processInfo.arguments.contains("--review-ride")
+            || ProcessInfo.processInfo.arguments.contains("--review-route-fullscreen")
             || ProcessInfo.processInfo.arguments.contains("--review-graphs")
             || ProcessInfo.processInfo.arguments.contains("--review-graphs-fullscreen") { return .dark }
         #endif
@@ -39,7 +40,12 @@ struct MotoLinkApp: App {
     }
     @ViewBuilder private var appContent: some View {
         #if targetEnvironment(simulator)
-        if ProcessInfo.processInfo.arguments.contains("--review-graphs")
+        if ProcessInfo.processInfo.arguments.contains("--review-route-fullscreen") {
+            RouteVisualCheckView(rides: delegate.controller.rides)
+        } else if ProcessInfo.processInfo.arguments.contains("--review-scale-settings")
+            || ProcessInfo.processInfo.arguments.contains("--review-scale-editor") {
+            MetricScaleVisualCheckView(editor: ProcessInfo.processInfo.arguments.contains("--review-scale-editor"))
+        } else if ProcessInfo.processInfo.arguments.contains("--review-graphs")
             || ProcessInfo.processInfo.arguments.contains("--review-graphs-fullscreen") {
             RideGraphVisualCheckView()
         } else if ProcessInfo.processInfo.arguments.contains("--companion-visual-check") {
@@ -74,6 +80,7 @@ enum MotoTheme {
         ? UIColor(red: 0.70, green: 0.70, blue: 0.73, alpha: 1)
         : UIColor(red: 0.34, green: 0.34, blue: 0.37, alpha: 1) })
     static let border = Color.primary.opacity(0.18)
+    static var backdrop: some View { MotoBackdrop() }
     static func font(_ style: Font.TextStyle) -> Font {
         let size: CGFloat
         switch style {
@@ -126,6 +133,58 @@ enum MotoTheme {
         UITabBar.appearance().scrollEdgeAppearance = tabs
         UIBarButtonItem.appearance().setTitleTextAttributes([.font: uiFont(size: 18, style: .body)], for: .normal)
         UIBarButtonItem.appearance().setTitleTextAttributes([.font: uiFont(size: 18, style: .body)], for: .disabled)
+    }
+}
+
+/// A quiet, static racing texture. It never starts an animation or samples a
+/// sensor, and remains behind opaque reading cards in both appearances.
+struct MotoBackdrop: View {
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                MotoTheme.background
+                Canvas { context, size in
+                    let dark = scheme == .dark
+                    var scratches = Path()
+                    for index in 0..<5 {
+                        let x = size.width * (0.72 + Double(index) * 0.065)
+                        scratches.move(to: CGPoint(x: x, y: -10))
+                        scratches.addLine(to: CGPoint(x: x - size.width * 0.30, y: size.height * 0.31))
+                    }
+                    context.stroke(scratches, with: .color(MotoTheme.accent.opacity(dark ? 0.055 : 0.035)),
+                                   style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                    var underline = Path()
+                    underline.move(to: CGPoint(x: -20, y: size.height * 0.74))
+                    underline.addQuadCurve(to: CGPoint(x: size.width * 0.28, y: size.height * 0.66),
+                                           control: CGPoint(x: size.width * 0.13, y: size.height * 0.75))
+                    context.stroke(underline, with: .color(Color.primary.opacity(dark ? 0.04 : 0.025)),
+                                   style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                }
+            }.frame(width: geometry.size.width, height: geometry.size.height)
+        }.allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+
+/// Decorative brush strokes follow a real gauge level. No separate timer,
+/// flashing, or text overlay is needed for the full-screen instrument.
+struct RacingGaugeAccent: View {
+    let color: Color
+    let strength: Double
+    var body: some View {
+        Canvas { context, size in
+            let level = strength.isFinite ? min(1, max(0, strength)) : 0
+            guard level > 0 else { return }
+            for index in 0..<3 {
+                var stroke = Path()
+                let x = size.width * (0.04 + Double(index) * 0.024)
+                stroke.move(to: CGPoint(x: x, y: size.height * 0.72))
+                stroke.addQuadCurve(to: CGPoint(x: x + size.width * 0.08, y: size.height * 0.36),
+                                    control: CGPoint(x: x + size.width * 0.07, y: size.height * 0.65))
+                context.stroke(stroke, with: .color(color.opacity(0.035 + 0.075 * level)),
+                               style: StrokeStyle(lineWidth: index == 0 ? 3 : 1.5, lineCap: .round))
+            }
+        }.allowsHitTesting(false).accessibilityHidden(true)
     }
 }
 

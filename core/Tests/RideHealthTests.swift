@@ -94,4 +94,36 @@ final class RideHealthTests: XCTestCase {
         XCTAssertEqual(high.engineLevel, 4)
         XCTAssertEqual(high.thermalLevel, 8)
     }
+
+    func testActivityUsesFreshPacketsDuringPartialSubscriptionWithoutClaimingCommandReady() {
+        let samples = [value("wheel_speed", 42), value("engine_speed", 1900)]
+        let partial = BikeActivitySnapshot.sample(connected: true, ready: false,
+                                                  measurements: samples, now: start)
+        XCTAssertTrue(partial.live && partial.moving && partial.running)
+        XCTAssertEqual(partial.label, "Данные движения поступают")
+
+        let stale = BikeActivitySnapshot.sample(connected: true, ready: false,
+                                                measurements: samples, now: start.addingTimeInterval(4))
+        XCTAssertFalse(stale.live || stale.moving || stale.running || stale.wind)
+        XCTAssertEqual(stale.label, "Готовим связь…")
+        let disconnected = BikeActivitySnapshot.sample(connected: false, ready: false,
+                                                       measurements: samples, now: start)
+        XCTAssertFalse(disconnected.live || disconnected.moving || disconnected.running)
+    }
+
+    func testWindNeedsFreshConfirmedSpeedOfAtLeast160() {
+        let below = BikeActivitySnapshot.sample(connected: true, ready: true,
+            measurements: [value("wheel_speed", 159)], now: start)
+        XCTAssertTrue(below.moving)
+        XCTAssertFalse(below.wind)
+        let boundary = BikeActivitySnapshot.sample(connected: true, ready: false,
+            measurements: [value("wheel_speed", 160)], now: start)
+        XCTAssertTrue(boundary.wind)
+        let old = BikeActivitySnapshot.sample(connected: true, ready: true,
+            measurements: [value("wheel_speed", 180)], now: start.addingTimeInterval(4))
+        XCTAssertFalse(old.wind)
+        let invalid = BikeActivitySnapshot.sample(connected: true, ready: true,
+            measurements: [value("wheel_speed", .nan)], now: start)
+        XCTAssertFalse(invalid.wind)
+    }
 }

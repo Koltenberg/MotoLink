@@ -419,7 +419,7 @@ struct CompanionView: View {
             if let error = store.error { Section { Text(error).foregroundStyle(MotoTheme.accent) } }
         }
         .font(MotoTheme.font(.body))
-        .scrollContentBackground(.hidden).background(MotoTheme.background)
+        .scrollContentBackground(.hidden).background(MotoTheme.backdrop)
         .navigationTitle("Гараж")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await store.refreshFromDisk() }
@@ -531,7 +531,7 @@ private struct FuelHistoryView: View {
             }
             if store.data.fuelEntries.isEmpty { Text("Здесь появятся твои заправки.").foregroundStyle(MotoTheme.secondary) }
         }.font(MotoTheme.font(.body)).navigationTitle("Заправки").navigationBarTitleDisplayMode(.inline)
-            .scrollContentBackground(.hidden).background(MotoTheme.background)
+            .scrollContentBackground(.hidden).background(MotoTheme.backdrop)
             .toolbar { ToolbarItem(placement: .primaryAction) { Button("Добавить") { adding = true }.font(MotoTheme.font(.body)) } }
             .sheet(item: $selected) { FuelEditor(store: store, rides: rides, entry: $0) }
             .sheet(isPresented: $adding) { FuelEditor(store: store, rides: rides, entry: nil) }
@@ -710,7 +710,7 @@ struct ServiceEditor: View {
                 }
                 if task != nil { Button("Удалить обслуживание", role: .destructive) { delete = true } }
                 if let error = store.error { Text(error).foregroundStyle(MotoTheme.accent) }
-            }.font(MotoTheme.font(.body)).navigationTitle("Обслуживание").navigationBarTitleDisplayMode(.inline)
+            }.font(MotoTheme.font(.body)).navigationTitle("Сервис").navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.font(MotoTheme.font(.body)) }
                     ToolbarItem(placement: .confirmationAction) { Button("Сохранить", action: save).font(MotoTheme.font(.body)) }
@@ -780,7 +780,7 @@ struct RideStatisticsView: View {
                 }
             }
             Text("Расстояние рассчитано по принятым точкам GPS. Пропуски не входят в километраж; это не одометр мотоцикла.").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-        }.font(MotoTheme.font(.body)).scrollContentBackground(.hidden).background(MotoTheme.background).navigationTitle("Сводка поездок")
+        }.font(MotoTheme.font(.body)).scrollContentBackground(.hidden).background(MotoTheme.backdrop).navigationTitle("Сводка поездок")
         .refreshable { await rides.refreshHistory() }
     }
     private func summary(_ title: String, _ group: [RideSummary]) -> some View {

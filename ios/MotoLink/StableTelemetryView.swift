@@ -18,6 +18,11 @@ struct MotorcycleDashboardView: View, Equatable {
     @State private var sampledAt = Date()
     @State private var refreshTimer: Timer?
     @State private var visible = false
+    @AppStorage(MetricColorPreferences.storageKey) private var scaleSettingsData = Data()
+
+    private var scalePreferences: MetricColorPreferences {
+        MetricColorPreferences.decoded(scaleSettingsData) ?? MetricColorPreferences.load(persistMigration: false)
+    }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.bluetooth === rhs.bluetooth && lhs.preview == rhs.preview && lhs.compact == rhs.compact
@@ -60,7 +65,7 @@ struct MotorcycleDashboardView: View, Equatable {
             }
             .transaction { $0.animation = nil }
         }
-        .onAppear { visible = true; updateRefreshTimer(for: scenePhase) }
+        .onAppear { _ = MetricColorPreferences.load(); visible = true; updateRefreshTimer(for: scenePhase) }
         .onDisappear { visible = false; stopRefreshTimer() }
         .onChange(of: scenePhase) { phase in updateRefreshTimer(for: phase) }
         .onReceive(bluetooth.$dashboardTelemetry.dropFirst()) { latest in
@@ -109,7 +114,7 @@ struct MotorcycleDashboardView: View, Equatable {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
                         Text(number(row)).font(MotoTheme.numberFont(size: 24).monospacedDigit())
                             .lineLimit(1).minimumScaleFactor(0.75)
-                            .foregroundStyle(row.value == nil ? MotoTheme.secondary : Color.primary)
+                            .foregroundStyle(metricColor(row))
                         if !row.field.unit.isEmpty {
                             Text(row.field.unit).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary).lineLimit(1)
                         }
@@ -124,7 +129,7 @@ struct MotorcycleDashboardView: View, Equatable {
                         .lineLimit(1).minimumScaleFactor(0.8)
                     Text(number(row)).font(MotoTheme.font(.title).monospacedDigit())
                         .lineLimit(1).minimumScaleFactor(0.75)
-                        .foregroundStyle(row.value == nil ? MotoTheme.secondary : Color.primary)
+                        .foregroundStyle(metricColor(row))
                     // Units get their own line so a three-digit speed or five-digit RPM
                     // does not wrap on an iPhone SE beside the fixed gear card.
                     Text(row.field.unit.isEmpty ? " " : row.field.unit).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
@@ -145,6 +150,11 @@ struct MotorcycleDashboardView: View, Equatable {
     private func number(_ row: TelemetryPresentation.Row) -> String {
         guard let value = row.value else { return "—" }
         return String(format: row.field.unit == "В" ? "%.2f" : "%.0f", value)
+    }
+
+    private func metricColor(_ row: TelemetryPresentation.Row) -> Color {
+        guard let value = row.value else { return MotoTheme.secondary }
+        return MetricVisualColor.color(metricID: row.id, value: value, preferences: scalePreferences) ?? .primary
     }
 
     private func overallStatus(_ rows: [TelemetryPresentation.Row]) -> String {
@@ -181,9 +191,11 @@ struct FocusedRideMetricView: View {
     let onDismiss: () -> Void
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("MotoLink.keepScreenOn") private var keepScreenOn = false
-    @AppStorage("MotoLink.visual.rpmRedline") private var rpmRedline = 11_000
-    @AppStorage("MotoLink.visual.speedWarm") private var speedWarm = 130
-    @AppStorage("MotoLink.visual.speedHot") private var speedHot = 190
+    @AppStorage(MetricColorPreferences.storageKey) private var scaleSettingsData = Data()
+
+    private var scalePreferences: MetricColorPreferences {
+        MetricColorPreferences.decoded(scaleSettingsData) ?? MetricColorPreferences.load(persistMigration: false)
+    }
 
     private struct Reading {
         let title: String
@@ -200,8 +212,7 @@ struct FocusedRideMetricView: View {
                     ? TelemetryDisplayCadence.foregroundInterval : 1)) { context in
                 let reading = reading(at: context.date)
                 let scale = reading.number.flatMap {
-                    FocusMetricScale.make(id: metric.id, value: $0,
-                        rpmRedline: rpmRedline, speedWarm: speedWarm, speedHot: speedHot)
+                    FocusMetricScale.make(id: metric.id, value: $0, preferences: scalePreferences)
                 }
                 let short = geometry.size.height < 420
                     || (metric.id == "engine_speed" && geometry.size.height < 620)
@@ -228,7 +239,7 @@ struct FocusedRideMetricView: View {
                                 .foregroundStyle(MotoTheme.secondary)
                         }
                         if metric.id == "engine_speed" {
-                            TachometerGaugeView(scale: scale, redline: rpmRedline, short: short)
+                            TachometerGaugeView(scale: scale, configuration: scalePreferences[.engineSpeed], short: short)
                                 .padding(.top, short ? 5 : 12)
                         } else if let scale {
                             FocusMetricScaleView(scale: scale, short: short)
@@ -247,6 +258,10 @@ struct FocusedRideMetricView: View {
                     }
                     .padding(geometry.size.height < 420 ? 16 : 24)
                     .frame(width: geometry.size.width, height: geometry.size.height)
+                    .background {
+                        RacingGaugeAccent(color: scale?.currentColor ?? MotoTheme.accent,
+                                          strength: scale?.progress ?? 0)
+                    }
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -256,8 +271,8 @@ struct FocusedRideMetricView: View {
                 .accessibilityHint("Дважды коснитесь, чтобы вернуться к общему виду")
             }
         }
-        .background(MotoTheme.background.ignoresSafeArea())
-        .onAppear { updateScreenAwake() }
+        .background(MotoTheme.backdrop.ignoresSafeArea())
+        .onAppear { _ = MetricColorPreferences.load(); updateScreenAwake() }
         .onChange(of: scenePhase) { phase in updateScreenAwake(phase: phase) }
         .onChange(of: keepScreenOn) { _ in updateScreenAwake() }
         .onChange(of: rides.active?.id) { _ in updateScreenAwake() }
@@ -276,7 +291,11 @@ struct FocusedRideMetricView: View {
     private func reading(at now: Date) -> Reading {
         if metric.id == "gps_speed" {
             #if targetEnvironment(simulator)
-            if preview { return Reading(title: "Скорость GPS", value: "64", number: 64, unit: "км/ч", status: "Данные поступают") }
+            if preview {
+                let speed = ProductVisualData.speedComparison().gps
+                return Reading(title: "Скорость GPS", value: speed.map { String(format: "%.0f", $0) } ?? "—",
+                               number: speed, unit: "км/ч", status: speed == nil ? "Нет свежих данных GPS" : "Данные поступают")
+            }
             #endif
             let speed: Double? = rides.lastLocationAt.flatMap { timestamp in
                 let age = now.timeIntervalSince(timestamp)
@@ -334,10 +353,11 @@ struct FocusedRideMetricView: View {
 /// animation clock or flashing state, and an unavailable reading leaves it unlit.
 private struct TachometerGaugeView: View {
     let scale: FocusMetricScale?
-    let redline: Int
+    let configuration: MetricColorScale
     let short: Bool
 
-    private var selectedLimit: Double { Double(max(6_000, min(16_000, redline))) }
+    private var selectedLimit: Double { Double(configuration.redStart) }
+    private var selectedMaximum: Double { Double(configuration.maximum) }
 
     var body: some View {
         VStack(spacing: short ? 3 : 7) {
@@ -346,7 +366,8 @@ private struct TachometerGaugeView: View {
                 let radius = min(size.width * 0.45, size.height - 12)
                 guard radius > 0 else { return }
                 let divisions = 33
-                let extent = selectedLimit * 1.08
+                let extent = selectedMaximum
+                let lastActiveTick = scale.map { Int(floor($0.progress * Double(divisions - 1))) }
                 let tickLength: CGFloat = short ? 13 : 22
                 for index in 0..<divisions {
                     let fraction = Double(index) / Double(divisions - 1)
@@ -359,9 +380,11 @@ private struct TachometerGaugeView: View {
                     var tick = Path()
                     tick.move(to: inner)
                     tick.addLine(to: outer)
-                    let color = fraction <= (scale?.progress ?? -1)
-                        ? scale?.tone(at: extent * fraction).color ?? MotoTheme.border
-                        : MotoTheme.border
+                    let color: Color
+                    if fraction <= (scale?.progress ?? -1) {
+                        color = index == lastActiveTick ? scale?.currentColor ?? MotoTheme.border
+                            : scale?.tone(at: extent * fraction).color ?? MotoTheme.border
+                    } else { color = MotoTheme.border }
                     context.stroke(tick, with: .color(color),
                                    style: StrokeStyle(lineWidth: short ? 3 : 5, lineCap: .square))
                 }
@@ -396,16 +419,16 @@ private struct TachometerGaugeView: View {
             HStack {
                 Text("0")
                 Spacer(minLength: 4)
-                Text("\(Int(selectedLimit / 2))")
+                Text("\(Int(selectedMaximum / 2))")
                 Spacer(minLength: 4)
-                Text("Порог \(Int(selectedLimit))")
+                Text("\(Int(selectedMaximum))")
             }
             .font(MotoTheme.font(.caption))
             .foregroundStyle(MotoTheme.secondary)
             .lineLimit(1).minimumScaleFactor(0.65)
 
-            if let scale, scale.value >= selectedLimit * 0.9 {
-                Text(scale.value >= selectedLimit ? "ВЫБРАННАЯ КРАСНАЯ ЗОНА" : "БЛИЗКО К ПОРОГУ ОБОРОТОВ")
+            if let scale, scale.value >= Double(configuration.orangeStart) {
+                Text(scale.value >= selectedLimit ? "Красный от \(configuration.redStart)" : "Оранжевый от \(configuration.orangeStart)")
                     .font(MotoTheme.font(.caption))
                     .foregroundStyle(scale.currentColor)
                     .lineLimit(1).minimumScaleFactor(0.65)
@@ -419,28 +442,41 @@ private struct TachometerGaugeView: View {
     }
 }
 
+/// Shared by the dashboard, speed comparison and focused gauges. A missing or
+/// stale reading receives no zone; display colors never alter measured values.
+enum MetricVisualColor {
+    static func color(metricID: String, value: Double?, preferences: MetricColorPreferences) -> Color? {
+        guard let value, let kind = MetricColorKind.forMetric(metricID),
+              let zone = preferences[kind].zone(at: value) else { return nil }
+        return color(zone)
+    }
+
+    static func color(_ zone: MetricColorZone) -> Color {
+        Color(UIColor { trait in
+            let dark = trait.userInterfaceStyle == .dark
+            switch zone {
+            case .green: return dark ? UIColor(red: 0.43, green: 0.83, blue: 0.56, alpha: 1)
+                                    : UIColor(red: 0.06, green: 0.46, blue: 0.19, alpha: 1)
+            case .orange: return dark ? UIColor(red: 1, green: 0.63, blue: 0.31, alpha: 1)
+                                     : UIColor(red: 0.68, green: 0.28, blue: 0.03, alpha: 1)
+            case .red: return dark ? UIColor(red: 1, green: 0.40, blue: 0.43, alpha: 1)
+                                  : UIColor(red: 0.69, green: 0.06, blue: 0.13, alpha: 1)
+            }
+        })
+    }
+}
+
 /// These colors are a rider-customizable visual aid, not bike diagnostics or
 /// traffic-law limits. A missing or stale reading never receives a color zone.
 private struct FocusMetricScale {
     enum Tone {
-        case cold, calm, rising, warm, hot
-
+        case calm, warm, hot
         var color: Color {
-            Color(UIColor { trait in
-                let dark = trait.userInterfaceStyle == .dark
-                switch self {
-                case .cold: return dark ? UIColor(red: 0.43, green: 0.76, blue: 1, alpha: 1)
-                                   : UIColor(red: 0.06, green: 0.37, blue: 0.75, alpha: 1)
-                case .calm: return dark ? UIColor(red: 0.43, green: 0.83, blue: 0.56, alpha: 1)
-                                   : UIColor(red: 0.06, green: 0.46, blue: 0.19, alpha: 1)
-                case .rising: return dark ? UIColor(red: 1, green: 0.85, blue: 0.35, alpha: 1)
-                                     : UIColor(red: 0.56, green: 0.38, blue: 0.02, alpha: 1)
-                case .warm: return dark ? UIColor(red: 1, green: 0.63, blue: 0.31, alpha: 1)
-                                   : UIColor(red: 0.68, green: 0.28, blue: 0.03, alpha: 1)
-                case .hot: return dark ? UIColor(red: 1, green: 0.40, blue: 0.43, alpha: 1)
-                                  : UIColor(red: 0.69, green: 0.06, blue: 0.13, alpha: 1)
-                }
-            })
+            switch self {
+            case .calm: return MetricVisualColor.color(.green)
+            case .warm: return MetricVisualColor.color(.orange)
+            case .hot: return MetricVisualColor.color(.red)
+            }
         }
     }
 
@@ -460,47 +496,21 @@ private struct FocusMetricScale {
         stops.first { value < $0.upper }?.tone ?? .hot
     }
 
-    static func make(id: String, value: Double, rpmRedline: Int,
-                     speedWarm: Int, speedHot: Int) -> Self? {
-        guard value.isFinite else { return nil }
-        switch id {
-        case "engine_speed":
-            let redline = Double(max(6_000, min(16_000, rpmRedline)))
-            let stops: [(Double, Tone)] = [(redline * 0.60, .calm), (redline * 0.80, .rising),
-                                           (redline, .warm), (.infinity, .hot)]
-            let zone = value >= redline ? "Выше выбранной красной зоны"
-                : value >= redline * 0.80 ? "Высокие обороты"
-                : value >= redline * 0.60 ? "Обороты растут" : "Низкие обороты"
-            return Self(value: value, minimum: 0, maximum: redline * 1.08, stops: stops,
-                        zone: zone, note: "Порог настрой по приборке", leftLabel: "0",
-                        rightLabel: String(format: "%.0f об/мин", redline))
-        case "wheel_speed", "gps_speed":
-            let first = Double(max(30, min(250, speedWarm)))
-            let second = Double(max(Int(first) + 10, min(300, speedHot)))
-            let zone = value >= second ? "Выше второго порога"
-                : value >= first ? "Между порогами" : "До первого порога"
-            return Self(value: value, minimum: 0, maximum: second + 20,
-                        stops: [(first, .calm), (second, .warm), (.infinity, .hot)],
-                        zone: zone, note: "Выбранные пороги цвета",
-                        leftLabel: "0", rightLabel: "\(Int(first)) / \(Int(second)) км/ч")
-        case "engine_water_temperature":
-            let zone = value >= 110 ? "Очень высокая зона охлаждения"
-                : value >= 100 ? "Высокая зона охлаждения"
-                : value >= 60 ? "Средняя зона охлаждения" : "Низкая зона охлаждения"
-            return Self(value: value, minimum: 0, maximum: 120,
-                        stops: [(60, .cold), (100, .calm), (110, .warm), (.infinity, .hot)],
-                        zone: zone, note: "Условная шкала охлаждения",
-                        leftLabel: "0 °C", rightLabel: "120 °C")
-        case "inlet_air_temperature":
-            let zone = value >= 40 ? "Очень тёплый воздух"
-                : value >= 30 ? "Тёплый воздух"
-                : value >= 0 ? "Умеренная температура" : "Холодный воздух"
-            return Self(value: value, minimum: -20, maximum: 60,
-                        stops: [(0, .cold), (30, .calm), (40, .warm), (.infinity, .hot)],
-                        zone: zone, note: "Воздух на впуске · не погода",
-                        leftLabel: "−20 °C", rightLabel: "60 °C")
-        default: return nil
+    static func make(id: String, value: Double, preferences: MetricColorPreferences) -> Self? {
+        guard value.isFinite, let kind = MetricColorKind.forMetric(id) else { return nil }
+        let configuration = preferences[kind]
+        let zone: String
+        switch configuration.zone(at: value) {
+        case .green: zone = "Зелёная зона"
+        case .orange: zone = "Оранжевая зона"
+        case .red: zone = "Красная зона"
+        case nil: return nil
         }
+        let suffix = kind.unit.isEmpty ? "" : " " + kind.unit
+        return Self(value: value, minimum: Double(kind.settingRange.lowerBound), maximum: Double(configuration.maximum),
+                    stops: [(Double(configuration.orangeStart), .calm), (Double(configuration.redStart), .warm), (.infinity, .hot)],
+                    zone: zone, note: "От \(configuration.orangeStart) / \(configuration.redStart)",
+                    leftLabel: "\(kind.settingRange.lowerBound)\(suffix)", rightLabel: "\(configuration.maximum)\(suffix)")
     }
 }
 
@@ -519,7 +529,10 @@ private struct FocusMetricScaleView: View {
             .lineLimit(1).minimumScaleFactor(0.7)
             HStack(spacing: 3) {
                 ForEach(0..<16, id: \.self) { index in
-                    let sample = scale.minimum + (scale.maximum - scale.minimum) * Double(index + 1) / 16
+                    // The last lit cell reflects the exact current zone instead
+                    // of turning red early at its quantized right-hand edge.
+                    let sample = min(scale.value,
+                        scale.minimum + (scale.maximum - scale.minimum) * Double(index + 1) / 16)
                     Rectangle()
                         .fill(Double(index) / 16 < scale.progress ? scale.tone(at: sample).color : MotoTheme.border)
                         .frame(maxWidth: .infinity, minHeight: short ? 8 : 12, maxHeight: short ? 8 : 12)
@@ -540,39 +553,200 @@ private struct FocusMetricScaleView: View {
 }
 
 struct MetricVisualSettingsView: View {
-    @AppStorage("MotoLink.visual.rpmRedline") private var rpmRedline = 11_000
-    @AppStorage("MotoLink.visual.speedWarm") private var speedWarm = 130
-    @AppStorage("MotoLink.visual.speedHot") private var speedHot = 190
+    var preview = false
+    @AppStorage(MetricColorPreferences.storageKey) private var scaleSettingsData = Data()
+
+    private var preferences: MetricColorPreferences {
+        #if targetEnvironment(simulator)
+        if preview { return MetricScaleVisualCheckView.preferences }
+        #endif
+        return MetricColorPreferences.decoded(scaleSettingsData) ?? MetricColorPreferences.load(persistMigration: false)
+    }
 
     var body: some View {
         Form {
-            PixelSection("Обороты") {
-                Stepper(value: $rpmRedline, in: 6_000...16_000, step: 500) {
-                    LabeledContent("Красная зона", value: "\(rpmRedline) об/мин")
+            PixelSection("Показатели") {
+                ForEach(MetricColorKind.allCases) { kind in
+                    NavigationLink {
+                        MetricColorEditorView(kind: kind, previewScale: preview ? preferences[kind] : nil)
+                    } label: {
+                        let settings = preferences[kind]
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(kind.title).foregroundStyle(Color.primary)
+                            Text("\(settings.orangeStart) / \(settings.redStart)\(kind.unit.isEmpty ? "" : " " + kind.unit)")
+                                .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                            if kind == .speed {
+                                Text("GPS и мотоцикл").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                            }
+                        }.padding(.vertical, 4)
+                    }
                 }
-                Text("Укажи начало красной зоны по приборной панели своего мотоцикла. Исходные 11 000 об/мин — только ориентир для цветной шкалы.")
-                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-            }
-            PixelSection("Скорость") {
-                Stepper(value: $speedWarm, in: 30...max(30, min(250, speedHot - 10)), step: 10) {
-                    LabeledContent("Оранжевый от", value: "\(speedWarm) км/ч")
-                }
-                Stepper(value: $speedHot, in: min(300, speedWarm + 10)...300, step: 10) {
-                    LabeledContent("Красный от", value: "\(speedHot) км/ч")
-                }
-                Text("Это личные пороги оформления для скорости GPS и байка. Они не определяют разрешённую скорость и не исправляют показания.")
-                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-            }
-            PixelSection("Температура") {
-                Text("Охлаждающая жидкость: синий ниже 60 °C, оранжевый от 100 °C, красный от 110 °C. Воздух на впуске: синий ниже 0 °C, красный от 40 °C.")
-                Text("Цвета температуры условны и не заменяют указания на приборке или в руководстве мотоцикла.")
-                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
             }
         }
         .font(MotoTheme.font(.body))
         .scrollContentBackground(.hidden)
-        .background(MotoTheme.background)
+        .background(MotoTheme.backdrop)
         .navigationTitle("Цветовые шкалы")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear { if !preview { _ = MetricColorPreferences.load() } }
     }
 }
+
+private struct MetricColorEditorView: View {
+    let kind: MetricColorKind
+    var previewScale: MetricColorScale? = nil
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @State private var draft = MetricColorDraft(MetricColorKind.speed.defaultScale)
+    @State private var prepared = false
+    @State private var attemptedSave = false
+    @State private var saveError: String?
+    @FocusState private var focusedField: MetricColorField?
+
+    private var validation: (scale: MetricColorScale?, errors: [MetricColorField: String]) {
+        draft.validation(for: kind)
+    }
+
+    private var editorTitle: String {
+        switch kind {
+        case .speed: return "Скорость"
+        case .engineSpeed: return "Обороты"
+        case .coolantTemperature: return "Охлаждение"
+        case .inletTemperature: return "Воздух"
+        case .throttle: return "Дроссель"
+        case .gear: return "Передача"
+        case .voltage: return "Напряжение"
+        }
+    }
+
+    var body: some View {
+        Form {
+            PixelSection(kind.unit.isEmpty ? "Границы цвета" : "Границы цвета · \(kind.unit)") {
+                numberField(.orangeStart, color: FocusMetricScale.Tone.warm.color)
+                numberField(.redStart, color: FocusMetricScale.Tone.hot.color)
+                Text("Зелёный ниже первого порога. Равные пороги — сразу красный.")
+                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            }
+            PixelSection("Шкала") {
+                numberField(.maximum)
+                Text("Диапазон \(kind.settingRange.lowerBound)…\(kind.settingRange.upperBound)\(kind.unit.isEmpty ? "" : " " + kind.unit)")
+                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            }
+            if kind == .speed {
+                Text("Одинаково для GPS и скорости мотоцикла.")
+                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            }
+            if let saveError { Text(saveError).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.accent) }
+        }
+        .font(MotoTheme.font(.body))
+        .scrollContentBackground(.hidden)
+        .background(MotoTheme.backdrop)
+        .navigationTitle(editorTitle)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Сохранить", action: save).font(MotoTheme.font(.subheadline))
+            }
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Готово") { focusedField = nil }.font(MotoTheme.font(.subheadline))
+            }
+        }
+        .onAppear {
+            guard !prepared else { return }
+            draft = MetricColorDraft(previewScale ?? MetricColorPreferences.load()[kind])
+            prepared = true
+        }
+    }
+
+    private func numberField(_ field: MetricColorField, color: Color = .primary) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(field.title + (kind.unit.isEmpty ? "" : " · " + kind.unit))
+                .font(MotoTheme.font(.subheadline)).foregroundStyle(color)
+            if typeSize.isAccessibilitySize {
+                numberInput(field)
+                HStack(spacing: 12) {
+                    Spacer()
+                    adjustmentButton(field, delta: -1)
+                    adjustmentButton(field, delta: 1)
+                }
+            } else {
+                HStack(spacing: 12) {
+                    numberInput(field)
+                    adjustmentButton(field, delta: -1)
+                    adjustmentButton(field, delta: 1)
+                }
+            }
+            if attemptedSave, let error = validation.errors[field] {
+                Text(error).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.accent)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }.padding(.vertical, 4)
+    }
+
+    private func numberInput(_ field: MetricColorField) -> some View {
+        TextField("Число", text: Binding(get: { draft[field] }, set: { draft[field] = $0; saveError = nil }))
+            .font(MotoTheme.numberFont(size: 25).monospacedDigit())
+            .keyboardType(.numbersAndPunctuation)
+            .focused($focusedField, equals: field)
+            .accessibilityLabel("\(field.title), \(kind.unit)")
+            .frame(minHeight: 44)
+    }
+
+    private func adjustmentButton(_ field: MetricColorField, delta: Int) -> some View {
+        let next = MetricColorDraft.integer(draft[field]).map { $0.addingReportingOverflow(delta) }
+        let allowed = next.map { !$0.overflow && kind.settingRange.contains($0.partialValue) } ?? false
+        return Button {
+            if let next, allowed { draft[field] = String(next.partialValue); saveError = nil }
+        } label: {
+            Image(systemName: delta > 0 ? "plus" : "minus")
+                .font(.system(size: 15, weight: .bold))
+                .frame(width: 44, height: 44)
+                .background(MotoTheme.background, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(allowed ? MotoTheme.accent : MotoTheme.secondary.opacity(0.5))
+        .disabled(!allowed)
+        .accessibilityLabel("\(field.title): \(delta > 0 ? "плюс" : "минус") один")
+    }
+
+    private func save() {
+        attemptedSave = true
+        guard let scale = validation.scale else {
+            focusedField = MetricColorField.allCases.first { validation.errors[$0] != nil }
+            return
+        }
+        if previewScale != nil { focusedField = nil; dismiss(); return }
+        do {
+            var preferences = MetricColorPreferences.load()
+            preferences[kind] = scale
+            try preferences.save()
+            focusedField = nil
+            dismiss()
+        } catch { saveError = error.localizedDescription }
+    }
+}
+
+#if targetEnvironment(simulator)
+/// Renders the real settings and editor with disposable fixture values.
+/// Never changes stored rider settings, on BLE hardware or in the simulator.
+struct MetricScaleVisualCheckView: View {
+    var editor = false
+
+    static var preferences: MetricColorPreferences {
+        var value = MetricColorPreferences()
+        value[.speed] = MetricColorScale(orangeStart: 128, redStart: 160, maximum: 210)
+        return value
+    }
+
+    var body: some View {
+        NavigationStack {
+            if editor {
+                MetricColorEditorView(kind: .speed, previewScale: Self.preferences[.speed])
+            } else {
+                MetricVisualSettingsView(preview: true)
+            }
+        }
+    }
+}
+#endif

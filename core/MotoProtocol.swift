@@ -311,6 +311,7 @@ struct BikeActivitySnapshot: Equatable {
     var live = false
     var moving = false
     var running = false
+    var wind = false
     var engineLevel: Int?
     var temperature: Int?
     var thermalLevel: Int?
@@ -318,10 +319,8 @@ struct BikeActivitySnapshot: Equatable {
 
     static func sample(connected: Bool, ready: Bool,
                        measurements: [MotoProtocol.Measurement], now: Date) -> Self {
-        guard connected, ready else {
-            var empty = Self()
-            empty.label = connected ? "Готовим связь…" : "Нет связи"
-            return empty
+        guard connected else {
+            return Self()
         }
         func fresh(_ id: String, maxAge: TimeInterval, range: ClosedRange<Double>) -> Double? {
             guard let value = measurements.first(where: { $0.id == id }),
@@ -336,10 +335,11 @@ struct BikeActivitySnapshot: Equatable {
         state.live = rpm != nil || speed != nil
         state.moving = (speed ?? 0) > 1
         state.running = (rpm ?? 0) > 0
+        state.wind = (speed ?? 0) >= 160
         state.engineLevel = rpm.map { min(4, max(0, Int(ceil($0 / 2000)))) }
         state.temperature = water.map { Int($0.rounded()) }
         state.thermalLevel = water.map { min(8, max(0, Int((($0 - 40) / 65 * 8).rounded()))) }
-        state.label = !state.live ? "Ждём свежие данные" : state.moving
+        state.label = !state.live ? (ready ? "Ждём свежие данные" : "Готовим связь…") : state.moving
             ? "Данные движения поступают" : state.running ? "Двигатель работает"
             : rpm == 0 ? "Двигатель остановлен" : "Мотоцикл стоит"
         return state
