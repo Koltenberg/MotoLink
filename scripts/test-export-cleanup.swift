@@ -62,5 +62,44 @@ import Foundation
         try require(exists(original) && exists(invalid) && exists(unrelated) && exists(nested),
                     "Stale cleanup crossed an ownership boundary")
         print("Export cleanup: 11 safety cases passed")
+
+        // Exercise the production logger with a real file handle and one
+        // injected replacement-open failure. The old rotate() closed its handle
+        // before this failure, making all later appends and exports fail too.
+        let logs = sandbox.appendingPathComponent("logs", isDirectory: true)
+        var openAttempts = 0
+        let store = try SessionLogStore(directory: logs, limit: 700) { url in
+            openAttempts += 1
+            if openAttempts == 2 { throw CocoaError(.fileWriteOutOfSpace) }
+            return try SessionLogStore.openProtectedLog(url)
+        }
+        var storageErrors: [String] = []
+        store.onError = { storageErrors.append($0) }
+        let padding = String(repeating: "x", count: 400)
+        store.append(DiagnosticEvent(kind: "rx", detail: "first " + padding))
+        store.append(DiagnosticEvent(kind: "rx", detail: "injected-failure " + padding))
+        store.append(DiagnosticEvent(kind: "rx", detail: "after-recovery " + padding))
+        var exported: Result<[URL], Error>?
+        store.export { exported = $0 }
+        let deadline = Date().addingTimeInterval(10)
+        while exported == nil && Date() < deadline {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        guard let exported else {
+            throw NSError(domain: "SessionLogRotationTests", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Logger export did not complete"])
+        }
+        let files = try exported.get()
+        defer { MotoLinkExportCleanup.removeCompletedExports(files) }
+        let events = try files.filter { $0.pathExtension == "jsonl" }.flatMap { file in
+            try String(contentsOf: file, encoding: .utf8).split(separator: "\n").map {
+                try JSONDecoder().decode(DiagnosticEvent.self, from: Data($0.utf8))
+            }
+        }
+        try require(storageErrors.count == 1, "One transient rotation failure poisoned later logging")
+        try require(events.contains { $0.detail.hasPrefix("first ") }, "Rotation lost the original file")
+        try require(events.contains { $0.detail.hasPrefix("after-recovery ") }, "Logger did not recover after transient failure")
+        try require(openAttempts == 3, "Expected the failed rotation to retry once")
+        print("Session log rotation: transient replacement failure recovered; existing journal preserved")
     }
 }

@@ -84,4 +84,88 @@ final class BLEGATTRecoveryPolicyTests: XCTestCase {
         policy.markUnavailable()
         XCTAssertEqual(policy.phase, .unavailable)
     }
+
+    func testSecondChannelLossWhileFirstRetryPendingIsRememberedAndSerialized() {
+        let channels = ["A", "B", "C"]
+        var policy = readyPolicy()
+        var queue = BLENotificationQueue()
+        queue.reset(restored: Set(channels))
+
+        queue.received("A", notifying: false)
+        policy.notificationLost()
+        XCTAssertEqual(policy.phase, .subscribing)
+        XCTAssertEqual(queue.next(in: channels), BLENotificationQueue.Request(identifier: "A", retry: true))
+        XCTAssertTrue(policy.retryNotification("A", permitted: true))
+        queue.requested("A")
+
+        // B's asynchronous loss must not be dropped by A's pending request.
+        queue.received("B", notifying: false)
+        XCTAssertEqual(queue.confirmed, ["C"])
+        XCTAssertEqual(queue.pending, "A")
+        XCTAssertNil(queue.next(in: channels))
+
+        queue.received("A", notifying: true)
+        XCTAssertEqual(queue.next(in: channels), BLENotificationQueue.Request(identifier: "B", retry: true))
+        XCTAssertTrue(policy.retryNotification("B", permitted: true))
+        queue.requested("B")
+        queue.received("B", notifying: true)
+        XCTAssertEqual(queue.confirmed, Set(channels))
+        XCTAssertNil(queue.next(in: channels))
+        XCTAssertEqual(policy.notificationsReady(), false)
+        // No new ride boundary or reset of either channel's retry budget.
+        XCTAssertFalse(policy.retryNotification("A", permitted: true))
+        XCTAssertFalse(policy.retryNotification("B", permitted: true))
+    }
+
+    func testProfileQueueWaitsForNotificationRepairThenCanContinue() {
+        var policy = readyPolicy()
+        XCTAssertEqual(policy.commandDisposition(linkConnected: true, hasControl: true, ready: true), .send)
+        policy.notificationLost()
+        // finishRequest can call sendNext in this state; production must retain
+        // the rest of its profile rather than discard it with diagnosticRunning set.
+        XCTAssertEqual(policy.commandDisposition(linkConnected: true, hasControl: true, ready: false),
+                       .waitForSubscriptions)
+        XCTAssertTrue(policy.retryNotification("A", permitted: true))
+        XCTAssertEqual(policy.notificationsReady(), false)
+        XCTAssertEqual(policy.commandDisposition(linkConnected: true, hasControl: true, ready: true), .send)
+    }
+
+    func testOnlySubscriptionRepairCanRetainQueuedCommands() {
+        var policy = readyPolicy()
+        policy.notificationLost()
+        XCTAssertEqual(policy.commandDisposition(linkConnected: false, hasControl: true, ready: false), .discard)
+        XCTAssertEqual(policy.commandDisposition(linkConnected: true, hasControl: false, ready: false), .discard)
+        policy.markUnavailable()
+        XCTAssertEqual(policy.commandDisposition(linkConnected: true, hasControl: true, ready: false), .discard)
+        policy.beginConnection()
+        XCTAssertEqual(policy.commandDisposition(linkConnected: true, hasControl: true, ready: false), .discard)
+    }
+
+    func testOtherChannelSuccessDoesNotReleasePendingSubscription() {
+        var queue = BLENotificationQueue()
+        let channels = ["A", "B", "C"]
+        XCTAssertEqual(queue.next(in: channels), BLENotificationQueue.Request(identifier: "A", retry: false))
+        queue.requested("A")
+        queue.received("B", notifying: true)
+        XCTAssertEqual(queue.pending, "A")
+        XCTAssertNil(queue.next(in: channels))
+        queue.received("A", notifying: true)
+        XCTAssertEqual(queue.next(in: channels), BLENotificationQueue.Request(identifier: "C", retry: false))
+    }
+
+    func testFailedChannelRetryKeepsItsMissingStateAndBudgetExhausted() {
+        var policy = readyPolicy()
+        var queue = BLENotificationQueue()
+        queue.reset(restored: ["A", "B", "C"])
+        queue.received("A", notifying: false)
+        policy.notificationLost()
+        XCTAssertTrue(policy.retryNotification("A", permitted: true))
+        queue.requested("A")
+        queue.received("A", notifying: false)
+        XCTAssertEqual(queue.next(in: ["A", "B", "C"]), BLENotificationQueue.Request(identifier: "A", retry: true))
+        XCTAssertFalse(policy.retryNotification("A", permitted: true))
+        XCTAssertFalse(queue.confirmed.contains("A"))
+        queue.reset()
+        XCTAssertEqual(queue.next(in: ["A", "B", "C"]), BLENotificationQueue.Request(identifier: "A", retry: false))
+    }
 }

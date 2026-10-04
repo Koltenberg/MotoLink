@@ -43,11 +43,15 @@ final class SessionLogStore {
     private var fileURL: URL
     private var handle: FileHandle
     private var bytesWritten = 0
-    private let limit = 10 * 1024 * 1024
+    private let limit: Int
+    private let prepareLog: (URL) throws -> FileHandle
     var onError: ((String) -> Void)?
 
-    init() throws {
-        directory = try FileManager.default.url(for: .documentDirectory,
+    init(directory overrideDirectory: URL? = nil, limit: Int = 10 * 1024 * 1024,
+         prepareLog: @escaping (URL) throws -> FileHandle = SessionLogStore.openProtectedLog) throws {
+        self.limit = limit
+        self.prepareLog = prepareLog
+        directory = try overrideDirectory ?? FileManager.default.url(for: .documentDirectory,
                                                   in: .userDomainMask,
                                                   appropriateFor: nil,
                                                   create: true)
@@ -55,13 +59,7 @@ final class SessionLogStore {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         setupURL = directory.appendingPathComponent("MotoLink-setup.json")
         fileURL = Self.nextURL(in: directory)
-        guard FileManager.default.createFile(atPath: fileURL.path, contents: nil) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        try FileManager.default.setAttributes(
-            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-            ofItemAtPath: fileURL.path)
-        handle = try FileHandle(forWritingTo: fileURL)
+        handle = try prepareLog(fileURL)
         if let bytes = try? Data(contentsOf: setupURL), bytes.count <= 1024 * 1024,
            let saved = try? JSONDecoder().decode(SetupSnapshot.self, from: bytes) { setupSnapshot = saved }
         try Self.prune(directory: directory, preserving: fileURL)
@@ -152,17 +150,32 @@ final class SessionLogStore {
     private func rotate() throws {
         try checkpointSetup(forced: true)
         try handle.synchronize()
-        try handle.close()
-        fileURL = Self.nextURL(in: directory)
-        guard FileManager.default.createFile(atPath: fileURL.path, contents: nil) else {
+        let replacementURL = Self.nextURL(in: directory)
+        let replacement: FileHandle
+        do {
+            replacement = try prepareLog(replacementURL)
+        } catch {
+            // Keep the current handle usable. A transient allocation/open error
+            // must not poison every later append and export until app relaunch.
+            try? FileManager.default.removeItem(at: replacementURL)
+            throw error
+        }
+        let previous = handle
+        handle = replacement
+        fileURL = replacementURL
+        bytesWritten = 0
+        // The replacement is now live. Housekeeping failures must not discard
+        // the event which caused this rotation or roll back to a closed handle.
+        do { try previous.close() } catch { report(error) }
+        do { try Self.prune(directory: directory, preserving: fileURL) } catch { report(error) }
+    }
+
+    static func openProtectedLog(_ url: URL) throws -> FileHandle {
+        guard FileManager.default.createFile(atPath: url.path, contents: nil,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]) else {
             throw CocoaError(.fileWriteUnknown)
         }
-        try FileManager.default.setAttributes(
-            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-            ofItemAtPath: fileURL.path)
-        handle = try FileHandle(forWritingTo: fileURL)
-        bytesWritten = 0
-        try Self.prune(directory: directory, preserving: fileURL)
+        return try FileHandle(forWritingTo: url)
     }
 
     private func report(_ error: Error) {

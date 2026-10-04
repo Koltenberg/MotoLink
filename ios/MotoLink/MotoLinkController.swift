@@ -9,6 +9,7 @@ final class MotoLinkController: ObservableObject {
     let bluetooth = MotorcycleBluetooth()
     private lazy var connectionContext = ConnectionContextMonitor { [weak self] in self?.rides.recordConnectionContext($0) }
     private lazy var networkContext = NetworkPathContextMonitor { [weak self] in self?.rides.recordConnectionContext($0) }
+    private var lastMonitoredRideID: UUID?
     private var subscriptions = Set<AnyCancellable>()
 
     private init() {
@@ -39,6 +40,14 @@ final class MotoLinkController: ObservableObject {
         rides.$activeRideID.removeDuplicates().receive(on: DispatchQueue.main).sink { [weak self] id in
             guard let self, self.rides.active?.id == id else { return }
             // Restored rides resume passive observation without consuming next-ride inputs.
+            // Finishing can synchronously auto-start a new ride before the
+            // queued nil ID arrives. Reset by identity, even when both rides
+            // are active at their respective callbacks, so caps and initial
+            // snapshots always belong to the current ride.
+            guard self.lastMonitoredRideID != id else { return }
+            self.connectionContext.setRecording(false)
+            self.networkContext.setRecording(false)
+            self.lastMonitoredRideID = id
             self.connectionContext.setRecording(id != nil)
             self.networkContext.setRecording(id != nil)
         }.store(in: &subscriptions)

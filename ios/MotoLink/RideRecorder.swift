@@ -111,7 +111,7 @@ final class RideArchive {
     // Confined to queue; changing rides starts a fresh checkpoint schedule.
     private var checkpointRideID: UUID?
     private var checkpointPolicy = JournalCheckpointPolicy()
-    private var appendedFinishIDs = Set<UUID>()
+    private var finishWriteProgress = JournalFinishWriteProgress()
     var onError: ((String) -> Void)?
 
     init() throws {
@@ -191,15 +191,22 @@ final class RideArchive {
                     }
                 }
                 let finishesRide = summary.endedAt != nil && records.contains { $0.kind == "finished" }
-                let pendingRecords = finishesRide && appendedFinishIDs.contains(summary.id) ? [] : records
-                for record in pendingRecords {
-                    var bytes = try Self.encoder.encode(record)
-                    bytes.append(0x0A)
-                    try handle.write(contentsOf: bytes)
+                if finishesRide {
+                    let encoded = try records.map { record -> Data in
+                        var bytes = try Self.encoder.encode(record)
+                        bytes.append(0x0A)
+                        return bytes
+                    }
+                    try finishWriteProgress.append(encoded, rideID: summary.id) {
+                        try handle.write(contentsOf: $0)
+                    }
+                } else {
+                    for record in records {
+                        var bytes = try Self.encoder.encode(record)
+                        bytes.append(0x0A)
+                        try handle.write(contentsOf: bytes)
+                    }
                 }
-                // Retrying a failed fsync/manifest replacement must not append
-                // another finish boundary when those bytes were already written.
-                if finishesRide { appendedFinishIDs.insert(summary.id) }
                 if checkpointRideID != summary.id {
                     checkpointRideID = summary.id
                     checkpointPolicy = JournalCheckpointPolicy()
@@ -214,7 +221,7 @@ final class RideArchive {
                         options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
                     checkpointPolicy.checkpointSucceeded(at: uptime)
                 }
-                if finishesRide { appendedFinishIDs.remove(summary.id) }
+                if finishesRide { finishWriteProgress.checkpointSucceeded(rideID: summary.id) }
                 if let completion { DispatchQueue.main.async { completion(.success(())) } }
             } catch {
                 DispatchQueue.main.async {
@@ -1036,7 +1043,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         var records: [RideRecord] = []
         for fix in locations.sorted(by: { $0.timestamp < $1.timestamp }) {
             records.append(RideRecord(kind: "gps_observation", timestamp: fix.timestamp,
-                detail: "lat=\(fix.coordinate.latitude); lon=\(fix.coordinate.longitude); horizontalAccuracy=\(fix.horizontalAccuracy); altitude=\(fix.altitude); verticalAccuracy=\(fix.verticalAccuracy); speed=\(fix.speed); speedAccuracy=\(fix.speedAccuracy); course=\(fix.course); courseAccuracy=\(fix.courseAccuracy)"))
+                detail: "lat=\(fix.coordinate.latitude); lon=\(fix.coordinate.longitude); horizontalAccuracy=\(fix.horizontalAccuracy); altitude=\(fix.altitude); verticalAccuracy=\(fix.verticalAccuracy); speed=\(fix.speed); speedAccuracy=\(fix.speedAccuracy); course=\(fix.course); courseAccuracy=\(fix.courseAccuracy); fixTimestampUnix=\(fix.timestamp.timeIntervalSince1970); receivedAtUnix=\(receivedAt.timeIntervalSince1970)"))
             guard GPSContinuity.acceptsTimestamp(fix.timestamp, startedAt: startedAt,
                 previous: points.last?.timestamp, now: Date()) else { continue }
             guard fix.horizontalAccuracy >= 0, fix.horizontalAccuracy <= 50,

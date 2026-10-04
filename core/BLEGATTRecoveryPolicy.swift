@@ -55,6 +55,20 @@ struct BLEGATTRecoveryPolicy {
         return true
     }
 
+    /// A second channel can stop while a different subscription is pending.
+    /// Record the loss immediately, but spend its retry only when it is sent.
+    mutating func notificationLost() {
+        if phase == .ready { phase = .subscribing }
+    }
+
+    enum CommandDisposition: Equatable { case send, waitForSubscriptions, discard }
+
+    func commandDisposition(linkConnected: Bool, hasControl: Bool, ready: Bool) -> CommandDisposition {
+        guard linkConnected, hasControl else { return .discard }
+        if ready { return .send }
+        return phase == .subscribing ? .waitForSubscriptions : .discard
+    }
+
     /// The callback for a failed setNotifyValue has completed, so retrying that
     /// same valid characteristic once cannot overlap the original request.
     mutating func retryNotification(_ identifier: String, permitted: Bool) -> Bool {
@@ -75,4 +89,43 @@ struct BLEGATTRecoveryPolicy {
     }
 
     mutating func markUnavailable() { phase = .unavailable }
+}
+
+/// Bookkeeping for the three independent notification channels. A callback
+/// from one channel must not disappear just because another channel is pending.
+struct BLENotificationQueue {
+    struct Request: Equatable {
+        let identifier: String
+        let retry: Bool
+    }
+
+    private(set) var confirmed: Set<String> = []
+    private(set) var pending: String?
+    private var retryNeeded: Set<String> = []
+
+    mutating func reset(restored: Set<String> = []) {
+        confirmed = restored
+        pending = nil
+        retryNeeded.removeAll()
+    }
+
+    mutating func received(_ identifier: String, notifying: Bool) {
+        if pending == identifier { pending = nil }
+        if notifying {
+            confirmed.insert(identifier)
+            retryNeeded.remove(identifier)
+        } else {
+            confirmed.remove(identifier)
+            retryNeeded.insert(identifier)
+        }
+    }
+
+    func next(in identifiers: [String]) -> Request? {
+        guard pending == nil,
+              let identifier = identifiers.first(where: { !confirmed.contains($0) }) else { return nil }
+        return Request(identifier: identifier, retry: retryNeeded.contains(identifier))
+    }
+
+    mutating func requested(_ identifier: String) { pending = identifier }
+    mutating func stopWaiting() { pending = nil }
 }
