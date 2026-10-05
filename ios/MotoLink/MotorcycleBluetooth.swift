@@ -490,7 +490,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         diagnosticStatus = "Проверка 1/2: данные и запуск потока"
         record("diagnostic_start", "Автопроверка: запросы, профиль потока, один резервный путь при отсутствии 4A")
         UserDefaults.standard.set(true, forKey: "MotoLink.resumeTelemetry")
-        request([0x03, 0x40, 0x41, 0x45, 0x1A, 0x1D, 0x47, 0x08, 0x45])
+        request(MotoProtocol.initialProfile)
     }
 
     private func observeDiagnostic() {
@@ -509,7 +509,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
                 self.diagnosticPhase = 2
                 self.diagnosticStatus = "Проверка 2/2: полный профиль совместимости"
                 self.record("fallback", "Структурно полный 4A не получен. Один полный профиль, включая имя телефона MotoLink; время и настройки приборки не изменяются.")
-                self.request([0x03, 0x40, 0x1A, 0x1D, 0x47, 0x0B, 0x41, 0x1B, 0x48, 0x1E, 0x08, 0x45])
+                self.request(MotoProtocol.compatibilityProfile)
             } else {
                 self.diagnosticRunning = false
                 self.captureProfileAutomatic = false
@@ -1089,16 +1089,6 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: timeout)
     }
 
-    private func matchesResponse(_ data: Data, command: UInt8) -> Bool {
-        let bytes = Array(data)
-        if [0x08, 0x0B, 0x1B, 0x48, 0x1E].contains(command) {
-            // Init/config query ACK is an outcome, not telemetry. Long ACKs echo
-            // payload; byte 7 must not be misread as a rejection status.
-            return bytes.count >= 5 && bytes.count == Int(bytes[1]) + 3 && bytes[0] == 0x20 && bytes[3] == command
-        }
-        return MotoProtocol.validEnvelope(data, command: command)
-    }
-
     private func finishRequest(received: Bool, rejected: Bool = false, failure: String? = nil) {
         guard let write = activeWrite else { return }
         responseTimeout?.cancel()
@@ -1670,19 +1660,22 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
             }
             onMeasurements?(decoded)
         }
-        if bytes.count == 5, bytes[0] == 0x20, bytes[1] == 2,
-           let write = activeWrite, bytes[3] == write.command, bytes[4] != 0 {
-            record("command_rejected", String(format: "0x%02X: код %d", write.command, bytes[4]))
-            // Wait for didWriteValueFor before advancing, otherwise an old ATT
-            // callback can be mistaken for the next queued write.
-            rejectedResponse = true
-            if writeConfirmed { finishRequest(received: false, rejected: true) }
-            checkStreamRecovery()
-            return
-        }
-        if let activeWrite, matchesResponse(data, command: activeWrite.command) {
-            responseReceived = true
-            if writeConfirmed { finishRequest(received: true) }
+        if let activeWrite {
+            switch MotoProtocol.commandResponse(data, command: activeWrite.command) {
+            case .rejected(let code):
+                record("command_rejected", String(format: "0x%02X: код %d", activeWrite.command, code))
+                // Wait for didWriteValueFor before advancing, otherwise an old
+                // ATT callback can be mistaken for the next queued write.
+                rejectedResponse = true
+                if writeConfirmed { finishRequest(received: false, rejected: true) }
+                checkStreamRecovery()
+                return
+            case .received:
+                responseReceived = true
+                if writeConfirmed { finishRequest(received: true) }
+            case .unmatched:
+                break
+            }
         }
         checkStreamRecovery()
     }

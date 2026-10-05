@@ -73,6 +73,51 @@ final class MotoProtocolTests: XCTestCase {
         for command: UInt8 in [0x13, 0x42, 0x99, 0xFF] { XCTAssertNil(MotoProtocol.request(command)) }
         XCTAssertEqual(MotoProtocol.request(0x08), data("080c00ffff0a08017803e800c80064"))
     }
+
+    func testProfilesConfigureStreamBeforeItsOnlyStartRequest() {
+        for profile in [MotoProtocol.initialProfile, MotoProtocol.compatibilityProfile] {
+            XCTAssertEqual(profile.filter { $0 == 0x45 }.count, 1)
+            XCTAssertEqual(Array(profile.suffix(2)), [0x08, 0x45])
+            XCTAssertTrue(profile.allSatisfy { MotoProtocol.request($0) != nil })
+        }
+        XCTAssertFalse(MotoProtocol.initialProfile.contains(0x0B))
+        XCTAssertTrue(MotoProtocol.compatibilityProfile.contains(0x0B))
+    }
+
+    func testCapturedTelemetry45CannotCompleteCommandBeforeItsACK() {
+        // Oct4 h90: telemetry at +4.022 s, ACK at +4.053 s; h95:
+        // telemetry at +8.586 s, ATT at +9.064 s, ACK at +9.964 s.
+        // Keep only each telemetry envelope; the body is synthetic/redacted.
+        for (sequence, ack) in [(UInt8(0x6B), "20026c4500"), (UInt8(0x03), "20020d4500")] {
+            var telemetry = Data(repeating: 0xFF, count: 55)
+            telemetry[0] = 0x45; telemetry[1] = 0x34; telemetry[2] = sequence
+            XCTAssertTrue(MotoProtocol.validEnvelope(telemetry, command: 0x45))
+            XCTAssertEqual(MotoProtocol.commandResponse(telemetry, command: 0x45), .unmatched)
+            XCTAssertEqual(MotoProtocol.commandResponse(data(ack), command: 0x45), .received)
+        }
+    }
+
+    func testCommandACKRequiresMatchingCommandAndCompleteEnvelope() {
+        let ack = data("20026c4500")
+        for length in 0..<ack.count {
+            XCTAssertEqual(MotoProtocol.commandResponse(ack.prefix(length), command: 0x45), .unmatched)
+        }
+        XCTAssertEqual(MotoProtocol.commandResponse(data("20026c4100"), command: 0x45), .unmatched)
+        XCTAssertEqual(MotoProtocol.commandResponse(data("20036c4500"), command: 0x45), .unmatched)
+        XCTAssertEqual(MotoProtocol.commandResponse(data("20026c450000"), command: 0x45), .unmatched)
+        XCTAssertEqual(MotoProtocol.commandResponse(data("20026c4501"), command: 0x45), .rejected(1))
+        XCTAssertEqual(MotoProtocol.commandResponse(data("20026c4102"), command: 0x41), .rejected(2))
+    }
+
+    func testLongProfileACKAndSnapshotResponseKeepExistingSemantics() {
+        // Actual h90 ACK08 includes enabled=1 at byte 7; this is not rejection.
+        XCTAssertEqual(MotoProtocol.commandResponse(data("200c6808000a08017803e800c80064"), command: 0x08), .received)
+        XCTAssertEqual(MotoProtocol.commandResponse(data("2002680800"), command: 0x08), .received)
+        XCTAssertEqual(MotoProtocol.commandResponse(data("2002680801"), command: 0x08), .rejected(1))
+        XCTAssertEqual(MotoProtocol.commandResponse(data("2002934100"), command: 0x41), .unmatched)
+        XCTAssertEqual(MotoProtocol.commandResponse(snapshot, command: 0x41), .received)
+    }
+
     func testCapabilityNotReadyAndUnknownBlocks() {
         var cap = data("40209240000511FC77D417FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
         cap[14] = 0

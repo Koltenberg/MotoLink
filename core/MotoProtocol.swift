@@ -57,6 +57,31 @@ enum MotoProtocol {
         "5E119EBA-35A7-4463-A7AF-7FA40A302350"
     ]
 
+    // Configure the stream before requesting it. RIDEOLOGY sends 08 before 45;
+    // an earlier 45 already starts 4A/4B on the captured EX500G sessions.
+    static let initialProfile: [UInt8] = [0x03, 0x40, 0x41, 0x1A, 0x1D, 0x47, 0x08, 0x45]
+    static let compatibilityProfile: [UInt8] = [0x03, 0x40, 0x1A, 0x1D, 0x47, 0x0B, 0x41, 0x1B, 0x48, 0x1E, 0x08, 0x45]
+
+    enum CommandResponse: Equatable {
+        case unmatched
+        case received
+        case rejected(UInt8)
+    }
+
+    static func commandResponse(_ data: Data, command: UInt8) -> CommandResponse {
+        let bytes = Array(data)
+        guard bytes.count >= 5, bytes.count == Int(bytes[1]) + 3 else { return .unmatched }
+        if bytes[0] == 0x20, bytes[3] == command {
+            if bytes.count == 5, bytes[4] != 0 { return .rejected(bytes[4]) }
+            // Long ACKs echo payload, so their byte 7 is not a result code.
+            // In particular, unsolicited telemetry 45 cannot acknowledge a
+            // command 45: the captured ACK can arrive after that telemetry.
+            if [0x08, 0x0B, 0x1B, 0x48, 0x1E, 0x45].contains(command) { return .received }
+        }
+        if [0x08, 0x0B, 0x1B, 0x48, 0x1E, 0x45].contains(command) { return .unmatched }
+        return validEnvelope(data, command: command) ? .received : .unmatched
+    }
+
     static func request(_ command: UInt8) -> Data? {
         if command == 0x08 {
             return Data([0x08, 0x0C, 0x00, 0xFF, 0xFF, 0x0A, 0x08, 0x01, 0x78, 0x03, 0xE8, 0x00, 0xC8, 0x00, 0x64])

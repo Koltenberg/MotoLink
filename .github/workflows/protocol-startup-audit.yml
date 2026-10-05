@@ -1,0 +1,20 @@
+name: Verify protocol startup correction
+on:
+  push:
+    branches: [codex/protocol-startup-audit-20261005]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Test all Swift protocol and ride policies
+        run: xcrun swift test --package-path core
+      - name: Compile iPhone app without signing or installing
+        run: xcodebuild -quiet -project ios/MotoLink.xcodeproj -scheme MotoLink -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build-artifacts/protocol-audit CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= DEVELOPMENT_TEAM= ARCHS=arm64 build
