@@ -2,7 +2,7 @@ name: Build unsigned iPhone IPA
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/release-0.5.1]
   workflow_dispatch:
 
 permissions:
@@ -61,3 +61,4 @@ jobs:
           path: build-artifacts/ios/**/*.log
           if-no-files-found: warn
           retention-days: 3
+
