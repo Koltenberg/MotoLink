@@ -42,4 +42,3 @@ wss.on('connection', ws => {
 });
 httpServer.listen(18742, '127.0.0.1', () => console.log('Apple TLS transport listening'));
 setTimeout(() => { for (const ws of wss.clients) ws.terminate(); httpServer.close(); process.exit(0); }, 20 * 60 * 1000);
-
