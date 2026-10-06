@@ -25,6 +25,72 @@ def screenshot(path, marker=b"", dimensions=(1170, 2532)):
                      + b"\x00\x00\x00\x00IEND\xaeB`\x82")
 
 
+class RecorderAuditEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.path = self.root / CAPTURE.RIDE_AUDIT_EVIDENCE
+        self.started = time.time() - 1
+        self.evidence = {
+            "schema": "motolink.simulator-ride-lifecycle/1", "launchToken": "current",
+            "passed": True, "failures": [], "startedAt": self.started,
+            "finishedAt": time.time(),
+            "checks": [{"name": name, "passed": True} for name in sorted(CAPTURE.RIDE_AUDIT_REQUIRED)],
+        }
+
+    def validate(self):
+        self.path.write_text(json.dumps(self.evidence), encoding="utf-8")
+        return CAPTURE.validate_ride_audit(self.path, "current", self.started)
+
+    def test_accepts_complete_fresh_recorder_evidence(self):
+        self.assertTrue(self.validate()["passed"])
+
+    def test_rejects_old_run_even_when_every_check_passes(self):
+        for field, value in (("launchToken", "old"), ("startedAt", self.started - 1),
+                             ("finishedAt", time.time() + 100), ("startedAt", float("nan"))):
+            with self.subTest(field=field, value=value):
+                original = self.evidence[field]
+                self.evidence[field] = value
+                with self.assertRaises(CAPTURE.CaptureError):
+                    self.validate()
+                self.evidence[field] = original
+
+    def test_rejects_missing_or_failed_required_scenario_despite_overall_pass(self):
+        original = self.evidence["checks"]
+        for replacement in ([], original[1:], original + [original[0]],
+                            [{"name": "irrelevant_" + str(i), "passed": True} for i in range(20)],
+                            [{**c, "passed": False} if i == 0 else c for i, c in enumerate(original)]):
+            self.evidence["checks"] = replacement
+            with self.assertRaises(CAPTURE.CaptureError):
+                self.validate()
+
+    def test_missing_report_is_not_a_pass(self):
+        with self.assertRaises(CAPTURE.CaptureError):
+            CAPTURE.validate_ride_audit(self.path, "current", self.started)
+
+    def test_runner_removes_stale_report_and_keeps_failing_new_evidence(self):
+        container = self.root / "container"
+        documents = container / "Documents"
+        documents.mkdir(parents=True)
+        source = documents / CAPTURE.RIDE_AUDIT_EVIDENCE
+        source.write_text('{"passed": true}', encoding="utf-8")
+        calls = []
+        def fake_run(*args, **kwargs):
+            calls.append(args)
+            if args[0] == "launch":
+                self.assertFalse(source.exists())
+                self.evidence.update(launchToken=args[-1], startedAt=time.time(), finishedAt=time.time(),
+                                     passed=False, failures=["actual save failed"])
+                source.write_text(json.dumps(self.evidence), encoding="utf-8")
+            return ""
+        with patch.object(CAPTURE, "run", side_effect=fake_run):
+            with self.assertRaises(CAPTURE.LateLifecycleError):
+                CAPTURE.verify_recorder_lifecycle("device", "bundle", container, self.root, time.monotonic() + 10)
+        self.assertIn(("privacy", "device", "revoke", "location", "bundle"), calls)
+        self.assertEqual(json.loads(self.path.read_text())["failures"], ["actual save failed"])
+
+
 class SimulatorCaptureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -78,14 +144,14 @@ class SimulatorCaptureTests(unittest.TestCase):
                                 "route" if "--review-route-fullscreen" in args else
                                 "graphs" if "--review-graphs" in args or "--review-graphs-fullscreen" in args else
                                 "companion" if "--companion-visual-check" in args else "home")
-            self.theme = "light" if "--review-light" in args else "default"
+            self.theme = "light" if "--review-light" in args else "dark" if "--review-dark" in args else "default"
             self.landscape = "--review-landscape" in args
             if self.write_ready:
                 token = args[args.index("--visual-review-token") + 1]
                 (self.container / "Documents" / CAPTURE.READY_EVIDENCE).write_text(json.dumps({
                     "ready": True, "launchToken": token,
                     "mode": "garage" if self.active_mode == "home" else self.active_mode,
-                    "appearance": "light" if "--review-light" in args else "dark" if self.active_mode in ("ride", "graphs", "route") else "light",
+                    "appearance": "light" if "--review-light" in args else "dark" if "--review-dark" in args or self.active_mode in ("ride", "graphs", "route") else "light",
                     "windowWidth": 844 if self.landscape else 390,
                     "windowHeight": 390 if self.landscape else 844,
                     "capturedAt": time.time(), "visibleSeconds": 2.1, **self.ready_override,
@@ -115,9 +181,12 @@ class SimulatorCaptureTests(unittest.TestCase):
             (args[3] / CAPTURE.REFRESH_EVIDENCE).write_text('{"mockedByUnitTest": true}', encoding="utf-8")
             if self.lifecycle_failure:
                 raise CAPTURE.CaptureError(self.lifecycle_failure)
+        def recorder_audit(*args):
+            (args[3] / CAPTURE.RIDE_AUDIT_EVIDENCE).write_text('{"mockedByUnitTest": true}', encoding="utf-8")
         with patch.object(CAPTURE, "run", side_effect=self.fake_run), \
              patch.object(CAPTURE.time, "sleep"), patch.object(CAPTURE, "reject_blank_png"), \
              patch.object(CAPTURE, "verify_refresh_lifecycle", side_effect=lifecycle), \
+             patch.object(CAPTURE, "verify_recorder_lifecycle", side_effect=recorder_audit), \
              patch.dict(CAPTURE.os.environ, self.runner_env, clear=True):
             CAPTURE.capture(self.app, self.output)
 
@@ -193,6 +262,7 @@ class SimulatorCaptureTests(unittest.TestCase):
         self.execute()
         expected = [
             ("simulator-garage-light.png", "home", "light", False),
+            ("simulator-garage-dark.png", "home", "dark", False),
             ("simulator-ride.png", "ride", "default", False),
             ("simulator-ride-light.png", "ride", "light", False),
             ("simulator-bike-idle.png", "ride", "default", False),

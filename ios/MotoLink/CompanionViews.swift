@@ -481,6 +481,7 @@ struct BikeProfileEditor: View {
                 }
                 if let error = store.error { Text(error).foregroundStyle(MotoTheme.accent) }
             }.font(MotoTheme.font(.body)).navigationTitle("Мой байк").navigationBarTitleDisplayMode(.inline)
+                .scrollContentBackground(.hidden).background(MotoTheme.backdrop)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.font(MotoTheme.font(.body)) }
                     ToolbarItem(placement: .confirmationAction) { Button("Сохранить") {
@@ -587,6 +588,7 @@ struct FuelEditor: View {
                 if entry != nil { Button("Удалить заправку", role: .destructive) { delete = true } }
                 if let error = store.error { Text(error).foregroundStyle(MotoTheme.accent) }
             }.font(MotoTheme.font(.body)).navigationTitle("Заправка").navigationBarTitleDisplayMode(.inline)
+                .scrollContentBackground(.hidden).background(MotoTheme.backdrop)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.font(MotoTheme.font(.body)) }
                     ToolbarItem(placement: .confirmationAction) { Button("Сохранить") {
@@ -712,6 +714,7 @@ struct ServiceEditor: View {
                 if task != nil { Button("Удалить обслуживание", role: .destructive) { delete = true } }
                 if let error = store.error { Text(error).foregroundStyle(MotoTheme.accent) }
             }.font(MotoTheme.font(.body)).navigationTitle("Сервис").navigationBarTitleDisplayMode(.inline)
+                .scrollContentBackground(.hidden).background(MotoTheme.backdrop)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Отмена") { dismiss() }.font(MotoTheme.font(.body)) }
                     ToolbarItem(placement: .confirmationAction) { Button("Сохранить", action: save).font(MotoTheme.font(.body)) }

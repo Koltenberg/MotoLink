@@ -24,6 +24,50 @@ enum AutomaticRideSettings {
     }
 }
 
+/// Persist the rider's Finish action before asynchronous route recovery or disk
+/// saving. A crash before the finished JSONL line must not resume the same ride.
+struct RideFinishIntent {
+    static let key = "MotoLink.pendingRideFinish"
+    let rideID: UUID
+    let requestedAt: Date
+
+    init(rideID: UUID, requestedAt: Date) {
+        self.rideID = rideID
+        self.requestedAt = requestedAt
+    }
+
+    static func load(_ defaults: UserDefaults) -> RideFinishIntent? {
+        decode(defaults.object(forKey: key))
+    }
+
+    static func decode(_ value: Any?) -> RideFinishIntent? {
+        guard let saved = value as? [String: Any],
+              let identifier = saved["rideID"] as? String,
+              let rideID = UUID(uuidString: identifier),
+              let requestedAt = saved["requestedAt"] as? Date,
+              requestedAt.timeIntervalSinceReferenceDate.isFinite else { return nil }
+        return RideFinishIntent(rideID: rideID, requestedAt: requestedAt)
+    }
+
+    func save(_ defaults: UserDefaults) {
+        guard requestedAt.timeIntervalSinceReferenceDate.isFinite else { return }
+        let saved: [String: Any] = ["rideID": rideID.uuidString, "requestedAt": requestedAt]
+        defaults.set(saved, forKey: Self.key)
+    }
+
+    static func clear(for rideID: UUID, in defaults: UserDefaults) {
+        guard load(defaults)?.rideID == rideID else { return }
+        defaults.removeObject(forKey: key)
+    }
+
+    func endedAt(startedAt: Date, now: Date) -> Date {
+        // Preserve the original button press, not a later recovery time. Clock
+        // changes cannot create a negative or future ride duration.
+        let request = requestedAt.timeIntervalSinceReferenceDate.isFinite ? requestedAt : now
+        return max(startedAt, min(request, now))
+    }
+}
+
 /// Starting a ride depends on confirmed BLE channels, never on GPS permission.
 /// A disconnect cannot establish engine shutdown, so this policy never ends rides.
 struct RideAutomationPolicy {

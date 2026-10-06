@@ -31,7 +31,8 @@ struct MotoLinkApp: App {
     private var selectedScheme: ColorScheme? {
         #if targetEnvironment(simulator)
         if ProcessInfo.processInfo.arguments.contains("--review-light") { return .light }
-        if ProcessInfo.processInfo.arguments.contains("--review-ride")
+        if ProcessInfo.processInfo.arguments.contains("--review-dark")
+            || ProcessInfo.processInfo.arguments.contains("--review-ride")
             || ProcessInfo.processInfo.arguments.contains("--review-route-fullscreen")
             || ProcessInfo.processInfo.arguments.contains("--review-graphs")
             || ProcessInfo.processInfo.arguments.contains("--review-graphs-fullscreen") { return .dark }
@@ -133,33 +134,65 @@ enum MotoTheme {
     }
 }
 
-/// A quiet, static racing texture. It never starts an animation or samples a
-/// sensor, and remains behind opaque reading cards in both appearances.
+/// A quiet arcade texture drawn in two batches. No timer, random state, image
+/// decoding, animation or sensor access: only the layout and appearance matter.
+/// The opaque cards stay clean, and accessibility contrast settings remove the
+/// decoration altogether rather than making it compete with the content.
 struct MotoBackdrop: View {
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                MotoTheme.background
+        ZStack {
+            MotoTheme.background
+            if contrast != .increased && !reduceTransparency {
                 Canvas { context, size in
+                    guard size.width.isFinite, size.height.isFinite,
+                          size.width > 0, size.height > 0 else { return }
                     let dark = scheme == .dark
-                    var scratches = Path()
-                    for index in 0..<5 {
-                        let x = size.width * (0.72 + Double(index) * 0.065)
-                        scratches.move(to: CGPoint(x: x, y: -10))
-                        scratches.addLine(to: CGPoint(x: x - size.width * 0.30, y: size.height * 0.31))
+                    let grid: CGFloat = 48
+                    // Fixed screen-space spacing prevents the pattern sliding
+                    // around when Dynamic Type makes a card or form taller.
+                    let columns = min(30, Int(ceil(size.width / grid)))
+                    let rows = min(48, Int(ceil(size.height / grid)))
+                    var pixels = Path()
+                    for row in 0...rows {
+                        for column in 0...columns {
+                            pixels.addRect(CGRect(x: 24 + CGFloat(column) * grid,
+                                                  y: 24 + CGFloat(row) * grid,
+                                                  width: 2, height: 2))
+                        }
                     }
-                    context.stroke(scratches, with: .color(MotoTheme.accent.opacity(dark ? 0.055 : 0.035)),
-                                   style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                    var underline = Path()
-                    underline.move(to: CGPoint(x: -20, y: size.height * 0.74))
-                    underline.addQuadCurve(to: CGPoint(x: size.width * 0.28, y: size.height * 0.66),
-                                           control: CGPoint(x: size.width * 0.13, y: size.height * 0.75))
-                    context.stroke(underline, with: .color(Color.primary.opacity(dark ? 0.04 : 0.025)),
-                                   style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    context.fill(pixels, with: .color(Color.primary.opacity(dark ? 0.055 : 0.035)))
+
+                    // Pixel steps and a small checker motif recall the bike's
+                    // artwork without introducing another illustration or grid
+                    // that could be mistaken for a graph or route.
+                    var accents = Path()
+                    let upperX = floor(size.width * 0.65 / 8) * 8
+                    let lowerY = floor(size.height * 0.72 / 8) * 8
+                    for index in 0..<5 {
+                        let offset = CGFloat(index) * 24
+                        accents.addRect(CGRect(x: upperX + offset, y: 48 + offset, width: 24, height: 2))
+                        accents.addRect(CGRect(x: upperX + offset + 22, y: 48 + offset, width: 2, height: 24))
+                        accents.addRect(CGRect(x: -16 + offset, y: lowerY - offset, width: 24, height: 2))
+                        accents.addRect(CGRect(x: 6 + offset, y: lowerY - offset - 24, width: 2, height: 24))
+                    }
+                    for row in 0..<3 {
+                        for column in 0..<5 where (row + column).isMultiple(of: 2) {
+                            accents.addRect(CGRect(x: size.width - 58 + CGFloat(column) * 8,
+                                                   y: 16 + CGFloat(row) * 8,
+                                                   width: 8, height: 8))
+                        }
+                    }
+                    context.fill(accents, with: .color(MotoTheme.accent.opacity(dark ? 0.09 : 0.06)))
                 }
-            }.frame(width: geometry.size.width, height: geometry.size.height)
-        }.allowsHitTesting(false).accessibilityHidden(true)
+            }
+        }
+        .clipped()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

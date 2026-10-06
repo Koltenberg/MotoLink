@@ -578,6 +578,7 @@ private struct RideMetadataEditor: View {
                 }
             }
             .font(MotoTheme.font(.body))
+            .scrollContentBackground(.hidden).background(MotoTheme.backdrop)
             .navigationTitle("Изменить поездку")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

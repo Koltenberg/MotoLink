@@ -6,6 +6,45 @@ final class RideAutomationPolicyTests: XCTestCase {
     private let bikeA = UUID(uuidString: "00000000-0000-0000-0000-00000000000A")!
     private let bikeB = UUID(uuidString: "00000000-0000-0000-0000-00000000000B")!
 
+    func testFinishIntentSurvivesAProcessRestartBeforeJournalSaveAndClearsOnlyItsRide() {
+        let suite = "MotoLink-FinishIntent-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let rideID = UUID()
+        let requestedAt = Date(timeIntervalSince1970: 10_000)
+        RideFinishIntent(rideID: rideID, requestedAt: requestedAt).save(defaults)
+        let restored = RideFinishIntent.load(defaults)
+        XCTAssertEqual(restored?.rideID, rideID)
+        XCTAssertEqual(restored?.requestedAt, requestedAt)
+        RideFinishIntent.clear(for: UUID(), in: defaults)
+        XCTAssertEqual(RideFinishIntent.load(defaults)?.rideID, rideID)
+        RideFinishIntent.clear(for: rideID, in: defaults)
+        XCTAssertNil(RideFinishIntent.load(defaults))
+    }
+
+    func testFinishIntentUsesButtonTimeRatherThanDelayedRestorationTime() {
+        let start = Date(timeIntervalSince1970: 10_000)
+        let pressed = start.addingTimeInterval(60)
+        let recovered = start.addingTimeInterval(600)
+        let intent = RideFinishIntent(rideID: UUID(), requestedAt: pressed)
+        XCTAssertEqual(intent.endedAt(startedAt: start, now: recovered), pressed)
+        let future = RideFinishIntent(rideID: UUID(), requestedAt: recovered.addingTimeInterval(10_000))
+        XCTAssertEqual(future.endedAt(startedAt: start, now: recovered), recovered)
+        let old = RideFinishIntent(rideID: UUID(), requestedAt: start.addingTimeInterval(-100))
+        XCTAssertEqual(old.endedAt(startedAt: start, now: recovered), start)
+    }
+
+    func testMalformedFinishIntentCannotSelectAnotherRideOrNonfiniteBoundary() {
+        XCTAssertNil(RideFinishIntent.decode(nil))
+        XCTAssertNil(RideFinishIntent.decode("invalid"))
+        XCTAssertNil(RideFinishIntent.decode(["rideID": "invalid", "requestedAt": Date()]))
+        XCTAssertNil(RideFinishIntent.decode(["rideID": UUID().uuidString, "requestedAt": "tomorrow"]))
+        XCTAssertNil(RideFinishIntent.decode(["rideID": UUID().uuidString,
+            "requestedAt": Date(timeIntervalSinceReferenceDate: .infinity)]))
+        XCTAssertNil(RideFinishIntent.decode(["rideID": UUID().uuidString,
+            "requestedAt": Date(timeIntervalSinceReferenceDate: .nan)]))
+    }
+
     func testAuthorizedMigrationEnablesBothOldOffSettingsAndClearsLegacyPauseOnce() {
         let suite = "MotoLink-AutomaticMigration-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

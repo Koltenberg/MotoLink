@@ -18,7 +18,7 @@ from pathlib import Path
 
 SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
                     "simulator-companion.png", "simulator-companion-large-text.png",
-                    "simulator-garage-light.png", "simulator-ride.png",
+                    "simulator-garage-light.png", "simulator-garage-dark.png", "simulator-ride.png",
                     "simulator-ride-light.png", "simulator-bike-idle.png",
                     "simulator-bike-high-speed.png", "simulator-bike-stale.png",
                     "simulator-bike-partial.png", "simulator-bike-waiting.png",
@@ -33,6 +33,16 @@ SCREENSHOT_NAMES = ("simulator-home.png", "simulator-large-text.png",
 ORIENTATION_EVIDENCE = "MotoLinkVisualOrientation.json"
 READY_EVIDENCE = "MotoLinkVisualReady.json"
 REFRESH_EVIDENCE = "MotoLinkRefreshLifecycle.json"
+RIDE_AUDIT_EVIDENCE = "MotoLinkRideLifecycleAudit.json"
+RIDE_AUDIT_REQUIRED = frozenset((
+    "gps_unavailable_auto_capture", "rapid_finish_has_single_completed_ride",
+    "same_connection_gatt_ready_respects_finish", "new_physical_connection_starts_new_ride",
+    "actual_capture_export_matches_completed_journal", "finish_intent_durable_before_recovery_callback",
+    "pending_finish_rejects_late_capture", "connection_during_recovery_starts_next_ride_after_save",
+    "persisted_finish_intent_suppresses_capture_on_relaunch", "persisted_finish_completes_without_second_user_action",
+    "completed_history_survives_fresh_recorder", "finish_suppression_survives_fresh_recorder",
+    "no_archive_error_during_lifecycle_audit",
+))
 READY_NAMES = tuple(Path(name).with_suffix(".ready.json").name for name in SCREENSHOT_NAMES)
 SIMCTL_DISPLAY_TIMEOUT = 90  # Hosted iOS 26 snapshots and app shutdown can exceed 30s.
 
@@ -308,7 +318,7 @@ def preserve_failed_attempt(temporary, output, attempt, error):
         except (CaptureError, OSError) as validation_error:
             record.update(valid_png=False, error=str(validation_error))
         screenshots.append(record)
-    for name in (*READY_NAMES, ORIENTATION_EVIDENCE, REFRESH_EVIDENCE):
+    for name in (*READY_NAMES, ORIENTATION_EVIDENCE, REFRESH_EVIDENCE, RIDE_AUDIT_EVIDENCE):
         evidence = temporary / name
         if evidence.is_file():
             shutil.copyfile(evidence, debug / name)
@@ -386,7 +396,7 @@ def launch_for_capture(device, bundle_id, flags, container, output, name, deadli
     graphs = "--review-graphs" in flags or "--review-graphs-fullscreen" in flags
     route = "--review-route-fullscreen" in flags
     mode = "ride" if "--review-ride" in flags else "route" if route else "graphs" if graphs else "companion" if "--companion-visual-check" in flags else "garage"
-    theme = "light" if "--review-light" in flags else "dark" if "--review-ride" in flags or graphs or route else None
+    theme = "light" if "--review-light" in flags else "dark" if "--review-dark" in flags or "--review-ride" in flags or graphs or route else None
     until = min(deadline, time.monotonic() + 20)
     for poll in range(41):
         remaining = until - time.monotonic()
@@ -543,6 +553,61 @@ def verify_refresh_lifecycle(device, bundle_id, container, output, launched_at, 
             shutil.copyfile(source, output / REFRESH_EVIDENCE)
 
 
+def validate_ride_audit(path, token, launched_at):
+    try:
+        if path.stat().st_size > 65536:
+            raise CaptureError("Ride lifecycle audit is unexpectedly large")
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise CaptureError(f"Invalid ride lifecycle audit: {error}") from error
+    if not isinstance(evidence, dict):
+        raise CaptureError("Ride lifecycle audit must be an object")
+    checks = evidence.get("checks")
+    times = [evidence.get("startedAt"), evidence.get("finishedAt")]
+    if (evidence.get("launchToken") != token or evidence.get("passed") is not True
+            or evidence.get("failures") != []
+            or evidence.get("schema") != "motolink.simulator-ride-lifecycle/1"
+            or not isinstance(checks, list) or len(checks) < len(RIDE_AUDIT_REQUIRED)
+            or any(not isinstance(c, dict) or c.get("passed") is not True
+                   or not isinstance(c.get("name"), str) or not c["name"] for c in checks)
+            or len({c["name"] for c in checks}) != len(checks)
+            or not RIDE_AUDIT_REQUIRED.issubset({c["name"] for c in checks})
+            or not all(isinstance(t, (int, float)) and not isinstance(t, bool)
+                       and math.isfinite(t) for t in times)
+            or not launched_at <= times[0] <= times[1] <= time.time() + 5):
+        raise CaptureError(f"Ride lifecycle audit failed or is stale: {evidence}")
+    return evidence
+
+
+def verify_recorder_lifecycle(device, bundle_id, container, output, deadline):
+    # This is the same disposable simulator used above, after every visual
+    # fixture. Exercise the real recorder and archive with no GPS access.
+    run("terminate", device, bundle_id, timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
+    run("privacy", device, "revoke", "location", bundle_id, timeout=30, deadline=deadline)
+    source = container / "Documents" / RIDE_AUDIT_EVIDENCE
+    source.unlink(missing_ok=True)
+    token, started = str(uuid.uuid4()), time.time()
+    try:
+        run("launch", device, bundle_id, "--audit-ride-lifecycle", "--visual-review-token", token,
+            timeout=SIMCTL_DISPLAY_TIMEOUT, deadline=deadline)
+    except CaptureError as error:
+        if not launch_timed_out(error):
+            raise
+    until = min(deadline, time.monotonic() + 60)
+    while time.monotonic() < until:
+        if source.is_file():
+            destination = output / RIDE_AUDIT_EVIDENCE
+            shutil.copyfile(source, destination)
+            try:
+                evidence = validate_ride_audit(destination, token, started)
+            except CaptureError as error:
+                raise LateLifecycleError(str(error)) from error
+            print(f"Actual recorder/archive audit passed: {len(evidence['checks'])} checks", flush=True)
+            return
+        time.sleep(min(0.5, max(0, until - time.monotonic())))
+    raise LateLifecycleError("Actual recorder/archive audit did not finish within 60 seconds")
+
+
 def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadline, seed=None):
     device = None
     try:
@@ -600,6 +665,7 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
         # Keep landscape last so a previous rotation cannot taint portrait QA.
         variants = (
             ("simulator-garage-light.png", ("--review-light",), False),
+            ("simulator-garage-dark.png", ("--review-dark",), False),
             ("simulator-ride.png", ("--review-ride",), False),
             ("simulator-ride-light.png", ("--review-ride", "--review-light"), False),
             ("simulator-bike-idle.png", ("--review-ride", "--review-bike-idle"), False),
@@ -664,6 +730,7 @@ def capture_attempt(app, output, device_type, runtime, bundle_id, attempt, deadl
                     # retrying Settings here is cheaper than another boot.
                     raise LateLifecycleError(str(error)) from error
             images.append(image)
+        verify_recorder_lifecycle(device, bundle_id, container, output, deadline)
         return tuple(images)
     finally:
         if device and re.fullmatch(r"[0-9A-Fa-f-]{36}", device):
@@ -678,13 +745,13 @@ def capture(app, output):
     output.mkdir(parents=True, exist_ok=True)
     for name in (*SCREENSHOT_NAMES, *READY_NAMES):
         (output / name).unlink(missing_ok=True)
-    for name in (ORIENTATION_EVIDENCE, REFRESH_EVIDENCE):
+    for name in (ORIENTATION_EVIDENCE, REFRESH_EVIDENCE, RIDE_AUDIT_EVIDENCE):
         (output / name).unlink(missing_ok=True)
     # Clear only files owned by this capture script, never a directory tree.
     # A rerun must not mistake an old failed attempt for the current evidence.
     for attempt in range(1, 3):
         debug = output / f"debug-attempt{attempt}"
-        for name in (*SCREENSHOT_NAMES, *READY_NAMES, ORIENTATION_EVIDENCE, REFRESH_EVIDENCE, "failure.json"):
+        for name in (*SCREENSHOT_NAMES, *READY_NAMES, ORIENTATION_EVIDENCE, REFRESH_EVIDENCE, RIDE_AUDIT_EVIDENCE, "failure.json"):
             (debug / name).unlink(missing_ok=True)
     deadline = time.monotonic() + 900
     runtimes = json.loads(run("list", "runtimes", "-j", deadline=deadline))["runtimes"]
@@ -726,6 +793,7 @@ def capture(app, output):
                 shutil.copyfile(image.with_suffix(".ready.json"), output / image.with_suffix(".ready.json").name)
             shutil.copyfile(Path(temporary) / ORIENTATION_EVIDENCE, output / ORIENTATION_EVIDENCE)
             shutil.copyfile(Path(temporary) / REFRESH_EVIDENCE, output / REFRESH_EVIDENCE)
+            shutil.copyfile(Path(temporary) / RIDE_AUDIT_EVIDENCE, output / RIDE_AUDIT_EVIDENCE)
             print(f"Simulator capture passed on attempt {attempt}: home, companion and ride states launched; all {len(images)} PNGs validated", flush=True)
             return
     raise CaptureError("Simulator visual validation failed: " + "; ".join(failures))

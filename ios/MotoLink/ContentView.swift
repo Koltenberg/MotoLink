@@ -113,6 +113,9 @@ struct ContentView: View {
         .onAppear {
             if rides.active != nil || bluetooth.connected { selectedTab = 1 }
             #if targetEnvironment(simulator)
+            if ProcessInfo.processInfo.arguments.contains("--audit-ride-lifecycle") {
+                SimulatorRideLifecycleAudit.start(recorder: rides)
+            }
             if ProcessInfo.processInfo.arguments.contains("--review-ride") { selectedTab = 1 }
             if ProcessInfo.processInfo.arguments.contains("--review-focus-rpm") {
                 // Simulator landscape review rotates the root scene first.
@@ -757,6 +760,8 @@ struct ContentView: View {
     }
 
     private func recordingSource(at now: Date) -> String {
+        if rides.finishingRide { return "Сохраняем поездку…" }
+        if rides.finishRequested { return "Нужно сохранить поездку" }
         let bike = liveConnection(at: now) == .receiving
         let gps = rides.gpsStatus(at: now) == nil
         if bike && gps { return "Запись · байк и GPS" }

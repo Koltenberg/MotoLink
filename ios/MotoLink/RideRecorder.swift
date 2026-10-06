@@ -522,6 +522,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private var automation = RideAutomationPolicy(stoppedPeripheralID:
         UserDefaults.standard.string(forKey: RideRecorder.automaticFinishKey).flatMap(UUID.init(uuidString:)))
     private var pendingManualStart = false
+    private var finishIntent = RideFinishIntent.load(UserDefaults.standard)
     private var measurementSampling = RideMeasurementSampling()
     private var previous: CLLocation?
     private var distanceAnchor: CLLocation?
@@ -561,6 +562,13 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                 active = interrupted
                 restoringRoute = true
                 let restoredID = interrupted.id
+                if finishIntent?.rideID == restoredID {
+                    // Finish may have been pressed before a route load or an
+                    // asynchronous file write completed in the old process.
+                    // Suppress incoming capture/GPS until that intent is saved.
+                    finishAfterRestoration = true
+                    finishRequested = true
+                }
                 // Large old journals must not block AppDelegate initialization
                 // and CoreBluetooth restoration. BLE capture can continue while
                 // a separate queue loads the previous route.
@@ -603,6 +611,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                                 self.finishingRide = false
                                 switch savedResult {
                                 case .success:
+                                    self.clearFinishIntent(for: restoredID)
                                     self.history.insert(repaired, at: 0)
                                     self.historyRevision &+= 1
                                     self.active = nil
@@ -707,6 +716,16 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func stop(completion: ((RideSummary) -> Void)? = nil) {
+        // A delayed GPS permission reply cannot resurrect a manually finished
+        // ride, including a permission request predating automatic BLE capture.
+        pendingManualStart = false
+        guard let requestedRide = active else { return }
+        if finishIntent?.rideID != requestedRide.id {
+            finishIntent = RideFinishIntent(rideID: requestedRide.id, requestedAt: Date())
+            finishIntent?.save(UserDefaults.standard)
+            automation.userRequestedFinish(transportConnected: bluetoothConnected)
+            persistAutomationFinishMarker()
+        }
         if restoringRoute {
             finishAfterRestoration = true
             finishRequested = true
@@ -719,8 +738,6 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             persistPendingFinish(using: archive, completion: completion)
             return
         }
-        automation.userRequestedFinish(transportConnected: bluetoothConnected)
-        persistAutomationFinishMarker()
         recordPhoneHealth(reason: "finished")
         recordGPSCallbackSummary(reason: "ride_finished")
         guard var summary = active else { return }
@@ -728,15 +745,18 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         finishRequested = true
         location.stopUpdatingLocation()
         locationRunning = false
-        summary.endedAt = Date(); summary.lastSavedAt = Date()
-        var ending = [RideRecord(kind: "finished", timestamp: Date())]
+        let now = Date()
+        let endedAt = finishIntent?.endedAt(startedAt: summary.startedAt, now: now) ?? now
+        summary.endedAt = endedAt; summary.lastSavedAt = now
+        var ending = [RideRecord(kind: "finished", timestamp: endedAt)]
         if let last = points.last,
-           pendingGPSGapReason != nil || Date().timeIntervalSince(last.timestamp) > GPSContinuity.gapInterval {
-            let gap = GPSGap(id: UUID().uuidString, startedAt: last.timestamp, endedAt: Date(), from: last.gpsCoordinate,
+           endedAt >= last.timestamp,
+           pendingGPSGapReason != nil || endedAt.timeIntervalSince(last.timestamp) > GPSContinuity.gapInterval {
+            let gap = GPSGap(id: UUID().uuidString, startedAt: last.timestamp, endedAt: endedAt, from: last.gpsCoordinate,
                 to: nil, reason: pendingGPSGapReason ?? "Поездка завершена без новых точек GPS")
             ending.append(RideRecord(kind: "gps_gap", timestamp: gap.endedAt, gap: gap))
         } else if points.isEmpty && summary.pointCount == 0 {
-            let gap = GPSGap(id: UUID().uuidString, startedAt: summary.startedAt, endedAt: Date(),
+            let gap = GPSGap(id: UUID().uuidString, startedAt: summary.startedAt, endedAt: endedAt,
                             from: nil, to: nil, reason: "За поездку не получено ни одной точной точки GPS")
             ending.append(RideRecord(kind: "gps_gap", timestamp: gap.endedAt, gap: gap))
         }
@@ -755,6 +775,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             self.finishingRide = false
             switch result {
             case .success:
+                self.clearFinishIntent(for: finished.id)
                 Self.correlationLog.notice("MotoLink ride_saved rideID=\(finished.id.uuidString, privacy: .public)")
                 self.gaps.append(contentsOf: pendingFinish.gaps)
                 self.historyRevision &+= 1
@@ -820,6 +841,11 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         } else {
             UserDefaults.standard.removeObject(forKey: Self.automaticFinishKey)
         }
+    }
+
+    private func clearFinishIntent(for rideID: UUID) {
+        RideFinishIntent.clear(for: rideID, in: UserDefaults.standard)
+        if finishIntent?.rideID == rideID { finishIntent = nil }
     }
 
     func recordMeasurements(_ measurements: [MotoProtocol.Measurement]) {
@@ -1116,8 +1142,9 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private func begin(trigger: String) {
         // A delayed permission callback can arrive after automatic BLE capture.
         // It must never replace an already active or restored journal.
-        guard active == nil else { resume(); return }
+        guard active == nil else { pendingManualStart = false; resume(); return }
         guard archive != nil else { status = "Хранилище недоступно — запись не начата"; return }
+        pendingManualStart = false
         pendingFinish = nil
         finishRequested = false
         restoringRoute = false

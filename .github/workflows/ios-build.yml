@@ -39,6 +39,7 @@ jobs:
             build-artifacts/ios/**/*.png
             build-artifacts/ios/**/MotoLinkVisualOrientation.json
             build-artifacts/ios/**/MotoLinkRefreshLifecycle.json
+            build-artifacts/ios/**/MotoLinkRideLifecycleAudit.json
             build-artifacts/ios/**/*.ready.json
           if-no-files-found: warn
           retention-days: 3
