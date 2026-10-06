@@ -536,11 +536,15 @@ final class SimulatorRideLifecycleAudit {
             liters: nil, cost: nil, fullTank: true)])
         tracker.updateCompanion(garage, initialEstimate: nil)
         tracker.bluetoothChanged(true)
+        tracker.onLiveGPSSpeed = { [weak self] speed, date in self?.recorder.updateLiveGPSSpeed(speed, at: date) }
         let start = Date().addingTimeInterval(-1)
         for offset in [0.0, 0.5, 1.0] {
             tracker.recordMeasurements([.init(id: "wheel_speed", label: "Скорость", value: 36,
                 unit: "км/ч", timestamp: start.addingTimeInterval(offset), source: "simulator audit")])
         }
+        tracker.recordGPSSpeed(10, at: start.addingTimeInterval(1), receivedAt: Date(), forDashboard: true)
+        try require(recorder.active == nil && recorder.speedMS == 10,
+                    "compact_gps_updates_dashboard_without_creating_journal")
         tracker.bluetoothChanged(false)
         try await waitUntil { !tracker.checkpointPendingForAudit }
         try require(abs(distance - 0.01) < 0.00001 && abs((estimate ?? 0) - 26_000.01) < 0.00001,

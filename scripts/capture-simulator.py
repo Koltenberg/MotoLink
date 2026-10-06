@@ -47,6 +47,7 @@ RIDE_AUDIT_REQUIRED = frozenset((
     "compact_restore_does_not_bridge_process_gap", "compact_disabled_preference_survives_restart",
     "detailed_off_survives_fresh_recorder",
     "compact_corrected_historical_reading_preserves_new_mileage", "compact_other_bike_does_not_change_garage_mileage",
+    "compact_gps_updates_dashboard_without_creating_journal",
 ))
 READY_NAMES = tuple(Path(name).with_suffix(".ready.json").name for name in SCREENSHOT_NAMES)
 SIMCTL_DISPLAY_TIMEOUT = 90  # Hosted iOS 26 snapshots and app shutdown can exceed 30s.

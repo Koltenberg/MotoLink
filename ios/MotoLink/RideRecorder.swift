@@ -692,6 +692,14 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         if enabled { evaluateAutoStart() }
     }
 
+    /// Live GPS presentation can exist without a route journal. The compact
+    /// owner's callback never begins a ride or changes its saved counters.
+    func updateLiveGPSSpeed(_ speed: Double?, at date: Date?) {
+        guard active == nil || finishRequested || restoringRoute else { return }
+        speedMS = speed
+        lastLocationAt = date
+    }
+
     func requestBackgroundPermission() {
         if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
         else { location.requestAlwaysAuthorization() }

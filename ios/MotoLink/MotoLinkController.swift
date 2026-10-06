@@ -19,6 +19,9 @@ final class MotoLinkController: ObservableObject {
             self?.companion.updateTrackedOdometer(estimate)
             self?.companion.updateTrackedDistance(distance)
         }
+        mileage.onLiveGPSSpeed = { [weak self] speed, date in
+            self?.rides.updateLiveGPSSpeed(speed, at: date)
+        }
         companion.$data.sink { [weak self] data in
             guard let self else { return }
             let summaries = self.rides.history + (self.rides.active.map { [$0] } ?? [])

@@ -9,6 +9,7 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
     @Published private(set) var enabled: Bool
     @Published private(set) var error: String?
     var onUpdate: ((Double?, Double) -> Void)?
+    var onLiveGPSSpeed: ((Double?, Date?) -> Void)?
     private static let enabledKey = "MotoLink.compactMileageEnabled"
     private struct Saved: Codable {
         var ledger = MileageLedger()
@@ -196,7 +197,8 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
         let needed = tracking && !recorderSuppliesGPS && allowed
         guard needed != locationRunning else { return }
         locationRunning = needed
-        if needed { location.startUpdatingLocation() } else { location.stopUpdatingLocation() }
+        if needed { location.startUpdatingLocation() }
+        else { location.stopUpdatingLocation(); onLiveGPSSpeed?(nil, nil) }
     }
 
     func recordMeasurements(_ values: [MotoProtocol.Measurement]) {
@@ -205,7 +207,10 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
         }
     }
 
-    func recordGPSSpeed(_ speed: Double, at date: Date, receivedAt: Date) {
+    func recordGPSSpeed(_ speed: Double, at date: Date, receivedAt: Date, forDashboard: Bool = false) {
+        guard tracking, speed.isFinite, (0...100).contains(speed),
+              (0...3).contains(receivedAt.timeIntervalSince(date)) else { return }
+        if forDashboard { onLiveGPSSpeed?(speed, date) }
         record(speed: speed < 1.5 ? 0 : speed, source: .gps, at: date, receivedAt: receivedAt)
     }
 
@@ -271,7 +276,7 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
         for fix in locations.sorted(by: { $0.timestamp < $1.timestamp }) {
             guard let speed = GPSSpeedQuality.accepted(speed: fix.speed, speedAccuracy: fix.speedAccuracy,
                 horizontalAccuracy: fix.horizontalAccuracy, courseAccuracy: fix.courseAccuracy) else { continue }
-            recordGPSSpeed(speed, at: fix.timestamp, receivedAt: receivedAt)
+            recordGPSSpeed(speed, at: fix.timestamp, receivedAt: receivedAt, forDashboard: true)
         }
     }
 
