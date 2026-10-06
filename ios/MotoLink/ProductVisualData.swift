@@ -531,8 +531,10 @@ final class SimulatorRideLifecycleAudit {
         var distance = 0.0
         tracker.onUpdate = { estimate = $0; distance = $1 }
         tracker.observeBike(id)
-        tracker.updateCompanion(CompanionData(bikeName: "Audit", odometerKm: 26_000,
-                                              odometerRecordedAt: Date()), initialEstimate: nil)
+        var garage = CompanionData(bikeName: "Audit", fuelEntries: [FuelEntry(
+            date: Date().addingTimeInterval(-86_400), odometerKm: 26_000,
+            liters: nil, cost: nil, fullTank: true)])
+        tracker.updateCompanion(garage, initialEstimate: nil)
         tracker.bluetoothChanged(true)
         let start = Date().addingTimeInterval(-1)
         for offset in [0.0, 0.5, 1.0] {
@@ -543,6 +545,21 @@ final class SimulatorRideLifecycleAudit {
         try await waitUntil { !tracker.checkpointPendingForAudit }
         try require(abs(distance - 0.01) < 0.00001 && abs((estimate ?? 0) - 26_000.01) < 0.00001,
                     "compact_mileage_counts_without_detailed_journal")
+        garage.fuelEntries[0].odometerKm = 25_000
+        tracker.updateCompanion(garage, initialEstimate: nil)
+        try require(abs((estimate ?? 0) - 25_000.01) < 0.00001,
+                    "compact_corrected_historical_reading_preserves_new_mileage")
+        tracker.observeBike(UUID())
+        tracker.bluetoothChanged(true)
+        let otherStart = Date().addingTimeInterval(-1)
+        for offset in [0.0, 1.0] {
+            tracker.recordMeasurements([.init(id: "wheel_speed", label: "Скорость", value: 72,
+                unit: "км/ч", timestamp: otherStart.addingTimeInterval(offset), source: "simulator audit")])
+        }
+        tracker.bluetoothChanged(false)
+        try await waitUntil { !tracker.checkpointPendingForAudit }
+        try require(abs(distance - 0.01) < 0.00001 && abs((estimate ?? 0) - 25_000.01) < 0.00001,
+                    "compact_other_bike_does_not_change_garage_mileage")
         let entries = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
         try require(entries.map(\.lastPathComponent) == ["MotoLink-mileage.json"],
                     "compact_mileage_only_one_aggregate_file")
@@ -552,12 +569,13 @@ final class SimulatorRideLifecycleAudit {
         let restored = MileageTracker(directory: directory)
         restored.onUpdate = { estimate = $0; distance = $1 }
         restored.observeBike(id)
+        restored.updateCompanion(garage, initialEstimate: nil)
         restored.bluetoothChanged(true)
         let now = Date()
         restored.recordMeasurements([.init(id: "wheel_speed", label: "Скорость", value: 36,
             unit: "км/ч", timestamp: now, source: "simulator audit")])
         restored.bluetoothChanged(false)
-        try require(abs(distance - 0.01) < 0.00001 && restored.error == nil,
+        try require(abs(distance - 0.01) < 0.00001 && abs((estimate ?? 0) - 25_000.01) < 0.00001 && restored.error == nil,
                     "compact_restore_does_not_bridge_process_gap")
         restored.setEnabled(false)
         let disabled = MileageTracker(directory: directory)

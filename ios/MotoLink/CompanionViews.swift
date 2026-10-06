@@ -10,8 +10,10 @@ final class CompanionStore: ObservableObject {
     @Published var exportedFiles: SharedFiles?
     @Published private(set) var trackedOdometerKm: Double?
     @Published private(set) var trackedDistanceKm: Double = 0
+    @Published private(set) var compactMileageAvailable = false
     private var file: URL?
     private var readable = false
+    var isReadable: Bool { readable }
     private let mileageReceiptKey = "MotoLink.serviceMileageReceipts.v1"
     private var mileageReceipts = ServiceMileageReminderLedger()
     private var mileageReceiptsReadable = true
@@ -36,6 +38,7 @@ final class CompanionStore: ObservableObject {
     /// Controller supplies the compact mileage ledger's estimate. This does
     /// not rewrite a physical reading or request notification permission.
     func updateTrackedOdometer(_ value: Double?) {
+        if !compactMileageAvailable { compactMileageAvailable = true }
         let valid = value.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
         if trackedOdometerKm != valid { trackedOdometerKm = valid }
         evaluateMileageReminders()
@@ -409,7 +412,8 @@ struct CompanionHomeCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Label(store.data.bikeName, systemImage: "wrench.and.screwdriver")
                     .font(MotoTheme.font(.headline))
-                Text((store.trackedOdometerKm ?? store.data.estimatedOdometer(from: recordedTrips(rides))?.kilometers).map {
+                Text((store.trackedOdometerKm ?? (store.compactMileageAvailable ? nil
+                    : store.data.estimatedOdometer(from: recordedTrips(rides))?.kilometers)).map {
                     String(format: "≈ %.0f км · расчётный пробег", $0)
                 } ?? store.data.currentOdometerKm.map { String(format: "%.0f км с приборки", $0) }
                      ?? "Добавь пробег с приборки")
@@ -429,7 +433,7 @@ struct CompanionView: View {
     @State private var selectedService: ServiceTask?
 
     private var odometerEstimate: OdometerEstimate? {
-        store.data.estimatedOdometer(from: recordedTrips(rides))
+        store.compactMileageAvailable ? nil : store.data.estimatedOdometer(from: recordedTrips(rides))
     }
 
     private func anchorLabel(_ source: OdometerEstimate.AnchorSource) -> String {
@@ -689,7 +693,7 @@ struct FuelEditor: View {
     @State private var delete = false
     @State private var prepared = false
     private var odometerEstimate: OdometerEstimate? {
-        store.data.estimatedOdometer(from: recordedTrips(rides))
+        store.compactMileageAvailable ? nil : store.data.estimatedOdometer(from: recordedTrips(rides))
     }
     private var estimatedKilometers: Double? {
         store.trackedOdometerKm ?? odometerEstimate?.kilometers

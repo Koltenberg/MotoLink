@@ -14,6 +14,8 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
         var ledger = MileageLedger()
         var readingKeys: [String: String] = [:]
         var readingDates: [String: Date] = [:]
+        var readingSources: [String: String] = [:]
+        var readingValues: [String: Double] = [:]
         var garageBikeID: UUID?
     }
     private var saved = Saved()
@@ -140,7 +142,19 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
         let value = first ? (initialOdometer ?? latest?.value ?? companion.currentOdometerKm)
                           : (latest?.value ?? companion.currentOdometerKm)
         let observedAt = latest?.date ?? Date.distantPast
-        if first || value == nil || observedAt >= (saved.readingDates[id] ?? .distantPast) {
+        let source = latest.map { String($0.key.prefix(upTo: $0.key.lastIndex(of: ":")!)) } ?? "undated"
+        if !first, saved.readingSources[id] == source,
+           let previousValue = saved.readingValues[id], let physicalValue = latest?.value ?? companion.currentOdometerKm,
+           previousValue != physicalValue,
+           let currentEstimate = saved.ledger.estimatedOdometerKilometers(bikeID: bikeID) {
+            // Editing the same historical reading corrects its value, while
+            // preserving all mileage accumulated since that reading was used.
+            do { try saved.ledger.setOdometer(kilometers: max(0, currentEstimate + physicalValue - previousValue),
+                                            bikeID: bikeID, at: Date()) }
+            catch { self.error = "Не удалось применить исправление одометра."; return }
+            saved.readingValues[id] = physicalValue
+            saved.readingDates[id] = Date()
+        } else if first || value == nil || observedAt >= (saved.readingDates[id] ?? .distantPast) {
           if let value {
             // A newly entered dated reading is an observation of the instrument
             // at that time. Old retrospective entries must not erase mileage
@@ -149,6 +163,15 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
             catch { self.error = "Не удалось применить показание одометра."; return }
           } else { saved.ledger.clearOdometer(bikeID: bikeID) }
           saved.readingDates[id] = Date()
+          saved.readingSources[id] = source
+          saved.readingValues[id] = latest?.value ?? companion.currentOdometerKm
+        } else if let previousSource = saved.readingSources[id], previousSource != "undated",
+                  !candidates.contains(where: { $0.key.hasPrefix(previousSource + ":") }) {
+            // A deleted anchor cannot remain silently authoritative. Keep the
+            // independent distance total and await a new confirmed reading.
+            saved.ledger.clearOdometer(bikeID: bikeID)
+            saved.readingSources[id] = nil
+            saved.readingValues[id] = nil
         }
         saved.readingKeys[id] = key
         changed()
@@ -197,12 +220,13 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
     private func changed() { revision &+= 1; dirty = true }
 
     private func publish(force: Bool) {
+        guard readable, companionLoaded else { return }
         let uptime = ProcessInfo.processInfo.systemUptime
         guard force || uptime - lastPublication >= 5 else { return }
         lastPublication = uptime
-        guard let bikeID else { onUpdate?(nil, 0); return }
-        let estimate = saved.garageBikeID == bikeID ? saved.ledger.estimatedOdometerKilometers(bikeID: bikeID) : nil
-        onUpdate?(estimate, saved.ledger.totalMeters(bikeID: bikeID) / 1000)
+        guard let garageBike = saved.garageBikeID else { onUpdate?(nil, 0); return }
+        onUpdate?(saved.ledger.estimatedOdometerKilometers(bikeID: garageBike),
+                  saved.ledger.totalMeters(bikeID: garageBike) / 1000)
     }
 
     /// One coalesced atomic file; never queue one disk operation per BLE frame.
