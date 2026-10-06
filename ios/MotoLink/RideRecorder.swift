@@ -499,7 +499,9 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     @Published private(set) var lastLocationAt: Date?
     @Published private(set) var status = "Поездка не записывается"
     @Published private(set) var authorization: CLAuthorizationStatus = .notDetermined
-    @Published private(set) var autoRecord = UserDefaults.standard.bool(forKey: "MotoLink.autoRecord")
+    // A selected, ready motorcycle automatically starts its ride. This is a
+    // product behavior, not an independent switch that can silently stay off.
+    let autoRecord = true
     @Published private(set) var error: String?
     @Published var exportedFiles: SharedFiles?
     @Published private(set) var exporting = false
@@ -545,6 +547,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private var restorationFinishCompletion: ((RideSummary) -> Void)?
 
     override init() {
+        AutomaticRideSettings.migrate(UserDefaults.standard)
         super.init()
         do {
             archive = try RideArchive()
@@ -663,16 +666,12 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         }
     }
 
-    func setAutoRecord(_ enabled: Bool) {
-        autoRecord = enabled
-        UserDefaults.standard.set(enabled, forKey: "MotoLink.autoRecord")
-        if enabled {
-            automation.userEnabledAutomaticRecording()
-            persistAutomationFinishMarker()
-            if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
-            else if authorization == .authorizedWhenInUse { location.requestAlwaysAuthorization() }
-            evaluateAutoStart()
-        }
+    /// Called after the rider selects a bike. Permission affects GPS only;
+    /// changing screens/reselecting cannot erase an explicit Finish marker.
+    func prepareAutomaticCapture() {
+        if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
+        else if authorization == .authorizedWhenInUse { location.requestAlwaysAuthorization() }
+        evaluateAutoStart()
     }
 
     func requestBackgroundPermission() {
@@ -843,7 +842,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     /// Raw packets are never sampled or pruned from a ride, including malformed
     /// notifications which may become interpretable after the first road test.
     /// Attach the bounded connection context with one summary update and one
-    /// disk-queue submission, rather than replaying hundreds of UI mutations at
+    /// disk-queue submission, rather than replaying hundreds of event callbacks at
     /// the exact instant the rider begins capture. Original event times remain
     /// inside each diagnostic, distinct from its import time into this ride.
     func recordDiagnosticPrelude(_ events: [DiagnosticEvent]) {

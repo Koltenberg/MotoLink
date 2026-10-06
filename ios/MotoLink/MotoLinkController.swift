@@ -13,8 +13,8 @@ final class MotoLinkController: ObservableObject {
     private var subscriptions = Set<AnyCancellable>()
 
     private init() {
-        // First pairing presents an enabled, visible recording switch; later
-        // launches preserve the user's choice instead of overriding it.
+        // A selected bike captures automatically when its channels are ready.
+        // Explicit Finish remains scoped to that physical connection.
         bluetooth.onMeasurements = { [weak self] in self?.rides.recordMeasurements($0) }
         bluetooth.onStreamFrame = { [weak self] in self?.rides.recordStreamFrame(at: $0) }
         bluetooth.onDiagnosticEvent = { [weak self] in self?.rides.recordDiagnostic($0) }

@@ -142,8 +142,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     override init() {
         let defaults = UserDefaults.standard
+        AutomaticRideSettings.prepareForLaunch(defaults)
         let rememberedID = defaults.string(forKey: Key.identifier).flatMap(UUID.init(uuidString:))
-        let reconnect = defaults.bool(forKey: Key.reconnect)
+        let reconnect = rememberedID != nil
         savedID = rememberedID
         hasRememberedDevice = rememberedID != nil
         selectedName = defaults.string(forKey: Key.name) ?? "Мотоцикл не выбран"
@@ -256,17 +257,16 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         UserDefaults.standard.set(false, forKey: Key.paused)
     }
 
-    @discardableResult func connect(to identifier: UUID, automaticallyReconnect: Bool? = nil) -> Bool {
+    @discardableResult func connect(to identifier: UUID) -> Bool {
         guard canScanNearby, let peripheral = found[identifier] else { return false }
-        BLEDiscoverySelection.connect(identifier, automaticallyReconnect: automaticallyReconnect,
-            currentPreference: autoReconnect, commit: { selectedID, enabled in
+        BLEDiscoverySelection.connect(identifier, commit: { selectedID in
                 savedID = selectedID
                 selectedName = nearby.first(where: { $0.id == selectedID })?.name ?? peripheral.name ?? "Kawasaki"
                 hasRememberedDevice = true
-                autoReconnect = enabled
+                autoReconnect = true
                 UserDefaults.standard.set(selectedID.uuidString, forKey: Key.identifier)
                 UserDefaults.standard.set(selectedName, forKey: Key.name)
-                UserDefaults.standard.set(enabled, forKey: Key.reconnect)
+                UserDefaults.standard.set(true, forKey: Key.reconnect)
                 resumeConnectionIntent()
                 resetRecovery()
             }, issue: { _ in
@@ -361,53 +361,12 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         return true
     }
 
-    func setAutoReconnect(_ enabled: Bool) {
-        guard !enabled || hasRememberedDevice else { return }
-        if !enabled {
-            resetRecovery()
-            cancelResume.revokeResume()
-        }
-        autoReconnect = enabled
-        shouldResumeAtPowerOn = enabled
-        UserDefaults.standard.set(enabled, forKey: Key.reconnect)
-        if enabled { resumeConnectionIntent() }
-        record("setting", "Автоподключение: \(enabled ? "включено" : "выключено")")
-        if enabled, bluetoothPowered {
-            connectRemembered()
-        } else if !enabled, connecting || nativeReconnect.systemOwnsPendingConnection, let current {
-            // A user cancellation must survive iOS state restoration. Turning
-            // off future auto-connect while a link is live does not enter here.
-            connectionPaused = true
-            UserDefaults.standard.set(true, forKey: Key.paused)
-            connectionWanted = false
-            terminalStatus = "Ожидание подключения остановлено"
-            if current.state == .disconnected && !nativeReconnect.systemOwnsPendingConnection
-                && !nativeReconnect.awaitingCancellation {
-                // A cooldown has no OS request and therefore no disconnect
-                // callback to release the selected peripheral for a new scan.
-                clearTransport()
-                cancelResume.reset()
-                nativeReconnect.clearConnection()
-                self.current = nil
-                connecting = false
-                status = terminalStatus!
-            } else {
-                cancelResume.requestedCancellation(for: current.identifier)
-                nativeReconnect.cancellationRequested()
-                recordCancelRequest(current, reason: "auto_reconnect_disabled_while_connecting")
-                central.cancelPeripheralConnection(current)
-            }
-        }
-    }
-
     func stop() {
-        autoReconnect = false
-        UserDefaults.standard.set(false, forKey: Key.reconnect)
         pauseConnection()
     }
 
-    /// An explicit pause retains preferences. Only a new user connection or
-    /// enabling auto-connect resumes it; radio cycling/restoration cannot undo it.
+    /// Pause applies to this app process. Explicit Connect or a new process
+    /// resumes automatic connection; foreground/radio callbacks cannot undo it.
     func pauseConnection() {
         resetRecovery()
         cancelResume.revokeResume()

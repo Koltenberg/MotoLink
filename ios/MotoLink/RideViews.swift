@@ -50,11 +50,9 @@ struct RidePanel: View {
                 Text("Ручная запись GPS работает и без связи с байком.")
                     .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
             }
-            Toggle("Записывать при подключении", isOn: Binding(get: { rides.autoRecord }, set: rides.setAutoRecord))
-                .font(MotoTheme.font(.subheadline))
-            Text("Для автозаписи включи также автоподключение к байку. Начало — появление BLE-связи; это не датчик зажигания. Завершение — через 2 минуты без связи, когда приложение выполняется. После смахивания приложения открой его снова.")
+            Text("Запись начнётся при подключении к выбранному байку. «Завершить» остановит текущую поездку. Если смахнул приложение, открой его снова.")
                 .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-            if rides.autoRecord && rides.authorization != .authorizedAlways {
+            if rides.authorization != .authorizedAlways {
                 Button("Разрешить геопозицию для автозаписи") { rides.requestBackgroundPermission() }
                     .font(MotoTheme.font(.subheadline))
                 Text("В системных настройках нужен доступ «Всегда». Уже начатую вручную поездку можно записывать с доступом «При использовании».")

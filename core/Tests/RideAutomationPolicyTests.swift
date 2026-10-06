@@ -6,6 +6,61 @@ final class RideAutomationPolicyTests: XCTestCase {
     private let bikeA = UUID(uuidString: "00000000-0000-0000-0000-00000000000A")!
     private let bikeB = UUID(uuidString: "00000000-0000-0000-0000-00000000000B")!
 
+    func testAuthorizedMigrationEnablesBothOldOffSettingsAndClearsLegacyPauseOnce() {
+        let suite = "MotoLink-AutomaticMigration-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(false, forKey: "MotoLink.autoReconnect")
+        defaults.set(false, forKey: "MotoLink.autoRecord")
+        defaults.set(true, forKey: "MotoLink.connectionPaused")
+        defaults.set(bikeA.uuidString, forKey: "MotoLink.autoRecordFinishedPeripheral")
+        XCTAssertTrue(AutomaticRideSettings.migrate(defaults))
+        XCTAssertTrue(defaults.bool(forKey: "MotoLink.autoReconnect"))
+        XCTAssertTrue(defaults.bool(forKey: "MotoLink.autoRecord"))
+        XCTAssertFalse(defaults.bool(forKey: "MotoLink.connectionPaused"))
+        XCTAssertEqual(defaults.string(forKey: "MotoLink.autoRecordFinishedPeripheral"), bikeA.uuidString)
+        // A later explicit pause is not another old-toggle accident.
+        defaults.set(true, forKey: "MotoLink.connectionPaused")
+        XCTAssertFalse(AutomaticRideSettings.migrate(defaults))
+        XCTAssertTrue(defaults.bool(forKey: "MotoLink.connectionPaused"))
+        XCTAssertEqual(defaults.string(forKey: "MotoLink.autoRecordFinishedPeripheral"), bikeA.uuidString)
+    }
+
+    func testAutomaticProductModeStillRequiresAnIdentifiedReadyMotorcycle() {
+        var policy = RideAutomationPolicy()
+        XCTAssertFalse(policy.shouldStart(enabled: true, hasActiveRide: false, finishing: false))
+        policy.observePeripheral(bikeA)
+        XCTAssertFalse(policy.shouldStart(enabled: true, hasActiveRide: false, finishing: false))
+        policy.channelsBecameReady()
+        XCTAssertTrue(policy.shouldStart(enabled: true, hasActiveRide: false, finishing: false))
+        policy.userRequestedFinish(transportConnected: true)
+        policy.channelsBecameReady()
+        XCTAssertFalse(policy.shouldStart(enabled: true, hasActiveRide: false, finishing: false))
+        policy.confirmedTransportBoundary(for: bikeA)
+        policy.channelsBecameReady()
+        XCTAssertTrue(policy.shouldStart(enabled: true, hasActiveRide: false, finishing: false))
+    }
+
+    func testNewApplicationProcessResumesPausedBikeWithoutErasingFinishedRideMarker() {
+        let suite = "MotoLink-AutomaticLaunch-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        AutomaticRideSettings.prepareForLaunch(defaults)
+        defaults.set(true, forKey: "MotoLink.connectionPaused")
+        defaults.set(bikeA.uuidString, forKey: "MotoLink.autoRecordFinishedPeripheral")
+        // The recorder may inspect migration again; this is not a new process.
+        XCTAssertFalse(AutomaticRideSettings.migrate(defaults))
+        XCTAssertTrue(defaults.bool(forKey: "MotoLink.connectionPaused"))
+        // Only creating the Bluetooth owner for a new process resumes intent.
+        AutomaticRideSettings.prepareForLaunch(defaults)
+        XCTAssertFalse(defaults.bool(forKey: "MotoLink.connectionPaused"))
+        XCTAssertEqual(defaults.string(forKey: "MotoLink.autoRecordFinishedPeripheral"), bikeA.uuidString)
+        var restored = RideAutomationPolicy(stoppedPeripheralID: bikeA)
+        restored.observePeripheral(bikeA)
+        restored.channelsBecameReady()
+        XCTAssertFalse(restored.shouldStart(enabled: true, hasActiveRide: false, finishing: false))
+    }
+
     func testInPlaceRepairRestoresReadinessWithoutOverridingRecordingChoice() {
         var policy = RideAutomationPolicy()
         policy.observePeripheral(bikeA)
@@ -102,14 +157,6 @@ final class RideAutomationPolicyTests: XCTestCase {
         policy.userRequestedFinish(transportConnected: false)
         policy.confirmedTransportBoundary(for: bikeA)
         policy.channelsBecameReady()
-        XCTAssertTrue(policy.shouldStart(enabled: true, hasActiveRide: false, finishing: false))
-    }
-
-    func testExplicitlyReenablingAutoRecordingRearmsCurrentConnection() {
-        var policy = readyPolicy()
-        policy.userRequestedFinish(transportConnected: true)
-        policy.userEnabledAutomaticRecording()
-        XCTAssertNil(policy.stoppedPeripheralID)
         XCTAssertTrue(policy.shouldStart(enabled: true, hasActiveRide: false, finishing: false))
     }
 

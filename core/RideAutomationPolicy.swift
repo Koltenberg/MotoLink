@@ -1,5 +1,29 @@
 import Foundation
 
+/// User-authorized transition from two independent legacy switches to one
+/// automatic bike assistant. Finish remains attached to its physical connection;
+/// Pause now applies only until the next application process starts.
+enum AutomaticRideSettings {
+    static let migrationKey = "MotoLink.automaticCapturePolicyVersion"
+
+    @discardableResult static func migrate(_ defaults: UserDefaults) -> Bool {
+        guard defaults.integer(forKey: migrationKey) < 1 else { return false }
+        defaults.set(true, forKey: "MotoLink.autoReconnect")
+        defaults.set(true, forKey: "MotoLink.autoRecord")
+        defaults.set(false, forKey: "MotoLink.connectionPaused")
+        defaults.set(1, forKey: migrationKey)
+        return true
+    }
+
+    /// Run once while creating the Bluetooth owner, never on foreground or a
+    /// radio state callback. An explicit pause survives all events in this
+    /// process; a new launch resumes the selected bike without a hidden OFF.
+    static func prepareForLaunch(_ defaults: UserDefaults) {
+        migrate(defaults)
+        defaults.set(false, forKey: "MotoLink.connectionPaused")
+    }
+}
+
 /// Starting a ride depends on confirmed BLE channels, never on GPS permission.
 /// A disconnect cannot establish engine shutdown, so this policy never ends rides.
 struct RideAutomationPolicy {
@@ -34,7 +58,6 @@ struct RideAutomationPolicy {
         if peripheralID == identifier { channelsReady = false }
     }
 
-    mutating func userEnabledAutomaticRecording() { stoppedPeripheralID = nil }
     mutating func userRequestedManualStart() { stoppedPeripheralID = nil }
 
     /// Persist this at the start of saving, so a process death cannot undo Finish.

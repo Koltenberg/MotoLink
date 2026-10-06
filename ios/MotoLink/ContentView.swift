@@ -32,7 +32,6 @@ struct ContentView: View {
     @State private var signalCheckMessage: String?
     @State private var signalCheckGeneration = UUID()
     @State private var justSaved = false
-    @State private var recordAfterPairing = true
     private let accent = MotoTheme.accent
     private var occupied: Bool { bluetooth.connecting || bluetooth.connected }
     private var bikeName: String { companion.data.bikeName }
@@ -109,7 +108,7 @@ struct ContentView: View {
         } message: {
             Text(connectionPrompt == .rescan
                  ? "В движении байк может не предлагать подключение. Новый поиск отменит текущее ожидание iOS."
-                 : "В движении новое подключение может быть недоступно до остановки и перезапуска двигателя.")
+                 : "Приостановим связь до нажатия «Подключиться» или нового запуска приложения. В движении байк может быть недоступен для повторного подключения.")
         }
         .onAppear {
             if rides.active != nil || bluetooth.connected { selectedTab = 1 }
@@ -391,12 +390,11 @@ struct ContentView: View {
                         Button("Искать рядом") { bluetooth.scan() }
                             .buttonStyle(PixelButtonStyle(prominent: true)).disabled(!bluetooth.canScanNearby)
                     }
-                    Toggle("Записывать поездки автоматически", isOn: $recordAfterPairing)
                     Text("Начнём запись при подключении. Сохраняем на iPhone без интернета.").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     ForEach(bluetooth.nearby) { device in
                         Button {
-                            guard bluetooth.connect(to: device.id, automaticallyReconnect: true) else { return }
-                            rides.setAutoRecord(recordAfterPairing)
+                            guard bluetooth.connect(to: device.id) else { return }
+                            rides.prepareAutomaticCapture()
                             selectedTab = 1
                             showDiscovery = false
                         } label: {
@@ -418,7 +416,7 @@ struct ContentView: View {
             }.background(MotoTheme.backdrop).navigationTitle("Выбрать мотоцикл")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Готово") { showDiscovery = false } } }
-        }.onAppear { if bluetooth.hasRememberedDevice { recordAfterPairing = rides.autoRecord } }
+        }
         .onDisappear { bluetooth.stopScan() }
     }
 
@@ -428,7 +426,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("Проверяем Bluetooth и видимость байка рядом.")
                         .font(MotoTheme.font(.headline))
-                    Text("Проверка не подключает другой мотоцикл и не меняет настройки автозаписи. Уже включённое автоподключение продолжает работать.")
+                    Text("Проверка показывает состояние выбранного байка. Подключение и запись продолжают работать.")
                         .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         VStack(alignment: .leading, spacing: 12) {
@@ -645,17 +643,13 @@ struct ContentView: View {
                     }.disabled(!bluetooth.canScanNearby || rides.active != nil)
                 }
                 Section {
-                    Toggle("Подключаться автоматически", isOn: Binding(get: { bluetooth.autoReconnect }, set: bluetooth.setAutoReconnect)).disabled(!bluetooth.hasRememberedDevice)
-                    Toggle("Начинать запись при подключении", isOn: Binding(get: { rides.autoRecord }, set: { value in
-                        if value { bluetooth.setAutoReconnect(true) }
-                        rides.setAutoRecord(value)
-                    })).disabled(!bluetooth.hasRememberedDevice)
+                    Label("Подключение и запись — автоматически", systemImage: "record.circle")
                     if !bluetooth.hasRememberedDevice { Text("Сначала выбери мотоцикл в разделе «Поездка».").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary) }
-                    if rides.autoRecord && rides.authorization != .authorizedAlways {
+                    if rides.authorization != .authorizedAlways {
                         Button("Разрешить GPS в фоне") { rides.requestBackgroundPermission() }
                     }
                 } header: { Text("Автоматические поездки").font(MotoTheme.font(.caption)) }
-                footer: { Text("Выбери байк один раз. Запись сохраняется на iPhone; после остановки нажми «Завершить».").font(MotoTheme.font(.caption)) }
+                footer: { Text("Выбери байк один раз. Запись начнётся при подключении. «Завершить» остановит текущую поездку; следующая начнётся при новом подключении.").font(MotoTheme.font(.caption)) }
                 PixelSection("Экран") {
                     PixelChoiceField(title: "Тема", selection: $appearance, options: [
                         .init(value: "system", label: "Как на iPhone"),
@@ -904,7 +898,7 @@ struct ContentView: View {
                     Text("Включи зажигание. В «Поездке» нажми «Выбрать мотоцикл» и выбери его рядом.")
                 }
                 PixelSection("2 · Поехали") {
-                    Text("Зелёная кнопка — запись байка и маршрута. Жёлтая — маршрут только по GPS. При подключении байка его показатели добавятся автоматически.")
+                    Text("При подключении к байку запись начнётся сама. Без байка можно записать маршрут по GPS — для этого есть жёлтая кнопка.")
                 }
                 PixelSection("3 · Сохрани") {
                     Text("После остановки нажми «Завершить». В «Истории» можно переименовать, удалить или поделиться поездкой.")
