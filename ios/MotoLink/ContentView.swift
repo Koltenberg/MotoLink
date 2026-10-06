@@ -8,7 +8,8 @@ struct ContentView: View {
 
     @ObservedObject var bluetooth: MotorcycleBluetooth
     @ObservedObject var rides: RideRecorder
-    @StateObject private var companion = CompanionStore()
+    @ObservedObject private var companion = MotoLinkController.shared.companion
+    @ObservedObject private var mileage = MotoLinkController.shared.mileage
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -145,7 +146,10 @@ struct ContentView: View {
             if id != nil { selectedTab = 1 }
             updateScreenAwake(recording: id != nil)
         }
-        .onChange(of: bluetooth.connected) { connected in if connected { selectedTab = 1 } }
+        .onChange(of: bluetooth.connected) { connected in
+            if connected { selectedTab = 1 }
+            updateScreenAwake(connected: connected)
+        }
         .onChange(of: scenePhase) { phase in updateScreenAwake(phase: phase) }
         .onChange(of: keepScreenOn) { enabled in updateScreenAwake(keepingScreenOn: enabled) }
         .onChange(of: focusedMetric?.id) { _ in updateScreenAwake() }
@@ -393,7 +397,7 @@ struct ContentView: View {
                         Button("Искать рядом") { bluetooth.scan() }
                             .buttonStyle(PixelButtonStyle(prominent: true)).disabled(!bluetooth.canScanNearby)
                     }
-                    Text("Начнём запись при подключении. Сохраняем на iPhone без интернета.").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    Text("Выбери байк один раз. Пробег и выбранные поездки сохраняются на iPhone.").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     ForEach(bluetooth.nearby) { device in
                         Button {
                             guard bluetooth.connect(to: device.id) else { return }
@@ -646,20 +650,26 @@ struct ContentView: View {
                     }.disabled(!bluetooth.canScanNearby || rides.active != nil)
                 }
                 Section {
-                    Label("Подключение и запись — автоматически", systemImage: "record.circle")
+                    Toggle("Подключаться автоматически", isOn: Binding(
+                        get: { bluetooth.autoReconnect }, set: { bluetooth.setAutoReconnect($0) }))
+                    Toggle("Считать пробег", isOn: Binding(
+                        get: { mileage.enabled }, set: { mileage.setEnabled($0) }))
+                    Toggle("Записывать каждую поездку", isOn: Binding(
+                        get: { rides.autoRecord }, set: { rides.setAutoRecord($0) }))
+                    if let error = mileage.error { Text(error).foregroundStyle(.red) }
                     if !bluetooth.hasRememberedDevice { Text("Сначала выбери мотоцикл в разделе «Поездка».").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary) }
                     if rides.authorization != .authorizedAlways {
                         Button("Разрешить GPS в фоне") { rides.requestBackgroundPermission() }
                     }
-                } header: { Text("Автоматические поездки").font(MotoTheme.font(.caption)) }
-                footer: { Text("Выбери байк один раз. Запись начнётся при подключении. «Завершить» остановит текущую поездку; следующая начнётся при новом подключении.").font(MotoTheme.font(.caption)) }
+                } header: { Text("Подключение и пробег").font(MotoTheme.font(.caption)) }
+                footer: { Text("Пробег считаем отдельно, без маршрута и большого журнала. Для путешествия нажми «Начать запись». Выбор сохраняется после перезапуска. Для работы в фоне не закрывай Moto Link смахиванием из списка приложений.").font(MotoTheme.font(.caption)) }
                 PixelSection("Экран") {
                     PixelChoiceField(title: "Тема", selection: $appearance, options: [
                         .init(value: "system", label: "Как на iPhone"),
                         .init(value: "light", label: "Светлая"),
                         .init(value: "dark", label: "Тёмная")
                     ])
-                    Toggle("Не гасить экран при записи", isOn: $keepScreenOn)
+                    Toggle("Не гасить экран в поездке", isOn: $keepScreenOn)
                     NavigationLink("Цвета показателей") { MetricVisualSettingsView() }
                     Text("Светлая тема — для солнца. Удержание экрана работает, пока приложение открыто.")
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
@@ -713,9 +723,10 @@ struct ContentView: View {
     }
 
     private func updateScreenAwake(phase: ScenePhase? = nil, keepingScreenOn: Bool? = nil,
-                                  recording: Bool? = nil) {
+                                  recording: Bool? = nil, connected: Bool? = nil) {
         UIApplication.shared.isIdleTimerDisabled = (keepingScreenOn ?? keepScreenOn)
-            && (recording ?? (rides.active != nil)) && (phase ?? scenePhase) == .active
+            && ((recording ?? (rides.active != nil)) || (connected ?? bluetooth.connected))
+            && (phase ?? scenePhase) == .active
     }
 
     private var diagnosticControls: some View {
@@ -903,7 +914,7 @@ struct ContentView: View {
                     Text("Включи зажигание. В «Поездке» нажми «Выбрать мотоцикл» и выбери его рядом.")
                 }
                 PixelSection("2 · Поехали") {
-                    Text("При подключении к байку запись начнётся сама. Без байка можно записать маршрут по GPS — для этого есть жёлтая кнопка.")
+                    Text("Пробег считаем при подключении. Для маршрута и показателей нажми «Начать запись». Запись каждой поездки можно отдельно включить в настройках.")
                 }
                 PixelSection("3 · Сохрани") {
                     Text("После остановки нажми «Завершить». В «Истории» можно переименовать, удалить или поделиться поездкой.")

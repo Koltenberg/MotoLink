@@ -42,6 +42,10 @@ RIDE_AUDIT_REQUIRED = frozenset((
     "persisted_finish_intent_suppresses_capture_on_relaunch", "persisted_finish_completes_without_second_user_action",
     "completed_history_survives_fresh_recorder", "finish_suppression_survives_fresh_recorder",
     "no_archive_error_during_lifecycle_audit",
+    "compact_default_does_not_create_detailed_journal", "compact_mileage_counts_without_detailed_journal",
+    "compact_mileage_only_one_aggregate_file", "compact_mileage_has_no_coordinate_or_packet_archive",
+    "compact_restore_does_not_bridge_process_gap", "compact_disabled_preference_survives_restart",
+    "detailed_off_survives_fresh_recorder",
 ))
 READY_NAMES = tuple(Path(name).with_suffix(".ready.json").name for name in SCREENSHOT_NAMES)
 SIMCTL_DISPLAY_TIMEOUT = 90  # Hosted iOS 26 snapshots and app shutdown can exceed 30s.

@@ -45,7 +45,7 @@ final class RideAutomationPolicyTests: XCTestCase {
             "requestedAt": Date(timeIntervalSinceReferenceDate: .nan)]))
     }
 
-    func testAuthorizedMigrationEnablesBothOldOffSettingsAndClearsLegacyPauseOnce() {
+    func testMigrationPreservesExplicitLegacyOffSettingsAndFinishMarker() {
         let suite = "MotoLink-AutomaticMigration-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -54,15 +54,122 @@ final class RideAutomationPolicyTests: XCTestCase {
         defaults.set(true, forKey: "MotoLink.connectionPaused")
         defaults.set(bikeA.uuidString, forKey: "MotoLink.autoRecordFinishedPeripheral")
         XCTAssertTrue(AutomaticRideSettings.migrate(defaults))
-        XCTAssertTrue(defaults.bool(forKey: "MotoLink.autoReconnect"))
-        XCTAssertTrue(defaults.bool(forKey: "MotoLink.autoRecord"))
-        XCTAssertFalse(defaults.bool(forKey: "MotoLink.connectionPaused"))
+        XCTAssertFalse(AutomaticRideSettings.autoReconnect(defaults))
+        XCTAssertFalse(AutomaticRideSettings.autoRecord(defaults))
+        XCTAssertTrue(defaults.bool(forKey: "MotoLink.connectionPaused"))
+        XCTAssertEqual(defaults.integer(forKey: AutomaticRideSettings.migrationKey), 2)
         XCTAssertEqual(defaults.string(forKey: "MotoLink.autoRecordFinishedPeripheral"), bikeA.uuidString)
         // A later explicit pause is not another old-toggle accident.
         defaults.set(true, forKey: "MotoLink.connectionPaused")
         XCTAssertFalse(AutomaticRideSettings.migrate(defaults))
         XCTAssertTrue(defaults.bool(forKey: "MotoLink.connectionPaused"))
         XCTAssertEqual(defaults.string(forKey: "MotoLink.autoRecordFinishedPeripheral"), bikeA.uuidString)
+    }
+
+    func testForcedOnVersionMigratesToOptionalDetailedRecordingOnlyOnce() {
+        let suite = "MotoLink-PreferenceV2-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(1, forKey: AutomaticRideSettings.migrationKey)
+        defaults.set(false, forKey: AutomaticRideSettings.autoReconnectKey)
+        defaults.set(true, forKey: AutomaticRideSettings.autoRecordKey)
+        XCTAssertTrue(AutomaticRideSettings.migrate(defaults))
+        XCTAssertFalse(AutomaticRideSettings.autoReconnect(defaults))
+        XCTAssertFalse(AutomaticRideSettings.autoRecord(defaults))
+        // A subsequent explicit choice survives all recorder/owner launches.
+        defaults.set(true, forKey: AutomaticRideSettings.autoRecordKey)
+        AutomaticRideSettings.prepareForLaunch(defaults)
+        XCTAssertFalse(AutomaticRideSettings.migrate(defaults))
+        XCTAssertFalse(AutomaticRideSettings.autoReconnect(defaults))
+        XCTAssertTrue(AutomaticRideSettings.autoRecord(defaults))
+    }
+
+    func testMissingPreferencesDefaultToConnectionWithoutDetailedRecording() {
+        let suite = "MotoLink-NewPreferences-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        AutomaticRideSettings.prepareForLaunch(defaults)
+        XCTAssertTrue(AutomaticRideSettings.autoReconnect(defaults))
+        XCTAssertFalse(AutomaticRideSettings.autoRecord(defaults))
+        defaults.set(false, forKey: AutomaticRideSettings.autoReconnectKey)
+        defaults.set(true, forKey: "MotoLink.connectionPaused")
+        AutomaticRideSettings.prepareForLaunch(defaults)
+        XCTAssertFalse(defaults.bool(forKey: "MotoLink.connectionPaused"))
+        XCTAssertFalse(AutomaticRideSettings.autoReconnect(defaults))
+    }
+
+    func testOlderExplicitRecordingOnPreferenceIsNotMistakenForForcedOnRelease() {
+        let suite = "MotoLink-LegacyPreferences-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: AutomaticRideSettings.autoRecordKey)
+        AutomaticRideSettings.prepareForLaunch(defaults)
+        XCTAssertTrue(AutomaticRideSettings.autoRecord(defaults))
+    }
+
+    func testDisablingReconnectCancelsAutomaticWaitWithoutRevokingManualConnectOrLiveLink() {
+        XCTAssertTrue(AutomaticConnectionPreferencePolicy.shouldCancelPendingOnDisable(
+            isConnected: false, manuallyRequested: false))
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.shouldCancelPendingOnDisable(
+            isConnected: false, manuallyRequested: true))
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.shouldCancelPendingOnDisable(
+            isConnected: true, manuallyRequested: false))
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.shouldCancelPendingOnDisable(
+            isConnected: true, manuallyRequested: true))
+    }
+
+    func testAutoOnThenOffCannotDemoteManualConnectQueuedBehindCancelAcknowledgement() {
+        var manual = AutomaticConnectionPreferencePolicy.queuedRequestIsManual(
+            existingManualRequest: false, newRequestIsManual: false)
+        XCTAssertFalse(manual) // Automatic resume only.
+        manual = AutomaticConnectionPreferencePolicy.queuedRequestIsManual(
+            existingManualRequest: manual, newRequestIsManual: true)
+        XCTAssertTrue(manual) // Rider explicitly Connects before cancel ACK.
+        manual = AutomaticConnectionPreferencePolicy.queuedRequestIsManual(
+            existingManualRequest: manual, newRequestIsManual: false)
+        XCTAssertTrue(manual) // Turning automation ON does not replace that intent.
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.shouldCancelPendingOnDisable(
+            isConnected: false, manuallyRequested: manual))
+        // A fulfilled or explicitly paused request is no longer pending/manual.
+        manual = false
+        XCTAssertTrue(AutomaticConnectionPreferencePolicy.shouldCancelPendingOnDisable(
+            isConnected: false, manuallyRequested: manual))
+    }
+
+    func testSavedOffRejectsRestoredPendingRequestButPreservesExistingLink() {
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.shouldAdoptRestoredPeripheral(
+            enabled: false, isSaved: true, paused: false, isConnected: false))
+        XCTAssertTrue(AutomaticConnectionPreferencePolicy.shouldAdoptRestoredPeripheral(
+            enabled: false, isSaved: true, paused: false, isConnected: true))
+        XCTAssertTrue(AutomaticConnectionPreferencePolicy.shouldAdoptRestoredPeripheral(
+            enabled: true, isSaved: true, paused: false, isConnected: false))
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.shouldAdoptRestoredPeripheral(
+            enabled: true, isSaved: true, paused: true, isConnected: true))
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.shouldAdoptRestoredPeripheral(
+            enabled: true, isSaved: false, paused: false, isConnected: true))
+    }
+
+    func testSavedOffPreventsNativeRecoveryAfterManualLinkDrops() {
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.mayPreserveNativeReconnect(
+            enabled: false, isConnected: false))
+        XCTAssertTrue(AutomaticConnectionPreferencePolicy.mayPreserveNativeReconnect(
+            enabled: false, isConnected: true))
+        XCTAssertTrue(AutomaticConnectionPreferencePolicy.mayPreserveNativeReconnect(
+            enabled: true, isConnected: false))
+        // The current iOS request may have been created with auto-reconnect ON
+        // before the rider turns it OFF. Its future native retry must cancel.
+        var native = BLENativeReconnectPolicy()
+        XCTAssertTrue(native.connectionRequested(for: bikeA, supported: true, enabled: true))
+        XCTAssertTrue(native.connected(bikeA))
+        let mayResume = AutomaticConnectionPreferencePolicy.mayPreserveNativeReconnect(
+            enabled: false, isConnected: false)
+        XCTAssertEqual(native.disconnected(bikeA, timestamp: 100, reconnecting: true,
+            peripheralIsConnected: false, mayResume: mayResume), .cancelConnection)
+        // A manual link still starts its normal data profile with both
+        // preferences off; recording a trip is a separate decision.
+        XCTAssertTrue(BLECaptureStartupPolicy.shouldRequest(ready: true,
+            startedInSession: false, awaitingLateStream: false))
+        XCTAssertFalse(readyPolicy().shouldStart(enabled: false, hasActiveRide: false, finishing: false))
     }
 
     func testAutomaticProductModeStillRequiresAnIdentifiedReadyMotorcycle() {

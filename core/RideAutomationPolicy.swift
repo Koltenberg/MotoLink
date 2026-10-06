@@ -1,26 +1,66 @@
 import Foundation
 
-/// User-authorized transition from two independent legacy switches to one
-/// automatic bike assistant. Finish remains attached to its physical connection;
-/// Pause now applies only until the next application process starts.
+/// Persistent choices for automatic connection and detailed trip recording.
+/// Version 1 forced both on; version 2 restores independent rider control.
 enum AutomaticRideSettings {
     static let migrationKey = "MotoLink.automaticCapturePolicyVersion"
+    static let autoReconnectKey = "MotoLink.autoReconnect"
+    static let autoRecordKey = "MotoLink.autoRecord"
 
     @discardableResult static func migrate(_ defaults: UserDefaults) -> Bool {
-        guard defaults.integer(forKey: migrationKey) < 1 else { return false }
-        defaults.set(true, forKey: "MotoLink.autoReconnect")
-        defaults.set(true, forKey: "MotoLink.autoRecord")
-        defaults.set(false, forKey: "MotoLink.connectionPaused")
-        defaults.set(1, forKey: migrationKey)
+        let previous = defaults.integer(forKey: migrationKey)
+        guard previous < 2 else { return false }
+        if defaults.object(forKey: autoReconnectKey) == nil {
+            defaults.set(true, forKey: autoReconnectKey)
+        }
+        // The forced-on release did not express a choice to retain every trip.
+        // Reset that release once, while preserving explicit older preferences.
+        if previous == 1 || defaults.object(forKey: autoRecordKey) == nil {
+            defaults.set(false, forKey: autoRecordKey)
+        }
+        defaults.set(2, forKey: migrationKey)
         return true
     }
 
+    static func autoReconnect(_ defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: autoReconnectKey) == nil ? true : defaults.bool(forKey: autoReconnectKey)
+    }
+
+    static func autoRecord(_ defaults: UserDefaults) -> Bool {
+        defaults.bool(forKey: autoRecordKey)
+    }
+
     /// Run once while creating the Bluetooth owner, never on foreground or a
-    /// radio state callback. An explicit pause survives all events in this
-    /// process; a new launch resumes the selected bike without a hidden OFF.
+    /// radio state callback. A temporary pause expires, but the saved OFF
+    /// preference continues to prohibit automatic requests on the next launch.
     static func prepareForLaunch(_ defaults: UserDefaults) {
         migrate(defaults)
         defaults.set(false, forKey: "MotoLink.connectionPaused")
+    }
+}
+
+/// Turning off future reconnection must not tear down live telemetry or revoke
+/// a separate, explicit Connect action which is still waiting for the bike.
+enum AutomaticConnectionPreferencePolicy {
+    static func queuedRequestIsManual(existingManualRequest: Bool, newRequestIsManual: Bool) -> Bool {
+        // Enabling automation while an explicit Connect waits for a cancel ACK
+        // cannot demote that separate user intent into an automatic attempt.
+        existingManualRequest || newRequestIsManual
+    }
+
+    static func shouldCancelPendingOnDisable(isConnected: Bool, manuallyRequested: Bool) -> Bool {
+        !isConnected && !manuallyRequested
+    }
+
+    static func shouldAdoptRestoredPeripheral(enabled: Bool, isSaved: Bool,
+                                              paused: Bool, isConnected: Bool) -> Bool {
+        isSaved && !paused && (enabled || isConnected)
+    }
+
+    static func mayPreserveNativeReconnect(enabled: Bool, isConnected: Bool) -> Bool {
+        // A delayed disconnect may observe a link which is already connected.
+        // Preserve that real link; OFF forbids an outstanding future attempt.
+        enabled || isConnected
     }
 }
 

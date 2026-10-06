@@ -499,9 +499,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     @Published private(set) var lastLocationAt: Date?
     @Published private(set) var status = "Поездка не записывается"
     @Published private(set) var authorization: CLAuthorizationStatus = .notDetermined
-    // A selected, ready motorcycle automatically starts its ride. This is a
-    // product behavior, not an independent switch that can silently stay off.
-    let autoRecord = true
+    @Published private(set) var autoRecord = false
     @Published private(set) var error: String?
     @Published var exportedFiles: SharedFiles?
     @Published private(set) var exporting = false
@@ -513,6 +511,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     @Published private(set) var historyRefreshStatus: String?
     /// Synchronous boundary for a genuinely new ride; restoration/resume never invokes it.
     var onNewRideStarted: ((UUID) -> Void)?
+    /// Accepted GPS speeds can also feed the separate compact mileage ledger.
+    var onAcceptedGPSSpeed: ((Double, Date, Date) -> Void)?
 
     private let location = CLLocationManager()
     private var archive: RideArchive?
@@ -550,6 +550,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     override init() {
         AutomaticRideSettings.migrate(UserDefaults.standard)
         super.init()
+        autoRecord = AutomaticRideSettings.autoRecord(UserDefaults.standard)
         do {
             archive = try RideArchive()
             archive?.onError = { [weak self] in self?.error = $0 }
@@ -681,6 +682,14 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         if authorization == .notDetermined { location.requestWhenInUseAuthorization() }
         else if authorization == .authorizedWhenInUse { location.requestAlwaysAuthorization() }
         evaluateAutoStart()
+    }
+
+    func setAutoRecord(_ enabled: Bool) {
+        autoRecord = enabled
+        UserDefaults.standard.set(enabled, forKey: AutomaticRideSettings.autoRecordKey)
+        // Switching the default never finishes an already chosen journey and
+        // does not clear the explicit Finish marker for this connection.
+        if enabled { evaluateAutoStart() }
     }
 
     func requestBackgroundPermission() {
@@ -1298,6 +1307,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             points.append(point)
             active?.pointCount += 1
             if let speed {
+                onAcceptedGPSSpeed?(speed, fix.timestamp, receivedAt)
                 let maximum = max(active?.maxSpeedMS ?? 0, speed)
                 active?.maxSpeedMS = maximum
                 active?.acceptedSpeedCount = (active?.acceptedSpeedCount ?? 0) + 1

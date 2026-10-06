@@ -105,7 +105,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private enum Key {
         static let identifier = "MotoLink.peripheralIdentifier"
         static let name = "MotoLink.peripheralName"
-        static let reconnect = "MotoLink.autoReconnect"
+        static let reconnect = AutomaticRideSettings.autoReconnectKey
         static let paused = "MotoLink.connectionPaused"
         static let verifiedDevices = "MotoLink.verifiedBLE5Devices"
     }
@@ -118,6 +118,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private var current: CBPeripheral?
     private var savedID: UUID?
     private var connectionWanted = false
+    // Applies only to an explicit Connect which has not succeeded yet. A later
+    // radio recovery is automatic and must honor the persistent preference.
+    private var manualConnectionRequested = false
     private var shouldResumeAtPowerOn = false
     private var terminalStatus: String?
     private var control: CBCharacteristic?
@@ -144,13 +147,13 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         let defaults = UserDefaults.standard
         AutomaticRideSettings.prepareForLaunch(defaults)
         let rememberedID = defaults.string(forKey: Key.identifier).flatMap(UUID.init(uuidString:))
-        let reconnect = rememberedID != nil
+        let reconnect = AutomaticRideSettings.autoReconnect(defaults)
         savedID = rememberedID
         hasRememberedDevice = rememberedID != nil
         selectedName = defaults.string(forKey: Key.name) ?? "Мотоцикл не выбран"
         autoReconnect = reconnect
         connectionPaused = defaults.bool(forKey: Key.paused)
-        shouldResumeAtPowerOn = reconnect && !defaults.bool(forKey: Key.paused)
+        shouldResumeAtPowerOn = reconnect && rememberedID != nil && !defaults.bool(forKey: Key.paused)
         super.init()
         do {
             logStore = try SessionLogStore()
@@ -257,33 +260,55 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         UserDefaults.standard.set(false, forKey: Key.paused)
     }
 
+    func setAutoReconnect(_ enabled: Bool) {
+        guard autoReconnect != enabled else { return }
+        autoReconnect = enabled
+        UserDefaults.standard.set(enabled, forKey: Key.reconnect)
+        shouldResumeAtPowerOn = enabled && savedID != nil
+        record("auto_reconnect", "enabled=\(enabled); currentLinkPreserved=\(current?.state == .connected)")
+        if enabled {
+            resumeConnectionIntent()
+            if !connected { requestRememberedConnection(manuallyRequested: false) }
+        } else if current != nil, AutomaticConnectionPreferencePolicy.shouldCancelPendingOnDisable(
+            isConnected: current?.state == .connected, manuallyRequested: manualConnectionRequested) {
+            // Cancels OS-owned pending recovery as well as an app cooldown.
+            // A real link or explicit manual Connect is preserved above.
+            pauseConnection()
+            status = "Автоподключение выключено"
+        }
+    }
+
     @discardableResult func connect(to identifier: UUID) -> Bool {
         guard canScanNearby, let peripheral = found[identifier] else { return false }
         BLEDiscoverySelection.connect(identifier, commit: { selectedID in
                 savedID = selectedID
                 selectedName = nearby.first(where: { $0.id == selectedID })?.name ?? peripheral.name ?? "Kawasaki"
                 hasRememberedDevice = true
-                autoReconnect = true
                 UserDefaults.standard.set(selectedID.uuidString, forKey: Key.identifier)
                 UserDefaults.standard.set(selectedName, forKey: Key.name)
-                UserDefaults.standard.set(true, forKey: Key.reconnect)
                 resumeConnectionIntent()
                 resetRecovery()
             }, issue: { _ in
-                beginConnection(peripheral)
+                beginConnection(peripheral, manuallyRequested: true)
             })
         return true
     }
 
     func connectRemembered() {
-        guard bluetoothPowered, let savedID else { return }
+        requestRememberedConnection(manuallyRequested: true)
+    }
+
+    private func requestRememberedConnection(manuallyRequested: Bool) {
+        guard manuallyRequested || autoReconnect, bluetoothPowered, let savedID else { return }
         if let current {
             guard current.identifier == savedID,
                   cancelResume.requestedResume(for: current.identifier) else { return }
+            manualConnectionRequested = AutomaticConnectionPreferencePolicy.queuedRequestIsManual(
+                existingManualRequest: manualConnectionRequested, newRequestIsManual: manuallyRequested)
             resumeConnectionIntent()
             userRescanMayStartScan = false
             status = "Подключимся после завершения отмены…"
-            record("connection_resume_queued", "Новое подключение запрошено пользователем; ждём завершения предыдущей отмены")
+            record("connection_resume_queued", "manual=\(manuallyRequested); ждём завершения предыдущей отмены")
             // Do not set connectionWanted yet. A racing didConnect still belongs
             // to the closing request and must be cancelled, not prepared.
             return
@@ -294,7 +319,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             return
         }
         resetRecovery()
-        beginConnection(peripheral)
+        beginConnection(peripheral, manuallyRequested: manuallyRequested)
     }
 
     /// A UI affordance for a stopped rider, not a deadline on iOS's pending request.
@@ -324,6 +349,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         UserDefaults.standard.set(true, forKey: Key.paused)
         cancelResume.requestedCancellation(for: current.identifier)
         connectionWanted = false
+        manualConnectionRequested = false
         terminalStatus = "Ожидание остановлено. Повторите поиск, когда будете готовы."
         clearTransport()
         status = "Останавливаем ожидание перед новым поиском…"
@@ -352,7 +378,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         terminalStatus = nil
         record("user_rescan_cancelled", "scanNow=\(startScan); \(Self.errorDetails(error))")
         if resumeRemembered {
-            connectRemembered()
+            requestRememberedConnection(manuallyRequested: manualConnectionRequested)
         } else if startScan {
             scan()
         } else {
@@ -365,11 +391,13 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         pauseConnection()
     }
 
-    /// Pause applies to this app process. Explicit Connect or a new process
-    /// resumes automatic connection; foreground/radio callbacks cannot undo it.
+    /// Pause applies to this app process. Explicit Connect can resume it;
+    /// a new process resumes automatically only if the saved setting permits.
+    /// Foreground/radio callbacks cannot undo the temporary pause.
     func pauseConnection() {
         resetRecovery()
         cancelResume.revokeResume()
+        manualConnectionRequested = false
         connectionPaused = true
         shouldResumeAtPowerOn = false
         UserDefaults.standard.set(true, forKey: Key.paused)
@@ -692,7 +720,8 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         beginConnection(peripheral, delay: delay)
     }
 
-    private func beginConnection(_ peripheral: CBPeripheral, delay: TimeInterval = 0) {
+    private func beginConnection(_ peripheral: CBPeripheral, delay: TimeInterval = 0,
+                                 manuallyRequested: Bool = false) {
         cancelResume.reset()
         nativeReconnect.clearConnection()
         nativeDisconnectLogged = false
@@ -705,6 +734,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         current = peripheral
         peripheral.delegate = self
         connectionWanted = true
+        manualConnectionRequested = manuallyRequested
         connecting = true
         connected = false
         packetCount = 0
@@ -739,7 +769,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     /// also visit this deadline, and the ticket can only be consumed once.
     private func resumeScheduledReconnect() {
         guard let ticket = reconnectScheduler.pending, let current,
-              connectionWanted, bluetoothPowered,
+              connectionWanted, bluetoothPowered, autoReconnect || manualConnectionRequested,
               !nativeReconnect.systemOwnsPendingConnection, !nativeReconnect.awaitingCancellation,
               let remaining = reconnectScheduler.remaining(for: ticket,
                     now: ProcessInfo.processInfo.systemUptime) else { return }
@@ -797,6 +827,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     private func prepare(_ peripheral: CBPeripheral, inPlaceRecovery: Bool = false,
                          invalidatedServices: [CBService] = []) {
+        manualConnectionRequested = false
         if !inPlaceRecovery { resetLinkSignal() }
         let continuation = BLEGATTRecoveryPolicy.captureContinuation(
             sameLink: inPlaceRecovery, startedInSession: captureProfileSession == session,
@@ -980,6 +1011,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
             record("transport_restart", "Закрываем неисправный канал; повторное подключение после подтверждения iOS. \(message)")
         } else {
             connectionWanted = false
+            manualConnectionRequested = false
         }
         clearTransport()
         status = recover ? "Канал прервался. Восстанавливаем связь…" : message
@@ -1139,6 +1171,7 @@ extension MotorcycleBluetooth {
             connecting = false
             connected = false
             connectionWanted = false
+            manualConnectionRequested = false
             switch central.state {
             case .poweredOff: status = "Bluetooth выключен"
             case .unauthorized: status = "Разрешите Bluetooth для MotoLink в Настройках"
@@ -1162,7 +1195,8 @@ extension MotorcycleBluetooth {
                 nativeReconnect.preparedConnectedState(current.identifier)
                 prepare(current)
             }
-            else if current.state != .connecting && !nativeReconnect.systemOwnsPendingConnection {
+            else if current.state != .connecting && !nativeReconnect.systemOwnsPendingConnection
+                && (autoReconnect || manualConnectionRequested) {
                 connectionRequestedAt = Date()
                 connectionWaitOrigin = "request"
                 issueConnectionRequest(current)
@@ -1170,17 +1204,18 @@ extension MotorcycleBluetooth {
             return
         }
         status = "Bluetooth готов"
-        if autoReconnect && shouldResumeAtPowerOn && reconnectBlockedReason == nil { connectRemembered() }
+        if autoReconnect && shouldResumeAtPowerOn && reconnectBlockedReason == nil {
+            requestRememberedConnection(manuallyRequested: false)
+        }
     }
 
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
         guard let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] else { return }
         for peripheral in peripherals {
-            guard BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
+            guard AutomaticConnectionPreferencePolicy.shouldAdoptRestoredPeripheral(
+                enabled: autoReconnect,
                 isSaved: peripheral.identifier == savedID,
-                paused: connectionPaused, autoReconnect: autoReconnect,
-                isConnected: peripheral.state == .connected,
-                isConnecting: peripheral.state == .connecting) else {
+                paused: connectionPaused, isConnected: peripheral.state == .connected) else {
                 recordCancelRequest(peripheral, reason: "restored_peripheral_rejected")
                 central.cancelPeripheralConnection(peripheral)
                 continue
@@ -1190,6 +1225,7 @@ extension MotorcycleBluetooth {
             nativeReconnect.restored(peripheral.identifier, connecting: peripheral.state == .connecting)
             onTransportIdentity?(peripheral.identifier)
             connectionWanted = true
+            manualConnectionRequested = false
             connecting = peripheral.state != .connected
             connected = peripheral.state == .connected
             // iOS does not provide the original pending request's start time.
@@ -1259,7 +1295,7 @@ extension MotorcycleBluetooth {
         record("error", "\(status); \(Self.errorDetails(error))")
         recordHealthSnapshot()
         // An encryption timeout is not evidence that the bond was removed.
-        if resumeRemembered { connectRemembered() }
+        if resumeRemembered { requestRememberedConnection(manuallyRequested: manualConnectionRequested) }
         else { recoverConnection(peripheral, error: recoveryError, wanted: wanted) }
     }
 
@@ -1282,6 +1318,8 @@ extension MotorcycleBluetooth {
             wanted: connectionWanted, powered: bluetoothPowered,
             paused: connectionPaused, pairingFailure: pairingFailure,
             transportRestartPending: reconnectPolicy.transportRestartPending)
+            && AutomaticConnectionPreferencePolicy.mayPreserveNativeReconnect(
+                enabled: autoReconnect, isConnected: peripheral.state == .connected)
         let action = nativeReconnect.disconnected(peripheral.identifier,
             timestamp: timestamp, reconnecting: isReconnecting,
             peripheralIsConnected: peripheral.state == .connected, mayResume: mayResume)
@@ -1363,7 +1401,7 @@ extension MotorcycleBluetooth {
             record("connection", "Отключено; \(Self.errorDetails(error)); reconnect=\(shouldReconnect)")
         }
         nativeDisconnectLogged = false
-        if resumeRemembered { connectRemembered() }
+        if resumeRemembered { requestRememberedConnection(manuallyRequested: manualConnectionRequested) }
         else { recoverConnection(peripheral, error: recoveryError, wanted: shouldReconnect) }
     }
 }

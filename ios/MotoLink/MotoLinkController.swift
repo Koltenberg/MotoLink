@@ -7,18 +7,43 @@ final class MotoLinkController: ObservableObject {
     static let shared = MotoLinkController()
     let rides = RideRecorder()
     let bluetooth = MotorcycleBluetooth()
+    let companion = CompanionStore()
+    let mileage = MileageTracker()
     private lazy var connectionContext = ConnectionContextMonitor { [weak self] in self?.rides.recordConnectionContext($0) }
     private lazy var networkContext = NetworkPathContextMonitor { [weak self] in self?.rides.recordConnectionContext($0) }
     private var lastMonitoredRideID: UUID?
     private var subscriptions = Set<AnyCancellable>()
 
     private init() {
-        // A selected bike captures automatically when its channels are ready.
-        // Explicit Finish remains scoped to that physical connection.
-        bluetooth.onMeasurements = { [weak self] in self?.rides.recordMeasurements($0) }
+        mileage.onUpdate = { [weak self] estimate, distance in
+            self?.companion.updateTrackedOdometer(estimate)
+            self?.companion.updateTrackedDistance(distance)
+        }
+        companion.$data.sink { [weak self] data in
+            guard let self else { return }
+            let summaries = self.rides.history + (self.rides.active.map { [$0] } ?? [])
+            let trips = summaries.map { RecordedTripDistance(id: $0.id, startedAt: $0.startedAt,
+                endedAt: $0.endedAt, distanceMeters: $0.distanceMeters) }
+            // $data publishes before CompanionStore.data is assigned. Defer
+            // the derived value so the view/store cannot evaluate old anchors.
+            DispatchQueue.main.async { [weak self] in
+                self?.mileage.updateCompanion(data,
+                    initialEstimate: data.estimatedOdometer(from: trips)?.kilometers)
+            }
+        }.store(in: &subscriptions)
+        bluetooth.onMeasurements = { [weak self] values in
+            self?.mileage.recordMeasurements(values)
+            self?.rides.recordMeasurements(values)
+        }
+        rides.onAcceptedGPSSpeed = { [weak self] speed, date, receivedAt in
+            self?.mileage.recordGPSSpeed(speed, at: date, receivedAt: receivedAt)
+        }
         bluetooth.onStreamFrame = { [weak self] in self?.rides.recordStreamFrame(at: $0) }
         bluetooth.onDiagnosticEvent = { [weak self] in self?.rides.recordDiagnostic($0) }
-        bluetooth.onTransportIdentity = { [weak self] in self?.rides.observeBluetoothPeripheral($0) }
+        bluetooth.onTransportIdentity = { [weak self] id in
+            self?.mileage.observeBike(id)
+            self?.rides.observeBluetoothPeripheral(id)
+        }
         bluetooth.onConfirmedTransportBoundary = { [weak self] in self?.rides.confirmedBluetoothBoundary($0) }
         rides.onNewRideStarted = { [weak self] id in
             guard let self, self.rides.active?.id == id, !self.rides.finishRequested else { return }
@@ -34,6 +59,7 @@ final class MotoLinkController: ObservableObject {
             }
         }
         bluetooth.$connected.removeDuplicates().sink { [weak self] connected in
+            self?.mileage.bluetoothChanged(connected)
             self?.rides.bluetoothChanged(connected)
             self?.connectionContext.snapshot(reason: connected ? "bike_connected" : "bike_disconnected")
             if !connected { self?.rides.recordGPSCallbackSummary(reason: "bike_disconnected") }
@@ -52,6 +78,13 @@ final class MotoLinkController: ObservableObject {
             self.connectionContext.setRecording(id != nil)
             self.networkContext.setRecording(id != nil)
         }.store(in: &subscriptions)
+        rides.$activeRideID.combineLatest(rides.$finishRequested, rides.$restoringRoute)
+            .receive(on: DispatchQueue.main).sink { [weak self] _ in
+                guard let self else { return }
+                let selected = self.rides.active != nil && !self.rides.finishRequested
+                self.mileage.detailedRecordingChanged(selected,
+                    suppliesGPS: selected && !self.rides.restoringRoute)
+            }.store(in: &subscriptions)
         Timer.publish(every: 15, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             guard let self else { return }
             let recording = self.rides.active != nil

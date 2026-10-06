@@ -15,7 +15,7 @@ enum CompanionValidationError: Error, LocalizedError, Equatable {
         case .nonIncreasingOdometer: return "Пробег заправок должен увеличиваться по датам. Проверьте одинаковые и меньшие значения."
         case .duplicateIdentifier: return "Такая запись уже существует."
         case .invalidInterval: return "Укажите хотя бы один интервал обслуживания больше нуля."
-        case .invalidIntervalRange: return "Начало диапазона должно быть больше нуля и меньше его конца."
+        case .invalidIntervalRange: return "Проверь пороги: сначала «Скоро», затем «Пора», затем «Просрочено». Каждый следующий должен быть больше предыдущего."
         case .missingServiceDate: return "Для интервала в месяцах нужна дата последнего обслуживания. Для пробега дата не обязательна."
         case .invalidRideSnapshot: return "Проверьте точку отсчёта поездки для пробега."
         }
@@ -35,8 +35,10 @@ struct RideDistanceSnapshot: Codable, Equatable {
     }
 }
 
-/// A fuel entry can use a GPS-based odometer estimate when the instrument
-/// reading was unavailable. A missing value means instrument for legacy data.
+/// A fuel entry can use an odometer estimate when the instrument reading was
+/// unavailable. The legacy gpsEstimate raw value also represents the compact
+/// speed/GPS ledger estimate; it is never treated as an instrument reading.
+/// A missing value means instrument for legacy data.
 enum FuelOdometerSource: String, Codable {
     case instrument
     case gpsEstimate
@@ -113,6 +115,19 @@ struct OdometerEstimate: Equatable {
     let skippedOverlappingRide: Bool
 }
 
+enum ServiceMileageStage: Int, Codable, Comparable {
+    case soon = 1, due = 2, overdue = 3
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+
+    var title: String {
+        switch self {
+        case .soon: return "Скоро обслуживание"
+        case .due: return "Пора обслужить"
+        case .overdue: return "Обслуживание просрочено"
+        }
+    }
+}
+
 struct ServiceTask: Codable, Identifiable, Equatable {
     var id: UUID
     var title: String
@@ -124,17 +139,22 @@ struct ServiceTask: Codable, Identifiable, Equatable {
     /// Optional lower bound; intervalKm remains the upper bound and preserves
     /// the meaning of every fixed interval stored by earlier app versions.
     var intervalStartKm: Double?
+    /// Optional middle threshold for three-stage mileage reminders. A missing
+    /// value keeps every legacy fixed/two-boundary interval unchanged.
+    var intervalDueKm: Double?
     var intervalMonths: Int?
 
     init(id: UUID = UUID(), title: String, lastDoneAt: Date? = nil,
          lastDoneOdometerKm: Double, intervalKm: Double? = nil,
-         intervalStartKm: Double? = nil, intervalMonths: Int? = nil) {
+         intervalStartKm: Double? = nil, intervalDueKm: Double? = nil,
+         intervalMonths: Int? = nil) {
         self.id = id
         self.title = title
         self.lastDoneAt = lastDoneAt
         self.lastDoneOdometerKm = lastDoneOdometerKm
         self.intervalKm = intervalKm
         self.intervalStartKm = intervalStartKm
+        self.intervalDueKm = intervalDueKm
         self.intervalMonths = intervalMonths
     }
 
@@ -161,6 +181,13 @@ struct ServiceTask: Codable, Identifiable, Equatable {
                 throw CompanionValidationError.invalidIntervalRange
             }
         }
+        if let intervalDueKm {
+            guard intervalDueKm.isFinite, let intervalStartKm, let intervalKm,
+                  intervalStartKm < intervalDueKm, intervalDueKm < intervalKm,
+                  (lastDoneOdometerKm + intervalDueKm).isFinite else {
+                throw CompanionValidationError.invalidIntervalRange
+            }
+        }
         if let intervalMonths {
             guard intervalMonths > 0 else { throw CompanionValidationError.invalidInterval }
             guard lastDoneAt != nil else { throw CompanionValidationError.missingServiceDate }
@@ -180,7 +207,24 @@ struct ServiceTask: Codable, Identifiable, Equatable {
         return lastDoneOdometerKm + intervalStartKm
     }
 
-    /// Fraction of the selected mileage interval, based on a manual reading.
+    var targetOdometerKm: Double? {
+        guard (try? validate()) != nil else { return nil }
+        return intervalDueKm.map { lastDoneOdometerKm + $0 } ?? dueOdometerKm
+    }
+
+    /// Stages depend only on the supplied mileage, whether confirmed or an
+    /// explicitly labelled estimate. Legacy ranges keep their original limits.
+    func mileageStage(odometerKm: Double?) -> ServiceMileageStage? {
+        guard (try? validate()) != nil, let intervalKm,
+              let odometerKm, odometerKm.isFinite, odometerKm >= 0 else { return nil }
+        let elapsed = odometerKm - lastDoneOdometerKm
+        if intervalDueKm != nil, elapsed >= intervalKm { return .overdue }
+        if elapsed >= (intervalDueKm ?? intervalKm) { return .due }
+        let early = intervalStartKm ?? (intervalKm - min(500, intervalKm * 0.1))
+        return elapsed >= early ? .soon : nil
+    }
+
+    /// Fraction of the selected mileage interval, based on the supplied reading.
     /// Unknown mileage has no progress; an overdue record never exceeds 100%.
     func mileageProgress(odometerKm: Double?) -> Double? {
         guard (try? validate()) != nil, let intervalKm,
@@ -199,14 +243,14 @@ struct ServiceTask: Codable, Identifiable, Equatable {
     /// Whichever user-defined limit comes first; dates are due for the whole local day.
     func isDue(odometerKm: Double?, on date: Date = Date(), calendar: Calendar = .current) -> Bool {
         guard (try? validate()) != nil, date.timeIntervalSince1970.isFinite else { return false }
-        if let odometerKm, odometerKm.isFinite, let dueOdometerKm, odometerKm >= dueOdometerKm { return true }
+        if let stage = mileageStage(odometerKm: odometerKm), stage >= .due { return true }
         if let due = dueDate(calendar: calendar) {
             return calendar.startOfDay(for: date) >= calendar.startOfDay(for: due)
         }
         return false
     }
 
-    /// Difference from the last manually entered odometer, never GPS distance.
+    /// Difference to the upper interval limit, using the supplied odometer.
     func kilometersRemaining(odometerKm: Double?) -> Double? {
         guard let odometerKm, odometerKm.isFinite, odometerKm >= 0,
               let dueOdometerKm else { return nil }
@@ -229,6 +273,56 @@ struct ServiceTask: Codable, Identifiable, Equatable {
             return (1...7).contains(days)
         }
         return false
+    }
+}
+
+/// A reminder identity excludes the display title: renaming a task must not
+/// resend an already acknowledged mileage stage. Earlier configurations stay
+/// in the ledger, so temporarily editing a threshold and reverting is safe.
+struct ServiceMileageReminderIdentity: Codable, Equatable {
+    let taskID: UUID
+    let lastDoneAt: Date?
+    let lastDoneOdometerKm: Double
+    let intervalStartKm: Double?
+    let intervalDueKm: Double?
+    let intervalKm: Double
+
+    init?(_ task: ServiceTask) {
+        guard (try? task.validate()) != nil, let intervalKm = task.intervalKm else { return nil }
+        taskID = task.id
+        lastDoneAt = task.lastDoneAt
+        lastDoneOdometerKm = task.lastDoneOdometerKm
+        intervalStartKm = task.intervalStartKm
+        intervalDueKm = task.intervalDueKm
+        self.intervalKm = intervalKm
+    }
+}
+
+struct ServiceMileageReminderReceipt: Codable, Equatable {
+    let identity: ServiceMileageReminderIdentity
+    var highestStage: ServiceMileageStage
+}
+
+/// Small persistent high-water marks, updated only after notification delivery
+/// has been accepted by iOS. A corrected/lower estimate never resets a stage.
+struct ServiceMileageReminderLedger: Codable, Equatable {
+    private(set) var receipts: [ServiceMileageReminderReceipt] = []
+
+    func pendingStage(for task: ServiceTask, odometerKm: Double?) -> ServiceMileageStage? {
+        guard let identity = ServiceMileageReminderIdentity(task),
+              let stage = task.mileageStage(odometerKm: odometerKm) else { return nil }
+        let highest = receipts.filter { $0.identity == identity }.map(\.highestStage).max()
+        let shouldNotify = highest.map { stage > $0 } ?? true
+        return shouldNotify ? stage : nil
+    }
+
+    mutating func acknowledge(_ stage: ServiceMileageStage, for task: ServiceTask) {
+        guard let identity = ServiceMileageReminderIdentity(task) else { return }
+        if let index = receipts.firstIndex(where: { $0.identity == identity }) {
+            receipts[index].highestStage = max(receipts[index].highestStage, stage)
+        } else {
+            receipts.append(ServiceMileageReminderReceipt(identity: identity, highestStage: stage))
+        }
     }
 }
 

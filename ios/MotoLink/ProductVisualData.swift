@@ -386,6 +386,9 @@ final class SimulatorRideLifecycleAudit {
             recorder.bluetoothChanged(true)
             try require(recorder.active == nil, "connection_waits_for_capture_readiness")
             recorder.bluetoothReadyForCapture()
+            try require(recorder.active == nil && !recorder.autoRecord,
+                        "compact_default_does_not_create_detailed_journal")
+            recorder.setAutoRecord(true)
             guard let first = recorder.active else { throw AuditFailure(message: "automatic ride did not start") }
             try require(first.trigger == "bluetooth" && first.pointCount == 0, "gps_unavailable_auto_capture")
 
@@ -512,11 +515,58 @@ final class SimulatorRideLifecycleAudit {
             try require(finalRecorder.active == nil, "finish_suppression_survives_fresh_recorder")
             try require([recorder, recovering, crashed, finalRecorder].allSatisfy { $0.error == nil },
                         "no_archive_error_during_lifecycle_audit")
+            try await verifyCompactMileage()
         } catch {
             let message = (error as? AuditFailure)?.message ?? error.localizedDescription
             if !failures.contains(message) { failures.append(message) }
         }
         writeReport()
+    }
+
+    private func verifyCompactMileage() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MileageAudit-" + runID.uuidString)
+        let tracker = MileageTracker(directory: directory)
+        let id = UUID()
+        var estimate: Double?
+        var distance = 0.0
+        tracker.onUpdate = { estimate = $0; distance = $1 }
+        tracker.observeBike(id)
+        tracker.updateCompanion(CompanionData(bikeName: "Audit", odometerKm: 26_000,
+                                              odometerRecordedAt: Date()), initialEstimate: nil)
+        tracker.bluetoothChanged(true)
+        let start = Date().addingTimeInterval(-1)
+        for offset in [0.0, 0.5, 1.0] {
+            tracker.recordMeasurements([.init(id: "wheel_speed", label: "Скорость", value: 36,
+                unit: "км/ч", timestamp: start.addingTimeInterval(offset), source: "simulator audit")])
+        }
+        tracker.bluetoothChanged(false)
+        try await waitUntil { !tracker.checkpointPendingForAudit }
+        try require(abs(distance - 0.01) < 0.00001 && abs((estimate ?? 0) - 26_000.01) < 0.00001,
+                    "compact_mileage_counts_without_detailed_journal")
+        let entries = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        try require(entries.map(\.lastPathComponent) == ["MotoLink-mileage.json"],
+                    "compact_mileage_only_one_aggregate_file")
+        let payload = try Data(contentsOf: entries[0])
+        try require(payload.count < 8_192 && !String(decoding: payload, as: UTF8.self).contains("latitude"),
+                    "compact_mileage_has_no_coordinate_or_packet_archive")
+        let restored = MileageTracker(directory: directory)
+        restored.onUpdate = { estimate = $0; distance = $1 }
+        restored.observeBike(id)
+        restored.bluetoothChanged(true)
+        let now = Date()
+        restored.recordMeasurements([.init(id: "wheel_speed", label: "Скорость", value: 36,
+            unit: "км/ч", timestamp: now, source: "simulator audit")])
+        restored.bluetoothChanged(false)
+        try require(abs(distance - 0.01) < 0.00001 && restored.error == nil,
+                    "compact_restore_does_not_bridge_process_gap")
+        restored.setEnabled(false)
+        let disabled = MileageTracker(directory: directory)
+        try require(!disabled.enabled, "compact_disabled_preference_survives_restart")
+        restored.setEnabled(true)
+        recorder.setAutoRecord(false)
+        let manualOnly = RideRecorder()
+        retainedRecorders.append(manualOnly)
+        try require(!manualOnly.autoRecord, "detailed_off_survives_fresh_recorder")
     }
 
     private func injectSample(into recorder: RideRecorder, value: Double) {
