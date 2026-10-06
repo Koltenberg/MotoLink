@@ -65,7 +65,8 @@ enum AppBuild {
 }
 
 
-/// Bundled Cyrillic pixel type, with Dynamic Type and no network font dependency.
+/// One readable rounded family across SwiftUI and UIKit; the motorcycle keeps
+/// its pixel artwork independently of text and controls.
 enum MotoTheme {
     static let background = Color(UIColor { $0.userInterfaceStyle == .dark
         ? UIColor(red: 0.045, green: 0.047, blue: 0.055, alpha: 1)
@@ -80,43 +81,39 @@ enum MotoTheme {
         ? UIColor(red: 0.70, green: 0.70, blue: 0.73, alpha: 1)
         : UIColor(red: 0.34, green: 0.34, blue: 0.37, alpha: 1) })
     static let border = Color.primary.opacity(0.18)
+    static let live = Color(UIColor { $0.userInterfaceStyle == .dark
+        ? UIColor(red: 0.32, green: 0.85, blue: 0.56, alpha: 1)
+        : UIColor(red: 0.08, green: 0.43, blue: 0.25, alpha: 1) })
+    static let waiting = Color(UIColor { $0.userInterfaceStyle == .dark
+        ? UIColor(red: 1, green: 0.76, blue: 0.27, alpha: 1)
+        : UIColor(red: 0.54, green: 0.33, blue: 0.02, alpha: 1) })
+    static let recordButton = Color(red: 0.07, green: 0.40, blue: 0.23)
     static var backdrop: some View { MotoBackdrop() }
     static func font(_ style: Font.TextStyle) -> Font {
-        let size: CGFloat
-        switch style {
-        case .largeTitle: size = 34
-        case .title: size = 30
-        case .title2: size = 26
-        case .title3: size = 23
-        case .headline: size = 20
-        case .subheadline: size = 18
-        case .caption, .caption2, .footnote: size = 15
-        default: size = 18
-        }
-        return .custom("MotoLinkPixel-Regular", size: size, relativeTo: style)
+        .system(style, design: .rounded)
     }
 
     static func numberFont(size: CGFloat) -> Font {
-        .custom("MotoLinkPixel-Regular", size: size, relativeTo: .largeTitle)
+        .system(size: UIFontMetrics(forTextStyle: .largeTitle).scaledValue(for: size),
+                weight: .semibold, design: .rounded).monospacedDigit()
     }
 
     /// SwiftUI's environment font does not reach UIKit navigation/tab labels.
-    /// Keep the bundled family there too, with accessible text-size scaling.
+    /// Match the same family there, with accessible text-size scaling.
     static func uiFont(size: CGFloat, style: UIFont.TextStyle) -> UIFont {
-        guard let font = UIFont(name: "MotoLinkPixel-Regular", size: size) else {
-            preconditionFailure("Bundled Moto Link Pixel font is missing")
-        }
+        let base = UIFont.systemFont(ofSize: size, weight: style == .headline || style == .largeTitle ? .semibold : .regular)
+        let font = base.fontDescriptor.withDesign(.rounded).map { UIFont(descriptor: $0, size: size) } ?? base
         return UIFontMetrics(forTextStyle: style).scaledFont(for: font)
     }
 
     static func configureNavigationFonts() {
         let navigation = UINavigationBarAppearance()
         navigation.configureWithDefaultBackground()
-        navigation.titleTextAttributes = [.font: uiFont(size: 20, style: .headline)]
+        navigation.titleTextAttributes = [.font: uiFont(size: 17, style: .headline)]
         navigation.largeTitleTextAttributes = [.font: uiFont(size: 34, style: .largeTitle)]
         for buttons in [navigation.buttonAppearance, navigation.doneButtonAppearance, navigation.backButtonAppearance] {
             for state in [buttons.normal, buttons.highlighted, buttons.disabled, buttons.focused] {
-                state.titleTextAttributes = [.font: uiFont(size: 18, style: .body)]
+                state.titleTextAttributes = [.font: uiFont(size: 17, style: .body)]
             }
         }
         UINavigationBar.appearance().standardAppearance = navigation
@@ -126,13 +123,13 @@ enum MotoTheme {
         let tabs = UITabBarAppearance()
         tabs.configureWithDefaultBackground()
         for item in [tabs.stackedLayoutAppearance, tabs.inlineLayoutAppearance, tabs.compactInlineLayoutAppearance] {
-            item.normal.titleTextAttributes = [.font: uiFont(size: 14, style: .caption1)]
-            item.selected.titleTextAttributes = [.font: uiFont(size: 14, style: .caption1)]
+            item.normal.titleTextAttributes = [.font: uiFont(size: 11, style: .caption1)]
+            item.selected.titleTextAttributes = [.font: uiFont(size: 11, style: .caption1)]
         }
         UITabBar.appearance().standardAppearance = tabs
         UITabBar.appearance().scrollEdgeAppearance = tabs
-        UIBarButtonItem.appearance().setTitleTextAttributes([.font: uiFont(size: 18, style: .body)], for: .normal)
-        UIBarButtonItem.appearance().setTitleTextAttributes([.font: uiFont(size: 18, style: .body)], for: .disabled)
+        UIBarButtonItem.appearance().setTitleTextAttributes([.font: uiFont(size: 17, style: .body)], for: .normal)
+        UIBarButtonItem.appearance().setTitleTextAttributes([.font: uiFont(size: 17, style: .body)], for: .disabled)
     }
 }
 
@@ -202,39 +199,18 @@ struct PixelSection<Content: View>: View {
     }
 }
 
+// Keep the existing name so maps and form controls share the same silhouette.
 struct PixelFrame: Shape {
     func path(in rect: CGRect) -> Path {
-        let s = min(5.0, min(rect.width, rect.height) / 6)
-        let l = rect.minX, r = rect.maxX, t = rect.minY, b = rect.maxY
-        let points: [CGPoint] = [
-            .init(x: l + 2*s, y: t), .init(x: r - 2*s, y: t),
-            .init(x: r - 2*s, y: t + s), .init(x: r - s, y: t + s),
-            .init(x: r - s, y: t + 2*s), .init(x: r, y: t + 2*s),
-            .init(x: r, y: b - 2*s), .init(x: r - s, y: b - 2*s),
-            .init(x: r - s, y: b - s), .init(x: r - 2*s, y: b - s),
-            .init(x: r - 2*s, y: b), .init(x: l + 2*s, y: b),
-            .init(x: l + 2*s, y: b - s), .init(x: l + s, y: b - s),
-            .init(x: l + s, y: b - 2*s), .init(x: l, y: b - 2*s),
-            .init(x: l, y: t + 2*s), .init(x: l + s, y: t + 2*s),
-            .init(x: l + s, y: t + s), .init(x: l + 2*s, y: t + s)
-        ]
-        var path = Path()
-        path.addLines(points)
-        path.closeSubpath()
-        return path
+        RoundedRectangle(cornerRadius: 16, style: .continuous).path(in: rect)
     }
 }
 
 extension View {
     func pixelPanel(_ fill: Color = MotoTheme.panel, accent: Bool = false) -> some View {
-        background(fill, in: PixelFrame())
-            .overlay(PixelFrame().stroke(accent ? MotoTheme.accent.opacity(0.5) : MotoTheme.border, lineWidth: 1))
-            .overlay(alignment: .topLeading) {
-                HStack(spacing: 3) {
-                    Rectangle().fill(MotoTheme.accent).frame(width: 12, height: 3)
-                    Rectangle().fill(MotoTheme.accent.opacity(0.4)).frame(width: 4, height: 3)
-                }.padding(.leading, 14).allowsHitTesting(false).accessibilityHidden(true)
-            }
+        background(fill, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(accent ? MotoTheme.accent.opacity(0.45) : MotoTheme.border.opacity(0.6), lineWidth: 1))
     }
 }
 
@@ -266,16 +242,20 @@ struct BikeArtworkView: View {
 
 struct PixelButtonStyle: ButtonStyle {
     var prominent = false
+    var tint: Color? = nil
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(MotoTheme.font(.headline))
             .padding(.horizontal, 12).padding(.vertical, 8)
             .frame(minHeight: 44)
-            .foregroundStyle(prominent ? Color.white : MotoTheme.accent)
-            .background(prominent ? MotoTheme.button : MotoTheme.panel, in: PixelFrame())
-            .overlay(PixelFrame().stroke(MotoTheme.border, lineWidth: 1))
+            .foregroundStyle(prominent ? Color.white : (tint ?? MotoTheme.accent))
+            .background(prominent ? (tint ?? MotoTheme.button) : MotoTheme.panel,
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(MotoTheme.border.opacity(0.6), lineWidth: 1))
             .opacity(isEnabled ? (configuration.isPressed ? 0.82 : 1) : 0.42)
-            .offset(y: configuration.isPressed ? 1 : 0)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.985 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: configuration.isPressed)
     }
 }

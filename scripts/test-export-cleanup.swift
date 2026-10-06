@@ -27,6 +27,34 @@ import Foundation
             temporary.appendingPathComponent(prefix + UUID().uuidString, isDirectory: true)
         }
 
+        // The actual production prelude must survive a long warm-up's raw
+        // telemetry and remain bounded when a connection repeatedly fails.
+        var prelude = DiagnosticPreludeBuffer()
+        let connected = DiagnosticEvent(kind: "connection", detail: "test connection")
+        let capability = DiagnosticEvent(kind: "rx", detail: "test capabilities", data: Data([0x40, 0, 0]))
+        prelude.append(connected, at: 0)
+        prelude.append(capability, at: 1)
+        prelude.append(connected, at: 1) // No duplicate when multiple sources share an event.
+        for index in 0..<2_000 {
+            prelude.append(DiagnosticEvent(kind: "rx", detail: "stream", data: Data([0x4A, 0, 0])),
+                           at: 2 + Double(index) / 10)
+        }
+        try require(prelude.snapshot(at: 202).map(\.id) == [connected.id, capability.id],
+                    "Warm-up telemetry evicted or duplicated connection evidence")
+        for index in 0..<500 {
+            prelude.append(DiagnosticEvent(kind: "error", detail: String(repeating: "x", count: 800)),
+                           at: 202 + Double(index))
+        }
+        let bounded = prelude.snapshot(at: 702)
+        let encodedBytes = try bounded.reduce(0) { try $0 + JSONEncoder().encode($1).count }
+        try require(bounded.count <= DiagnosticPreludeBuffer.maximumEvents && encodedBytes <= DiagnosticPreludeBuffer.maximumBytes,
+                    "Connection retry burst exceeded the prelude size limit")
+        try require(prelude.snapshot(at: 2_000).isEmpty, "A later ride inherited expired connection evidence")
+        try require(prelude.snapshot(at: 0).isEmpty, "Prelude included future events after a clock reversal")
+        prelude.removeAll() // Switching to a different motorcycle.
+        try require(prelude.snapshot(at: 702).isEmpty, "A different motorcycle inherited the old setup")
+        print("MotoLink diagnostic prelude regression checks passed")
+
         // Real first-write interruption: run the same production preparation
         // used by RideArchive before JSONL creation, then leave only the first
         // synchronized raw line as if the process died before its checkpoint.

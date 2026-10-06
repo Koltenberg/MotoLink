@@ -6,6 +6,30 @@ final class RideAutomationPolicyTests: XCTestCase {
     private let bikeA = UUID(uuidString: "00000000-0000-0000-0000-00000000000A")!
     private let bikeB = UUID(uuidString: "00000000-0000-0000-0000-00000000000B")!
 
+    func testInPlaceRepairRestoresReadinessWithoutOverridingRecordingChoice() {
+        var policy = RideAutomationPolicy()
+        policy.observePeripheral(bikeA)
+        policy.channelsBecameReady()
+        XCTAssertFalse(policy.shouldStart(enabled: false, hasActiveRide: false, finishing: false))
+        // Same-link service discovery observes identity again. Its ready
+        // callback must reach the recorder even though this is not firstReady.
+        policy.observePeripheral(bikeA)
+        XCTAssertFalse(policy.shouldStart(enabled: true, hasActiveRide: false, finishing: false))
+        policy.channelsBecameReady()
+        XCTAssertFalse(policy.shouldStart(enabled: false, hasActiveRide: false, finishing: false))
+        XCTAssertTrue(policy.shouldStart(enabled: true, hasActiveRide: false, finishing: false))
+        XCTAssertFalse(policy.shouldStart(enabled: true, hasActiveRide: true, finishing: false))
+    }
+
+    func testRepeatedReadinessAfterRepairDoesNotUndoManualFinish() {
+        var policy = readyPolicy()
+        policy.userRequestedFinish(transportConnected: true)
+        policy.observePeripheral(bikeA)
+        policy.channelsBecameReady()
+        XCTAssertEqual(policy.stoppedPeripheralID, bikeA)
+        XCTAssertFalse(policy.shouldStart(enabled: true, hasActiveRide: false, finishing: false))
+    }
+
     private func readyPolicy() -> RideAutomationPolicy {
         var policy = RideAutomationPolicy()
         policy.observePeripheral(bikeA)

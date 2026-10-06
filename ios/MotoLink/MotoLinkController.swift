@@ -22,6 +22,7 @@ final class MotoLinkController: ObservableObject {
         bluetooth.onConfirmedTransportBoundary = { [weak self] in self?.rides.confirmedBluetoothBoundary($0) }
         rides.onNewRideStarted = { [weak self] id in
             guard let self, self.rides.active?.id == id, !self.rides.finishRequested else { return }
+            self.rides.recordDiagnosticPrelude(self.bluetooth.capturePrelude)
             self.rides.recordConnectionContext(ConnectionTestSettingsView.capture())
             self.bluetooth.startCaptureProfileIfNeeded()
         }

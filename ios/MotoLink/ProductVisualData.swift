@@ -6,6 +6,29 @@ import SwiftUI
 /// Fictional visual fixtures, excluded from every device build. Never sent to BLE
 /// or written to a user's ride journal. Used by the actual dashboard renderers.
 enum ProductVisualData {
+    static func connectionState(arguments: [String] = ProcessInfo.processInfo.arguments) -> RideConnectionPresentation.State {
+        if arguments.contains("--review-gps-recording") { return .disconnected }
+        if arguments.contains("--review-bike-waiting") || arguments.contains("--review-bike-partial") {
+            return .waitingForData
+        }
+        if arguments.contains("--review-bike-stale") { return .stale }
+        return .receiving
+    }
+
+    private static let previewRecordingStart = Date().addingTimeInterval(-742)
+
+    /// Read-only view state. It never starts the recorder, changes a setting,
+    /// requests GPS, writes a ride, or becomes a candidate for export.
+    static func recordingPreview(arguments: [String] = ProcessInfo.processInfo.arguments) -> RideSummary? {
+        guard arguments.contains("--review-gps-recording") else { return nil }
+        var ride = RideSummary(id: UUID(uuidString: "30000000-0000-4000-8000-000000000001")!,
+                               startedAt: previewRecordingStart, endedAt: nil,
+                               lastSavedAt: Date(), trigger: "simulator")
+        ride.distanceMeters = 6_420
+        ride.pointCount = 143
+        return ride
+    }
+
     /// Record the actual scene geometry. Headless simctl can capture the
     /// physical portrait buffer even when the interface has rotated inside it.
     @MainActor static func prepareLandscapeReview() {
@@ -40,6 +63,9 @@ enum ProductVisualData {
 
     static func measurements(at now: Date = Date()) -> [MotoProtocol.Measurement] {
         let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--review-bike-waiting") || arguments.contains("--review-gps-recording") {
+            return []
+        }
         let idle = arguments.contains("--review-bike-idle")
         let fast = arguments.contains("--review-bike-high-speed")
         let timestamp = arguments.contains("--review-bike-stale") ? now.addingTimeInterval(-31) : now
@@ -53,14 +79,17 @@ enum ProductVisualData {
     }
     static func speedComparison() -> (gps: Double?, bike: Double?, difference: Double?) {
         let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--review-gps-recording") { return (64, nil, nil) }
+        if arguments.contains("--review-bike-waiting") { return (nil, nil, nil) }
         if arguments.contains("--review-bike-stale") { return (nil, nil, nil) }
         if arguments.contains("--review-bike-idle") { return (0, 0, 0) }
         if arguments.contains("--review-bike-high-speed") { return (160, 164, 4) }
         return (64, 68, 4)
     }
     static func bikeActivitySnapshot(at now: Date = Date()) -> BikeActivitySnapshot {
-        BikeActivitySnapshot.sample(connected: true,
-            ready: !ProcessInfo.processInfo.arguments.contains("--review-bike-partial"),
+        let state = connectionState()
+        return BikeActivitySnapshot.sample(connected: state != .disconnected,
+            ready: state != .waitingForData && state != .disconnected,
             measurements: measurements(at: now), now: now)
     }
     static func catalogue(at now: Date = Date()) -> TelemetryPresentation {

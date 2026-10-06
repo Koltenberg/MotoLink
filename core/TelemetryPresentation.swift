@@ -1,5 +1,21 @@
 import Foundation
 
+/// A subscription is transport readiness, not evidence that live bike data is
+/// arriving. UI state must expire even when no new observable event is emitted.
+enum RideConnectionPresentation {
+    enum State: Equatable { case unavailable, disconnected, connecting, waitingForData, receiving, stale }
+
+    static func state(powered: Bool, connected: Bool, connecting: Bool,
+                      lastStreamAt: Date?, now: Date) -> State {
+        guard powered else { return .unavailable }
+        guard connected else { return connecting ? .connecting : .disconnected }
+        guard let lastStreamAt else { return .waitingForData }
+        let age = now.timeIntervalSince(lastStreamAt)
+        guard age.isFinite, age >= 0 else { return .waitingForData }
+        return age <= 3 ? .receiving : .stale
+    }
+}
+
 /// The motorcycle's 0x4A notifications arrive about every 0.2 seconds in
 /// recorded rides. Keep the live dashboard close to that rate while avoiding
 /// an unlimited stream of SwiftUI publications, especially in the background.

@@ -24,6 +24,12 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     // The full in-memory tail stays exact; only its diagnostic UI refresh is
     // coalesced. Journal writes and ride callbacks still run for every packet.
     private(set) var events: [DiagnosticEvent] = []
+    private var diagnosticPrelude = DiagnosticPreludeBuffer()
+    /// Setup/failure evidence survives the high-rate notification tail until a
+    /// ride starts. The bounded buffer excludes ordinary stream packets.
+    var capturePrelude: [DiagnosticEvent] {
+        diagnosticPrelude.snapshot(at: ProcessInfo.processInfo.systemUptime)
+    }
     private var lastEventPublicationUptime: TimeInterval?
     @Published private(set) var status = "Проверка Bluetooth…"
     @Published private(set) var bluetoothPowered = false
@@ -466,7 +472,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     func startCaptureProfileIfNeeded() {
         // New ride/UI/readiness callbacks do not override the retry grace or
         // exhausted budget following a completed automatic profile write error.
-        guard ready, captureProfileSession != session, !captureProfileAwaitingLateStream else { return }
+        guard BLECaptureStartupPolicy.shouldRequest(ready: ready,
+            startedInSession: captureProfileSession == session,
+            awaitingLateStream: captureProfileAwaitingLateStream) else { return }
         captureProfileRequested = true
         runFullDiagnostic(automatic: true)
     }
@@ -658,6 +666,10 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     }
 
     @objc private func becameActive() {
+        // A final background packet may have been withheld by UI coalescing.
+        // Show the latest captured state immediately, even if no next packet
+        // arrives; normal freshness checks still reject old readings.
+        publishTelemetry(force: true)
         // An opportunity to check an existing session, not a background timer.
         resumeScheduledReconnect()
         checkStreamRecovery()
@@ -881,6 +893,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 
     private func selectTelemetryCatalogue(for identifier: UUID) {
         guard telemetryPeripheralID != identifier else { return }
+        if telemetryPeripheralID != nil { diagnosticPrelude.removeAll() }
         telemetryPeripheralID = identifier
         telemetryPresentation = TelemetryPresentation()
         publishTelemetry(force: true)
@@ -1142,6 +1155,7 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
         }
         events.append(event)
         if events.count > 300 { events.removeFirst(events.count - 300) }
+        diagnosticPrelude.append(event, at: now)
         logStore?.append(event)
         onDiagnosticEvent?(event)
     }
@@ -1570,14 +1584,15 @@ extension MotorcycleBluetooth: CBPeripheralDelegate {
         setupTimeout = nil
         ready = true
         status = "Мотоцикл подключён"
-        if firstReady { onReadyForCapture?() }
+        // An in-place GATT repair also restores the recorder's readiness. It
+        // does not establish a new transport boundary or override a user stop.
+        onReadyForCapture?()
         record("ready", firstReady ? "Все три подписки подтверждены" : "Подписки восстановлены на прежнем BLE-соединении")
-        if resumeCaptureAfterGATTRecovery {
-            resumeCaptureAfterGATTRecovery = false
-            startCaptureProfileIfNeeded()
-        } else if autoReconnect && UserDefaults.standard.bool(forKey: "MotoLink.resumeTelemetry") {
-            startCaptureProfileIfNeeded()
-        }
+        resumeCaptureAfterGATTRecovery = false
+        // GATT readiness is not telemetry. Always start the known live profile
+        // for this session, including a manually connected bike with auto-
+        // reconnect/recording disabled. The session gate prevents duplicates.
+        startCaptureProfileIfNeeded()
         if activeWrite == nil {
             if busy { sendNext() }
             else if diagnosticRunning && pendingWrites.isEmpty { observeDiagnostic() }

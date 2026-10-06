@@ -120,6 +120,7 @@ struct MotorcycleMeasurementsView: View {
 
 struct RideHistoryView: View {
     @ObservedObject var rides: RideRecorder
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var expansion: [String: Bool] = [:]
     @State private var visibleLimits: [String: Int] = [:]
     @State private var pendingDelete: RideSummary?
@@ -154,7 +155,7 @@ struct RideHistoryView: View {
                 } else {
                     Text(String(format: "Поездок: %d · %.1f км", history.count, totalDistance / 1000))
                         .font(MotoTheme.font(.headline))
-                    Text("Расстояние по записям GPS.")
+                    Text("Расстояние записано телефоном")
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }
                 if rides.changingHistory { ProgressView("Обновляем историю…") }
@@ -162,7 +163,7 @@ struct RideHistoryView: View {
                 else if let status = rides.historyRefreshStatus {
                     Text(status).font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }
-            }.listRowBackground(MotoTheme.background)
+            }.listRowBackground(MotoTheme.panel)
             ForEach(groups) { group in
                 Section {
                     if expanded(group) {
@@ -171,11 +172,15 @@ struct RideHistoryView: View {
                         }
                         if group.rides.count > (visibleLimits[group.id] ?? 30) {
                             Button("Показать ещё 30") { visibleLimits[group.id] = (visibleLimits[group.id] ?? 30) + 30 }
-                                .font(MotoTheme.font(.subheadline)).listRowBackground(MotoTheme.background)
+                                .font(MotoTheme.font(.subheadline)).listRowBackground(MotoTheme.panel)
                         }
                     }
                 } header: {
-                    Button { expansion[group.id] = !expanded(group) } label: {
+                    Button {
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                            expansion[group.id] = !expanded(group)
+                        }
+                    } label: {
                         HStack(spacing: 8) {
                             Image(systemName: expanded(group) ? "chevron.down" : "chevron.right")
                             groupTitle(group.bucket)
@@ -256,12 +261,12 @@ struct RideHistoryView: View {
                     if let title = ride.title { Text(title).font(MotoTheme.font(.headline)) }
                     Text(ride.startedAt, format: .dateTime.day().month().hour().minute())
                         .font(MotoTheme.font(.headline))
-                    Text(String(format: "GPS %.2f км · %@", ride.distanceMeters / 1000, duration(ride.elapsed)))
+                    Text(String(format: "%.2f км · %@", ride.distanceMeters / 1000, duration(ride.elapsed)))
                         .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                 }
             }.padding(.vertical, 5)
         }
-        .listRowBackground(MotoTheme.background)
+        .listRowBackground(MotoTheme.panel)
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(role: .destructive) { pendingDelete = ride; showingDelete = true }
                 label: { Label("Удалить", systemImage: "trash") }.disabled(busy)
@@ -357,88 +362,99 @@ struct RideDetailView: View {
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }
                 if let coverage = ride.streamCoverage {
-                    Text("Данные байка: \(duration(coverage.observedSeconds)) из \(duration(ride.elapsed))")
-                        .font(MotoTheme.font(.headline))
-                    Text(coverage.frameCount == 0 ? "За эту поездку данные движения не поступали."
-                         : "Время, когда поступали данные движения. Пропуски связи не учитываются.")
-                        .font(MotoTheme.font(.caption)).foregroundStyle(coverage.frameCount == 0 ? Color.orange : MotoTheme.secondary)
+                    Label(coverage.frameCount == 0 ? "Показатели байка не записаны"
+                          : "Показатели байка: \(duration(coverage.observedSeconds))", systemImage: "waveform.path")
+                        .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                 }
                 if !points.isEmpty {
-                    HStack {
-                        Text("Схема маршрута").font(MotoTheme.font(.title3))
-                        Spacer(minLength: 8)
-                        Button { showingExpandedRoute = true } label: {
-                            Label("На весь экран", systemImage: "arrow.up.left.and.arrow.down.right")
-                        }.font(MotoTheme.font(.caption))
-                    }
-                    LocalRouteOverview(points: points, showGapBoundaries: showGapBoundaries,
-                                       cachedGeometry: routeGeometry)
-                        .frame(height: 280).clipShape(PixelFrame())
-                    Text("Схема по записанным точкам, без загрузки карт. Красный — GPS; белая точка — конец записи.")
-                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-                    if gaps.contains(where: { $0.from != nil && $0.to != nil }) {
-                        Toggle("Показать границы пропусков", isOn: $showGapBoundaries)
-                            .font(MotoTheme.font(.subheadline))
-                        if showGapBoundaries {
-                            Text("Серый пунктир лишь отмечает границы; это не записанный путь и не дорога.")
-                                .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Маршрут").font(MotoTheme.font(.title3))
+                            Spacer(minLength: 8)
+                            Button { showingExpandedRoute = true } label: {
+                                Label("На весь экран", systemImage: "arrow.up.left.and.arrow.down.right")
+                            }.font(MotoTheme.font(.caption))
                         }
-                    }
+                        LocalRouteOverview(points: points, showGapBoundaries: showGapBoundaries,
+                                           cachedGeometry: routeGeometry)
+                            .frame(height: 280).clipShape(PixelFrame())
+                            .contentShape(Rectangle())
+                            .onTapGesture { showingExpandedRoute = true }
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityHint("Дважды коснитесь, чтобы открыть маршрут на весь экран")
+                        Text("Красная линия — записанный путь. Пробелы — нет GPS.")
+                            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    }.padding(16).pixelPanel()
                 } else if !loading && error == nil {
-                    Text("Точек GPS нет. Данные мотоцикла и журнал доступны отдельно.")
+                    Text("Маршрут не записан: нет точек GPS.")
                         .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                 }
                 if !gaps.isEmpty {
                     DisclosureGroup {
+                        if gaps.contains(where: { $0.from != nil && $0.to != nil }) {
+                            Toggle("Отметить пропуски на схеме", isOn: $showGapBoundaries)
+                                .font(MotoTheme.font(.subheadline))
+                            if showGapBoundaries {
+                                Text("Серый пунктир соединяет границы пропуска. Это не записанный путь.")
+                                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                            }
+                        }
                         ForEach(gaps) { gap in GPSGapCard(gap: gap) }
                     } label: {
-                        Text("Пропуски GPS: \(gaps.count)")
+                        Text("Участки без GPS: \(gaps.count)")
                             .font(MotoTheme.font(.headline))
                     }
+                    .padding(16).pixelPanel()
                 }
-                Text("Расстояние и скорость здесь — по GPS iPhone. Неизвестные участки не входят в расстояние. Данные байка сохраняются независимо от GPS.")
-                    .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 if !trends.isEmpty {
-                    HStack {
-                        Text("Графики поездки").font(MotoTheme.font(.title3))
-                        Spacer(minLength: 8)
-                        Button { showingExpandedTrends = true } label: {
-                            Label("На весь экран", systemImage: "arrow.up.left.and.arrow.down.right")
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Графики поездки").font(MotoTheme.font(.title3))
+                            Spacer(minLength: 8)
+                            Button { showingExpandedTrends = true } label: {
+                                Label("На весь экран", systemImage: "arrow.up.left.and.arrow.down.right")
+                            }
+                            .font(MotoTheme.font(.caption))
                         }
-                        .font(MotoTheme.font(.caption))
-                    }
-                    RideTrendPicker(trends: trends, selectedIDs: $selectedTrendIDs)
-                    RideTrendPlot(trends: trends.filter { selectedTrendIDs.contains($0.id) }, elapsed: ride.elapsed)
-                        .frame(height: 224)
-                        .clipShape(PixelFrame())
-                    RideTrendLegend(trends: trends.filter { selectedTrendIDs.contains($0.id) })
-                    Text("У каждой линии свой масштаб. Разрывы означают отсутствие замеров; график построен на iPhone без сети.")
-                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                        RideTrendPicker(trends: trends, selectedIDs: $selectedTrendIDs)
+                        RideTrendPlot(trends: trends.filter { selectedTrendIDs.contains($0.id) }, elapsed: ride.elapsed)
+                            .frame(height: 224)
+                            .clipShape(PixelFrame())
+                        RideTrendLegend(trends: trends.filter { selectedTrendIDs.contains($0.id) })
+                        Text("У каждой линии своя шкала. Нажми на название, чтобы скрыть или показать показатель.")
+                            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                        RideTrendHelp(trends: trends.filter { selectedTrendIDs.contains($0.id) })
+                    }.padding(16).pixelPanel()
                 }
                 if !ranges.isEmpty {
-                    Text("Показатели за поездку").font(MotoTheme.font(.title3))
-                    ForEach(ranges) { range in
-                        HStack(alignment: .firstTextBaseline) {
-                            Text(range.label)
-                            Spacer(minLength: 12)
-                            Text(String(format: "%.2f–%.2f %@", range.minimum, range.maximum, range.unit))
-                                .monospacedDigit().multilineTextAlignment(.trailing)
+                    DisclosureGroup("Все показатели за поездку") {
+                        ForEach(ranges) { range in
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(range.label)
+                                Spacer(minLength: 12)
+                                Text(String(format: "%.2f–%.2f %@", range.minimum, range.maximum, range.unit))
+                                    .monospacedDigit().multilineTextAlignment(.trailing)
                         }.font(MotoTheme.font(.subheadline))
                     }
+                    }.font(MotoTheme.font(.subheadline)).padding(16).pixelPanel()
                 }
                 DisclosureGroup("Подробности записи") {
+                    if let coverage = ride.streamCoverage {
+                        Text("Показатели байка записывались \(duration(coverage.observedSeconds)) из \(duration(ride.elapsed)).")
+                            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                    }
+                    Text("Расстояние — по GPS телефона. Участки без GPS не включены. Показатели байка записываются отдельно.")
+                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     if let version = ride.recordedAppVersion {
                         Text("Записано в Moto Link \(version) · сборка \(ride.recordedAppBuild ?? "—")")
                             .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                     }
                     Text("Точек GPS: \(points.count). Измерений байка: \(ride.telemetryCount). Разрывов процесса: \(ride.interruptionCount).")
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-                    Text("Автостарт означает подключение Bluetooth, а не включение зажигания. Просмотр этой поездки не включает GPS и не отправляет координаты в интернет.")
-                        .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
-                }.font(MotoTheme.font(.subheadline))
-                Button { rides.export(ride) } label: { Label("Сохранить единый журнал", systemImage: "square.and.arrow.up") }
+                }.font(MotoTheme.font(.subheadline)).padding(16).pixelPanel()
+                Button { rides.export(ride) } label: { Label("Поделиться поездкой", systemImage: "square.and.arrow.up") }
                     .buttonStyle(PixelButtonStyle()).disabled(rides.exporting || rides.changingHistory || loading || error != nil)
-                Button { rides.exportGPX(ride) } label: { Label("Отдельно: GPX и маршрут", systemImage: "map") }
+                Button { rides.exportGPX(ride) } label: { Label("Сохранить маршрут GPX", systemImage: "map") }
                     .buttonStyle(PixelButtonStyle()).disabled(rides.exporting || rides.changingHistory || loading || error != nil)
                 Button(role: .destructive) { showingDelete = true } label: {
                     Label("Удалить поездку", systemImage: "trash")
@@ -705,6 +721,7 @@ private struct RideTrendPicker: View {
     let trends: [RideTrend]
     @Binding var selectedIDs: Set<String>
     var vertical = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
@@ -725,10 +742,12 @@ private struct RideTrendPicker: View {
     private func option(_ trend: RideTrend) -> some View {
         let selected = selectedIDs.contains(trend.id)
         return Button {
-            if selected {
-                if selectedIDs.count > 1 { selectedIDs.remove(trend.id) }
-            } else {
-                selectedIDs.insert(trend.id)
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) {
+                if selected {
+                    if selectedIDs.count > 1 { selectedIDs.remove(trend.id) }
+                } else {
+                    selectedIDs.insert(trend.id)
+                }
             }
         } label: {
             HStack(spacing: 7) {
@@ -741,8 +760,8 @@ private struct RideTrendPicker: View {
             .padding(.horizontal, 10)
             .frame(minHeight: 44)
             .background(selected ? trend.color.opacity(0.15) : MotoTheme.panel)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(selected ? trend.color.opacity(0.7) : MotoTheme.secondary.opacity(0.3)))
         }
         .buttonStyle(.plain)
@@ -777,10 +796,30 @@ private struct RideTrendLegend: View {
     }
 
     private func detail(for trend: RideTrend) -> String {
-        let scale = range(trend.plotMinimum, trend.plotMaximum, unit: trend.unit)
         let shown = range(trend.minimum, trend.maximum, unit: trend.unit)
-        let gaps = trend.series.gapCount > 0 ? " · пропуски \(trend.series.gapCount)" : ""
-        return "Шкала \(scale) · показано \(shown)\(gaps)"
+        return "За поездку: \(shown)"
+    }
+}
+
+/// Explain independent scales without putting charting terminology in the main
+/// flow. Actual values and units remain visible in the legend at all times.
+private struct RideTrendHelp: View {
+    let trends: [RideTrend]
+
+    var body: some View {
+        DisclosureGroup("Как читать график") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Слева — начало поездки, справа — конец. Пробел в линии означает, что данных не было.")
+                Text("У каждой линии своя шкала: сравнивай, когда показатели росли и снижались. Одинаковая высота линий не означает одинаковые значения.")
+                ForEach(trends) { trend in
+                    Text(trend.label + ": " + String(format: "%.0f–%.0f", trend.plotMinimum, trend.plotMaximum)
+                         + (trend.unit.isEmpty ? "" : " " + trend.unit))
+                }
+            }
+            .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            .fixedSize(horizontal: false, vertical: true).padding(.top, 8)
+        }
+        .font(MotoTheme.font(.subheadline))
     }
 }
 
@@ -834,7 +873,7 @@ private struct RideTrendPlot: View {
             }
             .frame(maxHeight: .infinity)
             HStack {
-                Text("СТАРТ")
+                Text("Начало")
                 Spacer()
                 Text(duration(elapsed))
             }
@@ -882,6 +921,7 @@ private struct RideTrendFullscreen: View {
                                 RideTrendPicker(trends: trends, selectedIDs: $selectedIDs, vertical: true)
                                 RideTrendLegend(trends: selectedTrends)
                                 explanation
+                                RideTrendHelp(trends: selectedTrends)
                             }
                         }
                         .frame(width: min(300, geometry.size.width * 0.34))
@@ -894,6 +934,7 @@ private struct RideTrendFullscreen: View {
                                 .frame(height: max(300, geometry.size.height * 0.48))
                             RideTrendLegend(trends: selectedTrends)
                             explanation
+                            RideTrendHelp(trends: selectedTrends)
                         }
                     }
                 }
@@ -905,7 +946,7 @@ private struct RideTrendFullscreen: View {
     }
 
     private var explanation: some View {
-        Text("Каждая линия использует собственную шкалу. Разрывы означают отсутствие замеров; данные построены на iPhone без сети.")
+        Text("У каждой линии своя шкала. Пробелы — нет данных.")
             .font(MotoTheme.font(.caption))
             .foregroundStyle(MotoTheme.secondary)
             .fixedSize(horizontal: false, vertical: true)

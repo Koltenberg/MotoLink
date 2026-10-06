@@ -842,6 +842,18 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
 
     /// Raw packets are never sampled or pruned from a ride, including malformed
     /// notifications which may become interpretable after the first road test.
+    /// Attach the bounded connection context with one summary update and one
+    /// disk-queue submission, rather than replaying hundreds of UI mutations at
+    /// the exact instant the rider begins capture. Original event times remain
+    /// inside each diagnostic, distinct from its import time into this ride.
+    func recordDiagnosticPrelude(_ events: [DiagnosticEvent]) {
+        guard active != nil, !finishRequested, !events.isEmpty else { return }
+        active?.rawEventCount = (active?.rawEventCount ?? 0) + events.count
+        let importedAt = Date()
+        append(events.map { RideRecord(kind: "diagnostic", timestamp: importedAt, diagnostic: $0) })
+    }
+
+    /// Every live packet still reaches this path independently of presentation.
     func recordDiagnostic(_ event: DiagnosticEvent) {
         guard active != nil, !finishRequested else { return }
         active?.rawEventCount = (active?.rawEventCount ?? 0) + 1

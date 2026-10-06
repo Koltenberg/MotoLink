@@ -2,6 +2,40 @@ import XCTest
 @testable import MotoLinkCore
 
 final class BLEGATTRecoveryPolicyTests: XCTestCase {
+    func testManualConnectionStartsLiveProfileBeforeAnyRideIsRecorded() {
+        var gatt = BLEGATTRecoveryPolicy()
+        gatt.beginConnection()
+        XCTAssertFalse(BLECaptureStartupPolicy.shouldRequest(ready: false,
+            startedInSession: false, awaitingLateStream: false))
+        XCTAssertTrue(gatt.servicesDiscovered())
+        XCTAssertTrue(gatt.characteristicsDiscovered())
+        XCTAssertEqual(gatt.notificationsReady(), true)
+        // The October 6 ride reached this state for over 25 seconds with no vendor
+        // command because auto-reconnect was off. Live startup deliberately
+        // has no reconnect preference, GPS permission or recording dependency.
+        XCTAssertTrue(BLECaptureStartupPolicy.shouldRequest(ready: gatt.phase == .ready,
+            startedInSession: false, awaitingLateStream: false))
+        // Pressing Record after startup must not replay the same profile.
+        XCTAssertFalse(BLECaptureStartupPolicy.shouldRequest(ready: true,
+            startedInSession: true, awaitingLateStream: false))
+    }
+
+    func testRepairedChannelKeepsLiveStartupAndWriteRetryBudgets() {
+        var gatt = readyPolicy()
+        gatt.notificationLost()
+        XCTAssertFalse(BLECaptureStartupPolicy.shouldRequest(ready: false,
+            startedInSession: false, awaitingLateStream: false))
+        XCTAssertEqual(gatt.notificationsReady(), false)
+        XCTAssertFalse(BLECaptureStartupPolicy.shouldRequest(ready: true,
+            startedInSession: true, awaitingLateStream: false))
+        // A failed completed write still gets its original grace window;
+        // readiness or foreground callbacks cannot start a second request.
+        XCTAssertFalse(BLECaptureStartupPolicy.shouldRequest(ready: true,
+            startedInSession: false, awaitingLateStream: true))
+        XCTAssertTrue(BLECaptureStartupPolicy.shouldRequest(ready: true,
+            startedInSession: false, awaitingLateStream: false))
+    }
+
     func testGATTRepairRestartsProfileStoppedBeforeStreamStart() {
         // .unavailable terminated diagnosticRunning, but a profile had started
         // and could stop before sending 08. That session marker must not cause

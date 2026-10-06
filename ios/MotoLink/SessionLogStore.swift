@@ -20,6 +20,52 @@ struct DiagnosticEvent: Codable, Identifiable {
     }
 }
 
+/// A small pre-recording context, separate from the high-rate raw event tail.
+/// Without it, warming up the bike for twenty seconds could evict the entire
+/// connection/setup sequence before the rider pressed Record. Disk journals
+/// still receive every packet; this buffer only enriches the start of a ride.
+struct DiagnosticPreludeBuffer {
+    private struct Entry {
+        let event: DiagnosticEvent
+        let uptime: TimeInterval
+        let bytes: Int
+    }
+    private var entries: [Entry] = []
+    private var byteCount = 0
+    static let maximumEvents = 200
+    static let maximumBytes = 64 * 1024
+    static let maximumAge: TimeInterval = 15 * 60
+
+    mutating func append(_ event: DiagnosticEvent, at uptime: TimeInterval) {
+        guard uptime.isFinite, uptime >= 0 else { return }
+        if let last = entries.last, uptime < last.uptime { removeAll() }
+        // Preserve identity/capabilities and command acknowledgements. Repeated
+        // telemetry, health sampling and RSSI must not crowd out setup evidence.
+        if event.kind == "rx" {
+            guard let opcode = event.hex.map({ String($0.prefix(2)) }),
+                  ["03", "40", "20"].contains(opcode) else { return }
+        } else if ["ble_health", "rssi", "rssi_unavailable", "rssi_late"].contains(event.kind) {
+            return
+        }
+        let bytes = (try? JSONEncoder().encode(event).count) ?? Self.maximumBytes + 1
+        guard bytes <= Self.maximumBytes else { return }
+        guard !entries.contains(where: { $0.event.id == event.id }) else { return }
+        entries.append(Entry(event: event, uptime: uptime, bytes: bytes))
+        byteCount += bytes
+        while entries.count > Self.maximumEvents || byteCount > Self.maximumBytes
+            || entries.first.map({ uptime - $0.uptime > Self.maximumAge }) == true {
+            byteCount -= entries.removeFirst().bytes
+        }
+    }
+
+    func snapshot(at uptime: TimeInterval) -> [DiagnosticEvent] {
+        guard uptime.isFinite, uptime >= 0 else { return [] }
+        return entries.filter { uptime >= $0.uptime && uptime - $0.uptime <= Self.maximumAge }.map(\.event)
+    }
+
+    mutating func removeAll() { entries.removeAll(); byteCount = 0 }
+}
+
 private struct SetupSnapshot: Codable {
     var schema = "motolink.setup/1"
     var updatedAt: String?

@@ -120,7 +120,7 @@ struct ConnectionTestSettingsView: View {
     @AppStorage("MotoLink.test.senaVariant") private var variant = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Условия следующей поездки").font(MotoTheme.font(.headline))
+            Text("Заметки для проверки связи").font(MotoTheme.font(.headline))
             PixelChoiceField(title: "Sena 50S", selection: $sena, options: [
                 .init(value: "unknown", label: "Не указано"),
                 .init(value: "off", label: "Выключена"),
@@ -140,16 +140,20 @@ struct ConnectionTestSettingsView: View {
                 .init(value: "pocket", label: "В кармане"),
                 .init(value: "bag", label: "В сумке")
             ])
-            PixelChoiceField(title: "Модель с наклейки Sena", selection: $variant, options: [
-                .init(value: "", label: "Не указана"),
-                .init(value: "SP113", label: "50S · SP113"),
-                .init(value: "SP75", label: "50S · SP75")
-            ])
-            if variant == "SP113" {
-                Text("SP113 — аппаратный вариант 50S с веткой прошивки 2.x. Наклейка не показывает установленную версию; её можно посмотреть в приложении Sena.").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+            DisclosureGroup("Модель и прошивка гарнитуры") {
+                PixelChoiceField(title: "Модель с наклейки Sena", selection: $variant, options: [
+                    .init(value: "", label: "Не указана"),
+                    .init(value: "SP113", label: "50S · SP113"),
+                    .init(value: "SP75", label: "50S · SP75")
+                ])
+                if variant == "SP113" {
+                    Text("Версию прошивки можно посмотреть в приложении Sena.").font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
+                }
+                TextField("Версия прошивки, если известна", text: $firmware)
+                    .font(MotoTheme.font(.body)).textFieldStyle(.plain)
+                    .padding(12).pixelPanel()
             }
-            TextField("Версия Sena, если известна", text: $firmware).font(MotoTheme.font(.body)).textFieldStyle(.roundedBorder)
-            Text("Это твои отметки, а не обнаруженные устройства. Условия сбросятся после начала записи; вариант и версия сохранятся. Системная диагностика Apple в этот журнал не входит.")
+            Text("Эти заметки сохранятся со следующей поездкой. Они не определяют, какие устройства подключены.")
                 .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
         }.font(MotoTheme.font(.subheadline))
     }

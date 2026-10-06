@@ -1,5 +1,15 @@
 import Foundation
 
+/// Live instruments are part of an established connection, independently of
+/// whether the rider enabled future reconnects or is saving a ride. Keep the
+/// same session and completed-write retry protections for every caller.
+enum BLECaptureStartupPolicy {
+    static func shouldRequest(ready: Bool, startedInSession: Bool,
+                              awaitingLateStream: Bool) -> Bool {
+        ready && !startedInSession && !awaitingLateStream
+    }
+}
+
 /// Bounds repair of GATT objects while CoreBluetooth still owns a connected ACL.
 /// This policy never requests a physical disconnect or a second BLE connection.
 struct BLEGATTRecoveryPolicy {
