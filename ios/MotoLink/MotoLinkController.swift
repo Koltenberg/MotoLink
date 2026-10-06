@@ -27,7 +27,8 @@ final class MotoLinkController: ObservableObject {
             // $data publishes before CompanionStore.data is assigned. Defer
             // the derived value so the view/store cannot evaluate old anchors.
             DispatchQueue.main.async { [weak self] in
-                self?.mileage.updateCompanion(data,
+                guard let self, self.companion.data == data else { return }
+                self.mileage.updateCompanion(data,
                     initialEstimate: data.estimatedOdometer(from: trips)?.kilometers)
             }
         }.store(in: &subscriptions)

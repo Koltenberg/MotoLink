@@ -14,7 +14,7 @@
     <key>LSRequiresIPhoneOS</key><true/>
     <key>NSBluetoothAlwaysUsageDescription</key><string>MotoLink подключается к вашему мотоциклу, чтобы проверить доступные данные и сохранить диагностический журнал.</string>
     <key>NSLocationWhenInUseUsageDescription</key><string>MotoLink записывает маршрут, расстояние и скорость поездки с GPS вашего iPhone. Данные хранятся на устройстве.</string>
-    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key><string>Разрешение «Всегда» нужно для автоматического начала записи маршрута при подключении к вашему мотоциклу, в том числе с заблокированным экраном.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key><string>Геопозиция в фоне помогает считать пробег при подключённом мотоцикле и записывать выбранное путешествие с заблокированным экраном. Компактный счётчик не сохраняет координаты.</string>
     <key>UIBackgroundModes</key><array><string>bluetooth-central</string><string>location</string></array>
     <key>UIApplicationSceneManifest</key>
     <dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
