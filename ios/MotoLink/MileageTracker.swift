@@ -190,7 +190,7 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
               let estimate = saved.ledger.estimatedOdometerKilometers(bikeID: bikeID),
               estimate < physical else { return }
         do { try saved.ledger.setOdometer(kilometers: physical, bikeID: bikeID, at: Date()) }
-        catch { error = "Не удалось согласовать показания одометра."; return }
+        catch { self.error = "Не удалось согласовать показания одометра."; return }
         changed()
         checkpoint(force: true)
     }
