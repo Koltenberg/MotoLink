@@ -48,6 +48,22 @@ RIDE_AUDIT_REQUIRED = frozenset((
     "detailed_off_survives_fresh_recorder",
     "compact_corrected_historical_reading_preserves_new_mileage", "compact_other_bike_does_not_change_garage_mileage",
     "compact_gps_updates_dashboard_without_creating_journal",
+    "compact_export_includes_current_aggregate", "compact_stale_profile_cannot_hide_new_confirmed_reading",
+    "compact_confirmed_floor_never_counts_phantom_distance_or_reapplies",
+    "gps_recovery_test_has_active_recorder", "gps_recovery_rejects_island_without_inventing_distance",
+    "gps_recovery_keeps_bike_capture_and_marks_route_gaps", "gps_recovery_preserves_all_original_observations",
+    "parking_stopped_disconnect_pauses_actual_recorder", "parking_idle_callbacks_do_not_grow_track_or_diagnostics",
+    "parking_transport_icon_alone_does_not_resume_capture", "parking_real_frame_resumes_same_ride",
+    "parking_saved_duration_excludes_short_stop", "parking_journal_has_boundaries_without_stationary_spam",
+    "parking_expired_pause_blocks_capture_during_relaunch", "parking_relaunch_trims_fifteen_minute_tail_at_original_stop",
+    "parking_timeout_is_saved_once_without_waiting_tail", "parking_history_graph_and_route_share_compressed_timeline",
+    "parking_archive_remains_error_free",
+    "parking_short_pause_is_restored_before_route_load", "parking_live_resume_survives_concurrent_route_recovery",
+    "parking_recovery_keeps_real_dates_and_compressed_clock",
+    "parking_live_timeout_uses_stop_boundary_and_rejects_late_packets",
+    "parking_repeated_timeout_does_not_duplicate_finish",
+    "parking_timeout_does_not_create_empty_rides_even_after_relaunch",
+    "parking_next_real_frame_starts_new_automatic_ride",
 ))
 READY_NAMES = tuple(Path(name).with_suffix(".ready.json").name for name in SCREENSHOT_NAMES)
 SIMCTL_DISPLAY_TIMEOUT = 90  # Hosted iOS 26 snapshots and app shutdown can exceed 30s.

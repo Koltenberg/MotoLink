@@ -3,6 +3,25 @@ import XCTest
 @testable import MotoLinkCore
 
 final class MetricColorScaleTests: XCTestCase {
+    func testGearHasNoWarningColorsOrEditableThresholds() throws {
+        XCTAssertNil(MetricColorKind.forMetric("gear_position"))
+        XCTAssertFalse(MetricColorKind.configurable.contains(.gear))
+        var settings = MetricColorPreferences()
+        settings[.gear] = MetricColorScale(orangeStart: 1, redStart: 2, maximum: 6)
+        let restored = try JSONDecoder().decode(MetricColorPreferences.self, from: JSONEncoder().encode(settings))
+        XCTAssertEqual(restored[.speed], settings[.speed])
+        XCTAssertNil(MetricColorKind.forMetric("gear_position"))
+        try withDefaults { defaults in
+            // A no-longer-editable legacy gear scale cannot block valid speed
+            // or temperature settings; saving removes that obsolete setting.
+            settings[.gear] = MetricColorScale(orangeStart: 99, redStart: 1, maximum: 0)
+            try settings.save(to: defaults)
+            let saved = try XCTUnwrap(defaults.data(forKey: MetricColorPreferences.storageKey))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: Any])
+            let scales = try XCTUnwrap(object["scales"] as? [String: Any])
+            XCTAssertNil(scales["gear"])
+        }
+    }
     private func withDefaults(_ body: (UserDefaults) throws -> Void) throws {
         let suite = "MotoLink.MetricColorScaleTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

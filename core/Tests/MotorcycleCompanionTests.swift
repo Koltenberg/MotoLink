@@ -2,6 +2,35 @@ import XCTest
 @testable import MotoLinkCore
 
 final class MotorcycleCompanionTests: XCTestCase {
+    func testProfileRenamePreservesAnchorEvenWhenEditorShowsNewerFuelReading() {
+        let date = Date(timeIntervalSince1970: 1000)
+        var data = CompanionData(bikeName: "Old", odometerKm: 1000, odometerRecordedAt: date,
+            fuelEntries: [FuelEntry(date: date.addingTimeInterval(10), odometerKm: 1600)])
+        let displayed = data.currentOdometerKm
+        XCTAssertEqual(displayed, 1600)
+        data.updateProfile(name: " New ", reading: displayed, displayedReading: displayed,
+            confirmReading: false, at: date.addingTimeInterval(20), snapshot: nil)
+        XCTAssertEqual(data.bikeName, "New")
+        XCTAssertEqual(data.odometerKm, 1000)
+        XCTAssertEqual(data.odometerRecordedAt, date)
+        data.updateProfile(name: "New", reading: displayed, displayedReading: displayed,
+            confirmReading: true, at: date.addingTimeInterval(30), snapshot: nil)
+        XCTAssertEqual(data.odometerKm, 1600)
+        XCTAssertEqual(data.odometerRecordedAt, date.addingTimeInterval(30))
+    }
+
+    func testExplicitProfileCorrectionAndClearingStillWork() {
+        let date = Date(timeIntervalSince1970: 1000)
+        var data = CompanionData(odometerKm: 1000, odometerRecordedAt: date)
+        data.updateProfile(name: "Bike", reading: 999, displayedReading: 1000,
+            confirmReading: false, at: date.addingTimeInterval(1), snapshot: nil)
+        XCTAssertEqual(data.odometerKm, 999)
+        data.updateProfile(name: "Bike", reading: nil, displayedReading: 999,
+            confirmReading: false, at: date.addingTimeInterval(2), snapshot: nil)
+        XCTAssertNil(data.odometerKm)
+        XCTAssertNil(data.odometerRecordedAt)
+        XCTAssertNil(data.odometerRideSnapshot)
+    }
     private let epoch = Date(timeIntervalSince1970: 1_700_000_000)
 
     private func fill(_ day: Double, _ odometer: Double, _ liters: Double,

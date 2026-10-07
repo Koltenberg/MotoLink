@@ -359,6 +359,19 @@ struct CompanionData: Codable, Identifiable, Equatable {
         return readings.max()
     }
 
+    /// The editor starts from the latest known instrument total, including
+    /// refuelling/service entries. Merely changing the name must not redate it
+    /// or replace a profile reading with a prefilled value from another record.
+    mutating func updateProfile(name: String, reading: Double?, displayedReading: Double?,
+                                confirmReading: Bool, at date: Date,
+                                snapshot: RideDistanceSnapshot?) {
+        bikeName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard reading != displayedReading || confirmReading else { return }
+        odometerKm = reading
+        odometerRecordedAt = reading == nil ? nil : date
+        odometerRideSnapshot = reading == nil ? nil : snapshot
+    }
+
     /// Adds each saved ride at most once after the latest dated instrument
     /// reading. If the reading happened mid-ride, only GPS distance after the
     /// captured distance is counted. Undated legacy profile readings remain

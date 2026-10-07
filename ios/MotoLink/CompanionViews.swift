@@ -14,6 +14,7 @@ final class CompanionStore: ObservableObject {
     private var file: URL?
     private var readable = false
     var isReadable: Bool { readable }
+    var mileageExportSnapshot: (() throws -> Data)?
     private let mileageReceiptKey = "MotoLink.serviceMileageReceipts.v1"
     private var mileageReceipts = ServiceMileageReminderLedger()
     private var mileageReceiptsReadable = true
@@ -113,20 +114,26 @@ final class CompanionStore: ObservableObject {
         do {
             try data.validate()
             let payload = try JSONEncoder().encode(data)
+            let mileagePayload = try mileageExportSnapshot?()
             let root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("MotoLink-export-\(UUID().uuidString)", isDirectory: true)
             let destination = root.appendingPathComponent("MotoLink-garage.json")
+            let mileageDestination = root.appendingPathComponent("MotoLink-mileage.json")
             // Keep the exact Codable shape and date precision of the stored
             // file, so this snapshot remains usable if import is added later.
             do {
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
                 try payload.write(to: destination,
                     options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                if let mileagePayload {
+                    try mileagePayload.write(to: mileageDestination,
+                        options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                }
             } catch {
                 try? FileManager.default.removeItem(at: root)
                 throw error
             }
-            exportedFiles = SharedFiles(urls: [destination])
+            exportedFiles = SharedFiles(urls: [destination] + (mileagePayload == nil ? [] : [mileageDestination]))
             error = nil
         } catch { self.error = "Не удалось сохранить копию гаража: \(error.localizedDescription)" }
     }
@@ -595,6 +602,7 @@ struct BikeProfileEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var odometer = ""
+    @State private var displayedReading: Double?
     @State private var confirmReading = false
     @State private var prepared = false
     var body: some View {
@@ -634,18 +642,16 @@ struct BikeProfileEditor: View {
                         let snapshot = currentRideSnapshot(rides)
                         let recordedAt = Date()
                         if store.save({
-                            $0.bikeName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if $0.odometerKm != reading || confirmReading {
-                                $0.odometerRecordedAt = reading == nil ? nil : recordedAt
-                                $0.odometerRideSnapshot = reading == nil ? nil : snapshot
-                            }
-                            $0.odometerKm = reading
+                            $0.updateProfile(name: name, reading: reading, displayedReading: displayedReading,
+                                confirmReading: confirmReading, at: recordedAt, snapshot: snapshot)
                         }) { dismiss() }
                     }.font(MotoTheme.font(.body)) }
                 }
                 .onAppear {
                     guard !prepared else { return }; prepared = true
-                    name = store.data.bikeName; odometer = numberText(store.data.odometerKm)
+                    name = store.data.bikeName
+                    displayedReading = store.data.currentOdometerKm
+                    odometer = numberText(displayedReading)
                 }
         }
     }

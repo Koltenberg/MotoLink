@@ -2,6 +2,7 @@
 import Foundation
 import UIKit
 import SwiftUI
+import CoreLocation
 
 /// Fictional visual fixtures, excluded from every device build. Never sent to BLE
 /// or written to a user's ride journal. Used by the actual dashboard renderers.
@@ -516,6 +517,8 @@ final class SimulatorRideLifecycleAudit {
             try require([recorder, recovering, crashed, finalRecorder].allSatisfy { $0.error == nil },
                         "no_archive_error_during_lifecycle_audit")
             try await verifyCompactMileage()
+            try await verifyGPSRecovery()
+            try await verifyParkingPause()
         } catch {
             let message = (error as? AuditFailure)?.message ?? error.localizedDescription
             if !failures.contains(message) { failures.append(message) }
@@ -570,6 +573,10 @@ final class SimulatorRideLifecycleAudit {
         let payload = try Data(contentsOf: entries[0])
         try require(payload.count < 8_192 && !String(decoding: payload, as: UTF8.self).contains("latitude"),
                     "compact_mileage_has_no_coordinate_or_packet_archive")
+        let export = try tracker.exportSnapshot()
+        let exported = try JSONSerialization.jsonObject(with: export) as? [String: Any]
+        try require(exported?["ledger"] != nil && export.count < 8_192,
+                    "compact_export_includes_current_aggregate")
         let restored = MileageTracker(directory: directory)
         restored.onUpdate = { estimate = $0; distance = $1 }
         restored.observeBike(id)
@@ -589,6 +596,260 @@ final class SimulatorRideLifecycleAudit {
         let manualOnly = RideRecorder()
         retainedRecorders.append(manualOnly)
         try require(!manualOnly.autoRecord, "detailed_off_survives_fresh_recorder")
+
+        let floorTracker = MileageTracker(directory: directory.appendingPathComponent("conflicting-readings"))
+        let floorID = UUID()
+        var floorEstimate: Double?
+        var floorDistance = 0.0
+        floorTracker.onUpdate = { floorEstimate = $0; floorDistance = $1 }
+        floorTracker.observeBike(floorID)
+        let conflict = CompanionData(odometerKm: 1_000, odometerRecordedAt: Date().addingTimeInterval(-10),
+            fuelEntries: [FuelEntry(date: Date().addingTimeInterval(-30), odometerKm: 1_600)])
+        floorTracker.updateCompanion(conflict, initialEstimate: 1_000)
+        try require(floorEstimate == 1_600 && floorDistance == 0,
+                    "compact_stale_profile_cannot_hide_new_confirmed_reading")
+        floorTracker.bluetoothChanged(true)
+        let floorStart = Date().addingTimeInterval(-1)
+        for offset in [0.0, 1.0] {
+            floorTracker.recordMeasurements([.init(id: "wheel_speed", label: "Скорость", value: 36,
+                unit: "км/ч", timestamp: floorStart.addingTimeInterval(offset), source: "simulator audit")])
+        }
+        floorTracker.bluetoothChanged(false)
+        floorTracker.updateCompanion(conflict, initialEstimate: 1_000)
+        try require(abs((floorEstimate ?? 0) - 1_600.01) < 0.00001 && abs(floorDistance - 0.01) < 0.00001,
+                    "compact_confirmed_floor_never_counts_phantom_distance_or_reapplies")
+        try await waitUntil { !floorTracker.checkpointPendingForAudit }
+    }
+
+    private func verifyGPSRecovery() async throws {
+        let gpsRecorder = RideRecorder()
+        retainedRecorders.append(gpsRecorder)
+        gpsRecorder.observeBluetoothPeripheral(UUID())
+        gpsRecorder.bluetoothChanged(true)
+        gpsRecorder.bluetoothReadyForCapture()
+        gpsRecorder.setAutoRecord(true)
+        try require(gpsRecorder.active != nil, "gps_recovery_test_has_active_recorder")
+        // Inject into the real callback after the real start time, without
+        // enabling CoreLocation or using any real coordinates in the fixture.
+        try await Task.sleep(nanoseconds: 800_000_000)
+        let base = Date().addingTimeInterval(-0.7)
+        let samples: [(Double, Double)] = [(10, 3), (10, 3), (64, 180), (63.7, 25), (63, 180), (11, 3), (11, 3)]
+        var accepted: [Double] = []
+        gpsRecorder.onAcceptedGPSSpeed = { speed, _, _ in accepted.append(speed) }
+        let locations = samples.enumerated().map { index, sample in
+            CLLocation(coordinate: CLLocationCoordinate2D(latitude: 1 + Double(index) * 0.00001, longitude: 1),
+                altitude: 5, horizontalAccuracy: 5, verticalAccuracy: 5, course: 0,
+                courseAccuracy: sample.1, speed: sample.0, speedAccuracy: 1,
+                timestamp: base.addingTimeInterval(Double(index) * 0.1))
+        }
+        gpsRecorder.locationManager(CLLocationManager(), didUpdateLocations: locations)
+        injectSample(into: gpsRecorder, value: 2_400)
+        try require(accepted == [10, 11] && gpsRecorder.active?.maxSpeedMS == 11
+            && gpsRecorder.active?.distanceMeters == 0 && gpsRecorder.points.count == 2,
+                    "gps_recovery_rejects_island_without_inventing_distance")
+        try require(gpsRecorder.active?.telemetryCount == 2 && gpsRecorder.gaps.count == 2,
+                    "gps_recovery_keeps_bike_capture_and_marks_route_gaps")
+        let finished = await finish(gpsRecorder)
+        // The route loader deliberately omits raw observations to bound RAM.
+        // Verify the actual journal, not that filtered presentation view.
+        let records = try rawRecords(finished)
+        try require(records.filter { $0.kind == "gps_observation" }.count == samples.count
+            && records.filter { $0.kind == "gps" }.count == 2,
+                    "gps_recovery_preserves_all_original_observations")
+        gpsRecorder.setAutoRecord(false)
+    }
+
+    private func verifyParkingPause() async throws {
+        let parked = RideRecorder()
+        retainedRecorders.append(parked)
+        parked.observeBluetoothPeripheral(UUID())
+        parked.bluetoothChanged(true)
+        parked.bluetoothReadyForCapture()
+        parked.setAutoRecord(true)
+        guard let ride = parked.active else { throw AuditFailure(message: "parking fixture did not start") }
+        let sampleAt = Date()
+        parked.recordStreamFrame(at: sampleAt)
+        parked.recordMeasurements([
+            .init(id: "wheel_speed", label: "Скорость", value: 0, unit: "км/ч", timestamp: sampleAt, source: "simulator audit")
+        ])
+        parked.bluetoothChanged(false)
+        try require(parked.recordingPaused, "parking_stopped_disconnect_pauses_actual_recorder")
+        let before = parked.active
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let now = Date()
+        let idleLocations = [-0.04, -0.02].map { offset in
+            CLLocation(coordinate: CLLocationCoordinate2D(latitude: 1, longitude: 1),
+                altitude: 5, horizontalAccuracy: 5, verticalAccuracy: 5, course: 0,
+                courseAccuracy: 3, speed: 0, speedAccuracy: 1, timestamp: now.addingTimeInterval(offset))
+        }
+        parked.locationManager(CLLocationManager(), didUpdateLocations: idleLocations)
+        parked.recordDiagnostic(DiagnosticEvent(kind: "parking_idle_audit", detail: "must not fill the ride"))
+        try require(parked.recordingPaused && parked.points.isEmpty
+            && parked.active?.telemetryCount == before?.telemetryCount
+            && parked.active?.rawEventCount == before?.rawEventCount,
+                    "parking_idle_callbacks_do_not_grow_track_or_diagnostics")
+        parked.bluetoothChanged(true)
+        try require(parked.recordingPaused, "parking_transport_icon_alone_does_not_resume_capture")
+        parked.recordStreamFrame(at: Date())
+        try require(!parked.recordingPaused && parked.active?.id == ride.id
+            && parked.active?.pauseState?.excluded.count == 1,
+                    "parking_real_frame_resumes_same_ride")
+        let finished = await finish(parked)
+        let excluded = finished.pauseState?.excluded.first
+        let removed = excluded.map { $0.endedAt.timeIntervalSince($0.startedAt) } ?? 0
+        try require(removed > 0 && abs(finished.elapsed
+            - ((finished.endedAt ?? .distantPast).timeIntervalSince(finished.startedAt) - removed)) < 0.002,
+                    "parking_saved_duration_excludes_short_stop")
+        let records = try rawRecords(finished)
+        try require(records.filter { $0.kind == "pause" }.count == 1
+            && records.filter { $0.kind == "pause_resumed" }.count == 1
+            && !records.contains { $0.kind == "gps_observation" || $0.diagnostic?.kind == "parking_idle_audit" },
+                    "parking_journal_has_boundaries_without_stationary_spam")
+        parked.setAutoRecord(false)
+
+        let timed = RideRecorder()
+        retainedRecorders.append(timed)
+        timed.observeBluetoothPeripheral(UUID())
+        timed.bluetoothChanged(true)
+        timed.bluetoothReadyForCapture()
+        timed.setAutoRecord(true)
+        let timedSample = Date()
+        timed.recordStreamFrame(at: timedSample)
+        timed.recordMeasurements([
+            .init(id: "wheel_speed", label: "Скорость", value: 0, unit: "км/ч",
+                  timestamp: timedSample, source: "simulator audit")
+        ])
+        timed.bluetoothChanged(false)
+        guard let timedID = timed.active?.id, let cutoff = timed.active?.pauseState?.pausedAt else {
+            throw AuditFailure(message: "timer pause fixture did not pause")
+        }
+        // The icon/GATT can return without a single useful frame. Finishing
+        // this pause must not immediately start another empty ride.
+        timed.bluetoothChanged(true)
+        timed.bluetoothReadyForCapture()
+        timed.evaluateAutomaticPause(at: cutoff.addingTimeInterval(900))
+        timed.evaluateAutomaticPause(at: cutoff.addingTimeInterval(901))
+        injectSample(into: timed, value: 9_999)
+        try await waitUntil { timed.active == nil && !timed.finishingRide }
+        guard let timerSaved = timed.history.first(where: { $0.id == timedID }) else {
+            throw AuditFailure(message: "timer did not save the parked ride")
+        }
+        try require(abs((timerSaved.endedAt ?? .distantPast).timeIntervalSince(cutoff)) < 0.002
+            && timerSaved.telemetryCount == 1,
+                    "parking_live_timeout_uses_stop_boundary_and_rejects_late_packets")
+        try require(try rawRecords(timerSaved).filter { $0.kind == "finished" }.count == 1,
+                    "parking_repeated_timeout_does_not_duplicate_finish")
+        timed.bluetoothReadyForCapture()
+        let waiting = RideRecorder()
+        retainedRecorders.append(waiting)
+        waiting.observeBluetoothPeripheral(UUID())
+        waiting.bluetoothChanged(true)
+        waiting.bluetoothReadyForCapture()
+        try require(timed.active == nil && waiting.active == nil && waiting.autoRecord,
+                    "parking_timeout_does_not_create_empty_rides_even_after_relaunch")
+        waiting.setAutoRecord(false)
+        timed.recordStreamFrame(at: Date())
+        try require(timed.active != nil && timed.active?.id != timedID,
+                    "parking_next_real_frame_starts_new_automatic_ride")
+        _ = await finish(timed)
+        timed.setAutoRecord(false)
+
+        let archive = try RideArchive()
+        let recoveryStart = Date().addingTimeInterval(-360)
+        let recoveryStop = recoveryStart.addingTimeInterval(240)
+        var recoveryPause = RidePausePolicy()
+        recoveryPause.recordActivity(at: recoveryStop)
+        recoveryPause.observeBikeSpeed(0, at: recoveryStop)
+        recoveryPause.transportDisconnected(at: recoveryStop)
+        var recoverySeed = RideSummary(id: UUID(), startedAt: recoveryStart,
+                                       lastSavedAt: recoveryStop, trigger: "manual")
+        recoverySeed.pauseState = recoveryPause
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            archive.append([RideRecord(kind: "started", timestamp: recoveryStart),
+                            RideRecord(kind: "pause", timestamp: recoveryStop)],
+                           summary: recoverySeed, forceCheckpoint: true) { continuation.resume(with: $0) }
+        }
+        let recovering = RideRecorder()
+        retainedRecorders.append(recovering)
+        try require(recovering.restoringRoute && recovering.recordingPaused,
+                    "parking_short_pause_is_restored_before_route_load")
+        let resumedAt = Date()
+        recovering.recordStreamFrame(at: resumedAt)
+        recovering.recordMeasurements([
+            .init(id: "engine_speed", label: "Обороты", value: 1_500, unit: "об/мин",
+                  timestamp: resumedAt, source: "simulator audit")
+        ])
+        try await waitUntil { !recovering.restoringRoute }
+        try require(recovering.active?.id == recoverySeed.id && !recovering.recordingPaused
+            && recovering.active?.telemetryCount == 1
+            && recovering.active?.pauseState?.excluded.count == 1,
+                    "parking_live_resume_survives_concurrent_route_recovery")
+        let recoveryFinished = await finish(recovering)
+        try require(abs(recoveryFinished.recordingSeconds(at: resumedAt) - 240) < 0.002,
+                    "parking_recovery_keeps_real_dates_and_compressed_clock")
+
+        // A real manifest/checkpoint from a pause already older than 15 minutes.
+        // Startup must close it without another button press or a live GPS fix.
+        let start = Date().addingTimeInterval(-4_000)
+        let stoppedAt = start.addingTimeInterval(3_000)
+        var policy = RidePausePolicy()
+        policy.recordActivity(at: stoppedAt)
+        policy.observeBikeSpeed(0, at: stoppedAt)
+        policy.transportDisconnected(at: stoppedAt)
+        var seed = RideSummary(id: UUID(), startedAt: start, lastSavedAt: stoppedAt, trigger: "manual")
+        seed.pauseState = policy
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            archive.append([RideRecord(kind: "started", timestamp: start),
+                            RideRecord(kind: "pause", timestamp: stoppedAt)],
+                           summary: seed, forceCheckpoint: true) { continuation.resume(with: $0) }
+        }
+        let restored = RideRecorder()
+        retainedRecorders.append(restored)
+        try require(restored.finishRequested && restored.active?.id == seed.id,
+                    "parking_expired_pause_blocks_capture_during_relaunch")
+        injectSample(into: restored, value: 9_999)
+        try await waitUntil { restored.active == nil && !restored.finishingRide && !restored.restoringRoute }
+        guard let saved = restored.history.first(where: { $0.id == seed.id }) else {
+            throw AuditFailure(message: "expired parking ride did not finish after recovery")
+        }
+        try require(abs((saved.endedAt ?? .distantPast).timeIntervalSince(stoppedAt)) < 0.002
+            && abs(saved.elapsed - 3_000) < 0.002 && saved.telemetryCount == 0
+            && RideFinishIntent.load(UserDefaults.standard) == nil,
+                    "parking_relaunch_trims_fifteen_minute_tail_at_original_stop")
+        let savedRecords = try rawRecords(saved)
+        try require(savedRecords.filter { $0.kind == "finished" }.count == 1
+            && !savedRecords.contains { $0.timestamp.timeIntervalSince(stoppedAt) > 0.002 && $0.kind != "summary_checkpoint" },
+                    "parking_timeout_is_saved_once_without_waiting_tail")
+
+        // History, graph clock and map-gap derivation must agree on a stop.
+        var short = RidePausePolicy()
+        short.recordActivity(at: start.addingTimeInterval(2_400))
+        short.observeBikeSpeed(0, at: start.addingTimeInterval(2_400))
+        short.transportDisconnected(at: start.addingTimeInterval(2_400))
+        short.streamReturned(at: start.addingTimeInterval(2_780))
+        var chartRide = RideSummary(id: UUID(), startedAt: start, endedAt: start.addingTimeInterval(2_840),
+                                   lastSavedAt: start.addingTimeInterval(2_840), trigger: "simulator")
+        chartRide.pauseState = short
+        let boundaryPoints = [2_400.0, 2_780.0].enumerated().map { index, offset in
+            TrackPoint(timestamp: start.addingTimeInterval(offset), latitude: 1, longitude: 1,
+                       altitude: nil, accuracy: 5, speed: 0, segment: index)
+        }
+        let boundaryRecords = boundaryPoints.map { RideRecord(kind: "gps", timestamp: $0.timestamp, point: $0) }
+        try require(chartRide.elapsed == 2_460 && chartRide.recordingSeconds(at: boundaryPoints[1].timestamp) == 2_400
+            && !gpsGaps(in: boundaryRecords, ride: chartRide).contains {
+                $0.startedAt == boundaryPoints[0].timestamp && $0.endedAt == boundaryPoints[1].timestamp
+            }, "parking_history_graph_and_route_share_compressed_timeline")
+        try require(restored.error == nil && parked.error == nil && recovering.error == nil && timed.error == nil
+            && waiting.error == nil,
+                    "parking_archive_remains_error_free")
+    }
+
+    private func rawRecords(_ summary: RideSummary) throws -> [RideRecord] {
+        let path = try rideDirectory().appendingPathComponent(summary.id.uuidString + ".jsonl")
+        let decoder = RideJournalDates.decoder()
+        var records: [RideRecord] = []
+        try CaptureJournalExport.forEachLine(in: path) { records.append(try decoder.decode(RideRecord.self, from: $0)) }
+        return records
     }
 
     private func injectSample(into recorder: RideRecorder, value: Double) {

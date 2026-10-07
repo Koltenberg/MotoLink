@@ -18,6 +18,37 @@ enum GPSSpeedQuality {
     }
 }
 
+/// One apparently good fix surrounded by uncertain observations is not a
+/// recovered GPS signal. Require two consecutive good, ordered fixes after
+/// startup, a bad observation, or a silence. No speed cap tied to a bike model,
+/// interpolation, or smoothing: once recovered, return every current value.
+struct GPSSpeedRecovery {
+    static let version = 2
+    static let maximumGap: TimeInterval = 15
+    private var previousObservationAt: Date?
+    private var candidateAt: Date?
+
+    mutating func reset() { previousObservationAt = nil; candidateAt = nil }
+
+    mutating func accept(speed: Double, speedAccuracy: Double, horizontalAccuracy: Double,
+                         courseAccuracy: Double, at date: Date) -> Double? {
+        guard date.timeIntervalSince1970.isFinite else { candidateAt = nil; return nil }
+        // A duplicated/cached fix is never the second confirmation and cannot
+        // destroy a newer live baseline.
+        guard previousObservationAt == nil || date > previousObservationAt! else { return nil }
+        previousObservationAt = date
+        guard let value = GPSSpeedQuality.accepted(speed: speed, speedAccuracy: speedAccuracy,
+            horizontalAccuracy: horizontalAccuracy, courseAccuracy: courseAccuracy) else {
+            candidateAt = nil
+            return nil
+        }
+        let previous = candidateAt
+        candidateAt = date
+        guard let previous, date.timeIntervalSince(previous) <= Self.maximumGap else { return nil }
+        return value
+    }
+}
+
 /// Counts observed stream intervals, not the duration of the Bluetooth icon.
 /// Missing intervals and app restarts must never be reported as captured data.
 struct RideTelemetryCoverage: Codable, Equatable {

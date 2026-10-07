@@ -27,6 +27,7 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
     private var tracking = false
     private var locationRunning = false
     private let location = CLLocationManager()
+    private var gpsRecovery = GPSSpeedRecovery()
     private var companion = CompanionData()
     private var companionLoaded = false
     private var initialOdometer: Double?
@@ -122,6 +123,7 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
         // to a newly selected friend's motorcycle; those totals stay separate.
         if saved.garageBikeID == nil { saved.garageBikeID = bikeID; changed() }
         guard saved.garageBikeID == bikeID else { return }
+        defer { reconcileConfirmedMinimum(bikeID: bikeID) }
         struct Reading { let value: Double; let date: Date; let key: String }
         var candidates: [Reading] = []
         if let value = companion.odometerKm, let date = companion.odometerRecordedAt, date <= Date() {
@@ -179,6 +181,31 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
         checkpoint(force: true)
     }
 
+    /// The garage already displays the highest confirmed instrument reading.
+    /// An older/smaller profile anchor must not hide hundreds of newly counted
+    /// kilometres underneath that minimum. Start future estimates at the known
+    /// minimum without fabricating distance for the unobserved past.
+    private func reconcileConfirmedMinimum(bikeID: UUID) {
+        guard let physical = companion.currentOdometerKm,
+              let estimate = saved.ledger.estimatedOdometerKilometers(bikeID: bikeID),
+              estimate < physical else { return }
+        do { try saved.ledger.setOdometer(kilometers: physical, bikeID: bikeID, at: Date()) }
+        catch { error = "Не удалось согласовать показания одометра."; return }
+        changed()
+        checkpoint(force: true)
+    }
+
+    /// Explicit backup includes the current in-memory aggregate, not a stale
+    /// ten-second disk checkpoint. It contains no route or raw radio packets.
+    func exportSnapshot() throws -> Data {
+        guard readable else {
+            throw NSError(domain: "MotoLink.Mileage", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Счётчик пробега пока недоступен."])
+        }
+        try saved.ledger.validate()
+        return try JSONEncoder().encode(saved)
+    }
+
     private func updateTracking() {
         let shouldTrack = readable && enabled && (connected || detailed) && bikeID != nil
         if shouldTrack != tracking, let bikeID {
@@ -196,6 +223,7 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
             (location.authorizationStatus == .authorizedWhenInUse && UIApplication.shared.applicationState == .active)
         let needed = tracking && !recorderSuppliesGPS && allowed
         guard needed != locationRunning else { return }
+        gpsRecovery.reset()
         locationRunning = needed
         if needed { location.startUpdatingLocation() }
         else { location.stopUpdatingLocation(); onLiveGPSSpeed?(nil, nil) }
@@ -274,8 +302,12 @@ final class MileageTracker: NSObject, ObservableObject, CLLocationManagerDelegat
         guard locationRunning else { return }
         let receivedAt = Date()
         for fix in locations.sorted(by: { $0.timestamp < $1.timestamp }) {
-            guard let speed = GPSSpeedQuality.accepted(speed: fix.speed, speedAccuracy: fix.speedAccuracy,
-                horizontalAccuracy: fix.horizontalAccuracy, courseAccuracy: fix.courseAccuracy) else { continue }
+            guard (0...3).contains(receivedAt.timeIntervalSince(fix.timestamp)) else { continue }
+            guard let speed = gpsRecovery.accept(speed: fix.speed, speedAccuracy: fix.speedAccuracy,
+                horizontalAccuracy: fix.horizontalAccuracy, courseAccuracy: fix.courseAccuracy, at: fix.timestamp) else {
+                onLiveGPSSpeed?(nil, nil)
+                continue
+            }
             recordGPSSpeed(speed, at: fix.timestamp, receivedAt: receivedAt, forDashboard: true)
         }
     }

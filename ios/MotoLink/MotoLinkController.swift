@@ -15,6 +15,7 @@ final class MotoLinkController: ObservableObject {
     private var subscriptions = Set<AnyCancellable>()
 
     private init() {
+        companion.mileageExportSnapshot = { [mileage] in try mileage.exportSnapshot() }
         mileage.onUpdate = { [weak self] estimate, distance in
             self?.companion.updateTrackedOdometer(estimate)
             self?.companion.updateTrackedDistance(distance)
@@ -91,6 +92,7 @@ final class MotoLinkController: ObservableObject {
             }.store(in: &subscriptions)
         Timer.publish(every: 15, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             guard let self else { return }
+            self.rides.evaluateAutomaticPause()
             let recording = self.rides.active != nil
             guard recording || self.bluetooth.connected || self.bluetooth.connecting || self.bluetooth.ready else { return }
             // BLE observation and the single known stream rearm also work when

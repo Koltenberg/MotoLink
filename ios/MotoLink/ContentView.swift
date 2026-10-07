@@ -171,7 +171,7 @@ struct ContentView: View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             Button { selectedTab = 1 } label: {
                 HStack(spacing: 10) {
-                    Image(systemName: "record.circle.fill").foregroundStyle(MotoTheme.accent)
+                    Image(systemName: rides.recordingPaused ? "pause.circle.fill" : "record.circle.fill").foregroundStyle(MotoTheme.accent)
                     Text(recordingSource(at: context.date)).font(MotoTheme.font(.subheadline))
                     Spacer(minLength: 4)
                     Image(systemName: "chevron.right")
@@ -337,7 +337,8 @@ struct ContentView: View {
                         .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                 }
                 if displayedRide != nil && state != .receiving {
-                    Text(rides.gpsStatus(at: context.date) == nil
+                    Text(rides.recordingPaused ? "Пауза. Вернёшься в течение 15 минут — продолжим эту поездку."
+                         : rides.gpsStatus(at: context.date) == nil
                          ? "Маршрут по GPS продолжает записываться."
                          : "Запись открыта · ждём данные байка или GPS.")
                         .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
@@ -359,7 +360,7 @@ struct ContentView: View {
             if let ride = displayedRide {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     HStack {
-                        metric("Время", value: duration(context.date.timeIntervalSince(ride.startedAt)))
+                        metric("Время", value: duration(ride.recordingSeconds(at: context.date)))
                         Spacer()
                         metric("Путь GPS", value: String(format: "%.1f км", ride.distanceMeters / 1000))
                     }
@@ -771,6 +772,7 @@ struct ContentView: View {
     }
 
     private func recordingSource(at now: Date) -> String {
+        if rides.recordingPaused { return "Пауза · ждём байк" }
         if rides.finishingRide { return "Сохраняем поездку…" }
         if rides.finishRequested { return "Нужно сохранить поездку" }
         let bike = liveConnection(at: now) == .receiving
@@ -809,7 +811,7 @@ struct ContentView: View {
                             Text(rides.finishRequested ? "Повтори сохранение" : recordingSource(at: context.date))
                                 .font(MotoTheme.font(.headline))
                             if let ride = displayedRide {
-                                Text(duration(context.date.timeIntervalSince(ride.startedAt))
+                                Text(duration(ride.recordingSeconds(at: context.date))
                                      + " · " + String(format: "%.1f км", ride.distanceMeters / 1000))
                                     .font(MotoTheme.font(.subheadline).monospacedDigit())
                                     .foregroundStyle(MotoTheme.secondary)

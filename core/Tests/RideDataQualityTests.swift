@@ -2,6 +2,60 @@ import XCTest
 @testable import MotoLinkCore
 
 final class RideDataQualityTests: XCTestCase {
+    func testIsolatedQualityIslandAfterGPSOutageNeverBecomesMaximum() {
+        var filter = GPSSpeedRecovery()
+        let start = Date(timeIntervalSince1970: 1000)
+        let observations: [(Double, Double, Double)] = [
+            (68, 26, 180), (68, 25, 98), (65, 14, 106),
+            (64, 13, 97), (63.7, 13, 25), (63.5, 14, 180), (59, 21, 180)]
+        for (index, sample) in observations.enumerated() {
+            XCTAssertNil(filter.accept(speed: sample.0, speedAccuracy: 1.3,
+                horizontalAccuracy: sample.1, courseAccuracy: sample.2,
+                at: start.addingTimeInterval(Double(index))))
+        }
+        XCTAssertNil(filter.accept(speed: 42, speedAccuracy: 1, horizontalAccuracy: 5,
+            courseAccuracy: 3, at: start.addingTimeInterval(8)))
+        XCTAssertEqual(filter.accept(speed: 42.3, speedAccuracy: 1, horizontalAccuracy: 5,
+            courseAccuracy: 3, at: start.addingTimeInterval(9)), 42.3)
+    }
+
+    func testRecoveryDoesNotSmoothFastOrStationaryValidData() {
+        var filter = GPSSpeedRecovery()
+        let start = Date(timeIntervalSince1970: 1000)
+        XCTAssertNil(filter.accept(speed: 60, speedAccuracy: 1, horizontalAccuracy: 5,
+            courseAccuracy: 3, at: start))
+        for (index, speed) in [61.0, 60.5, 57, 45, 15, 0].enumerated() {
+            XCTAssertEqual(filter.accept(speed: speed, speedAccuracy: 1, horizontalAccuracy: 5,
+                courseAccuracy: speed == 0 ? -1 : 3,
+                at: start.addingTimeInterval(Double(index + 1))), speed)
+        }
+    }
+
+    func testRecoveryCannotBeConfirmedByDuplicatesOrAcrossLongSilence() {
+        var filter = GPSSpeedRecovery()
+        func receive(_ time: Double) -> Double? {
+            filter.accept(speed: 10, speedAccuracy: 1, horizontalAccuracy: 5, courseAccuracy: 3,
+                          at: Date(timeIntervalSince1970: time))
+        }
+        XCTAssertNil(receive(1000))
+        XCTAssertNil(receive(1000))
+        XCTAssertNil(receive(999))
+        XCTAssertEqual(receive(1001), 10)
+        XCTAssertNil(receive(1020))
+        XCTAssertEqual(receive(1021), 10)
+        filter.reset()
+        XCTAssertNil(receive(1022))
+    }
+
+    func testPoorStationaryPositionStillBreaksRecovery() {
+        var filter = GPSSpeedRecovery()
+        for (index, accuracy) in [5.0, 5, 200, 5, 5].enumerated() {
+            let result = filter.accept(speed: 0, speedAccuracy: 1, horizontalAccuracy: accuracy,
+                courseAccuracy: -1, at: Date(timeIntervalSince1970: 1000 + Double(index)))
+            if index == 1 || index == 4 { XCTAssertEqual(result, 0) }
+            else { XCTAssertNil(result) }
+        }
+    }
     func testRecordedGPSOutageSpikeIsNotARecordSpeed() {
         XCTAssertNil(GPSSpeedQuality.accepted(speed: 86.85391998291016,
             speedAccuracy: 1.1597, horizontalAccuracy: 23.0685, courseAccuracy: 180))

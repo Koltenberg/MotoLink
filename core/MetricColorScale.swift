@@ -4,6 +4,9 @@ enum MetricColorKind: String, CaseIterable, Codable, Identifiable {
     case speed, engineSpeed, coolantTemperature, inletTemperature, throttle, gear, voltage
 
     var id: String { rawValue }
+    // Keep the legacy Codable case for saved preferences, but gears are
+    // categories, not increasing danger/temperature levels.
+    static var configurable: [Self] { allCases.filter { $0 != .gear } }
     var title: String {
         switch self {
         case .speed: return "Скорость"
@@ -59,7 +62,7 @@ enum MetricColorKind: String, CaseIterable, Codable, Identifiable {
         case "engine_water_temperature": return .coolantTemperature
         case "inlet_air_temperature": return .inletTemperature
         case "throttle_position": return .throttle
-        case "gear_position": return .gear
+        case "gear_position": return nil
         case "ecu_battery12V": return .voltage
         default: return nil
         }
@@ -210,12 +213,14 @@ struct MetricColorPreferences: Codable, Equatable {
     }
 
     func save(to defaults: UserDefaults = .standard) throws {
-        for kind in MetricColorKind.allCases {
+        for kind in MetricColorKind.configurable {
             if let scale = scales[kind.rawValue], !scale.errors(for: kind).isEmpty {
                 throw NSError(domain: "MotoLink.MetricColorScale", code: 1,
                               userInfo: [NSLocalizedDescriptionKey: "Проверьте границы цветовой шкалы."])
             }
         }
-        defaults.set(try JSONEncoder().encode(self), forKey: Self.storageKey)
+        var editable = self
+        editable.scales.removeValue(forKey: MetricColorKind.gear.rawValue)
+        defaults.set(try JSONEncoder().encode(editable), forKey: Self.storageKey)
     }
 }

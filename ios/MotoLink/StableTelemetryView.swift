@@ -566,7 +566,7 @@ struct MetricVisualSettingsView: View {
     var body: some View {
         Form {
             PixelSection("Показатели") {
-                ForEach(MetricColorKind.allCases) { kind in
+                ForEach(MetricColorKind.configurable) { kind in
                     NavigationLink {
                         MetricColorEditorView(kind: kind, previewScale: preview ? preferences[kind] : nil)
                     } label: {

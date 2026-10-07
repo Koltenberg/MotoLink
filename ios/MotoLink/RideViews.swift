@@ -20,7 +20,7 @@ struct RidePanel: View {
                         HStack(alignment: .top) {
                             value("РАССТОЯНИЕ GPS", String(format: "%.2f км", ride.distanceMeters / 1000))
                             Spacer()
-                            value("ВРЕМЯ", duration(context.date.timeIntervalSince(ride.startedAt)))
+                            value("ВРЕМЯ", duration(ride.recordingSeconds(at: context.date)))
                             Spacer()
                             value("СКОРОСТЬ GPS", freshSpeed(at: context.date))
                         }
@@ -666,7 +666,7 @@ private struct RideTrend: Identifiable {
         ]
         let indices = Dictionary(uniqueKeysWithValues: definitions.enumerated().map { ($0.element.id, $0.offset) })
         let binCount = 160
-        let span = max(1, (ride.endedAt ?? ride.lastSavedAt).timeIntervalSince(ride.startedAt))
+        let span = max(1, ride.recordingSeconds(at: ride.endedAt ?? ride.lastSavedAt))
         var series = definitions.map { definition in
             RideChartSeries(binCount: binCount, span: span,
                             maximumSilence: definition.id == "gps_speed" ? 20 : 15)
@@ -675,7 +675,7 @@ private struct RideTrend: Identifiable {
         var previousGPSSegment: Int?
 
         for record in records {
-            if record.kind == "gap" {
+            if ["gap", "pause", "pause_resumed", "data_gap"].contains(record.kind) {
                 interrupted = Array(repeating: true, count: definitions.count)
             } else if record.kind == "bluetooth", record.detail == "disconnected" {
                 for index in definitions.indices where definitions[index].id != "gps_speed" {
@@ -694,7 +694,7 @@ private struct RideTrend: Identifiable {
                 value = speed * 3.6
             } else { continue }
             guard let metricIndex = indices[id], value.isFinite else { continue }
-            let offset = record.timestamp.timeIntervalSince(ride.startedAt)
+            let offset = ride.recordingSeconds(at: record.timestamp)
             if id == "gps_speed", let segment = record.point?.segment,
                let previousGPSSegment, segment != previousGPSSegment {
                 interrupted[metricIndex] = true

@@ -51,13 +51,23 @@ struct RideSummary: Codable, Identifiable, JournalRecoverableSummary, RideHistor
     var gpsSpeedQualityVersion: Int? = nil
     var acceptedSpeedCount: Int? = nil
     var streamCoverage: RideTelemetryCoverage? = nil
+    var pauseState: RidePausePolicy? = nil
     var title: String? = nil
     var note: String? = nil
     var metadataUpdatedAt: Date? = nil
     // Optional so manifests and checkpoints from all earlier versions decode.
     var favorite: Bool? = nil
     var isFavorite: Bool { favorite ?? false }
-    var elapsed: TimeInterval { max(0, (endedAt ?? Date()).timeIntervalSince(startedAt)) }
+    var elapsed: TimeInterval { recordingSeconds(at: endedAt ?? Date()) }
+    func recordingSeconds(at date: Date) -> TimeInterval {
+        let end = min(date, endedAt ?? date)
+        return pauseState?.recordedSeconds(from: startedAt, to: end)
+            ?? max(0, end.timeIntervalSince(startedAt))
+    }
+    func excludesStationaryGap(from start: Date, to end: Date) -> Bool {
+        guard let pauseState, pauseState.containsParkingPause(between: start, and: end) else { return false }
+        return pauseState.nonParkingSeconds(from: start, to: end) <= GPSContinuity.gapInterval
+    }
 }
 
 struct RideRecord: Codable {
@@ -78,10 +88,10 @@ struct RideRecord: Codable {
 /// Older JSONL has only segment IDs. Derive missing gap descriptions with stable
 /// IDs so a user-requested estimate can still be saved and found on the next visit.
 func gpsGaps(in records: [RideRecord], ride: RideSummary) -> [GPSGap] {
-    var gaps = records.compactMap(\.gap)
+    var gaps = records.compactMap(\.gap).filter { !ride.excludesStationaryGap(from: $0.startedAt, to: $0.endedAt) }
     let points = records.compactMap(\.point)
     func add(_ start: Date, _ end: Date, _ from: GPSCoordinate?, _ to: GPSCoordinate?, _ reason: String) {
-        guard end > start, !gaps.contains(where: {
+        guard end > start, !ride.excludesStationaryGap(from: start, to: end), !gaps.contains(where: {
             abs($0.startedAt.timeIntervalSince(start)) < 1 && abs($0.endedAt.timeIntervalSince(end)) < 1
         }) else { return }
         let identifier = "legacy-\(ride.id.uuidString)-\(Int64(start.timeIntervalSince1970 * 1000))-\(Int64(end.timeIntervalSince1970 * 1000))"
@@ -513,12 +523,15 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     var onNewRideStarted: ((UUID) -> Void)?
     /// Accepted GPS speeds can also feed the separate compact mileage ledger.
     var onAcceptedGPSSpeed: ((Double, Date, Date) -> Void)?
+    var recordingPaused: Bool { active?.pauseState?.pausedAt != nil }
 
     private let location = CLLocationManager()
     private var archive: RideArchive?
     private var historyRevision: UInt64 = 0
     private var bluetoothConnected = false
     private static let automaticFinishKey = "MotoLink.autoRecordFinishedPeripheral"
+    private static let afterParkingStreamKey = "MotoLink.autoRecordAfterParkingNeedsStream"
+    private var afterParkingNeedsStream = UserDefaults.standard.bool(forKey: RideRecorder.afterParkingStreamKey)
     private var automation = RideAutomationPolicy(stoppedPeripheralID:
         UserDefaults.standard.string(forKey: RideRecorder.automaticFinishKey).flatMap(UUID.init(uuidString:)))
     private var pendingManualStart = false
@@ -526,6 +539,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private var measurementSampling = RideMeasurementSampling()
     private var previous: CLLocation?
     private var distanceAnchor: CLLocation?
+    private var gpsRecovery = GPSSpeedRecovery()
     private var locationRunning = false
     private var segment = 0
     private var cancellables = Set<AnyCancellable>()
@@ -545,6 +559,10 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     private var batteryMonitoringBeforeRide: Bool?
     private var pendingFinish: (summary: RideSummary, records: [RideRecord], gaps: [GPSGap])?
     private var finishAfterRestoration = false
+    // Route recovery runs off the main queue. Replay only the small policy
+    // inputs which arrived meanwhile onto its recovered checkpoint, so a
+    // returning stream cannot remain stuck in an old persisted parking pause.
+    private var restorationPauseUpdates: [(Date, (inout RidePausePolicy) -> Void)] = []
     private var restorationFinishCompletion: ((RideSummary) -> Void)?
 
     override init() {
@@ -558,6 +576,14 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             history = all.filter { $0.endedAt != nil }
             if var interrupted = all.first(where: { $0.endedAt == nil }) {
                 let saved = interrupted
+                if finishIntent?.rideID != interrupted.id,
+                   let cutoff = interrupted.pauseState?.expiredStop(at: Date()) {
+                    finishIntent = RideFinishIntent(rideID: interrupted.id, requestedAt: cutoff, automatic: true)
+                    finishIntent?.save(UserDefaults.standard)
+                }
+                if finishIntent?.rideID == interrupted.id, finishIntent?.automatic == true {
+                    setAfterParkingNeedsStream(true)
+                }
                 interrupted.interruptionCount += 1
                 interrupted.lastSavedAt = Date()
                 active = interrupted
@@ -596,7 +622,26 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                                 coverage.mergeLiveDelta(liveCoverage, since: interrupted.streamCoverage)
                                 repaired.streamCoverage = coverage
                             }
+                            if !self.restorationPauseUpdates.isEmpty {
+                                var pause = repaired.pauseState ?? RidePausePolicy()
+                                for (date, update) in self.restorationPauseUpdates {
+                                    if let cutoff = pause.expiredStop(at: date) {
+                                        // A checkpoint can contain a newer stop
+                                        // than the small manifest read at launch.
+                                        if self.finishIntent?.rideID != restoredID {
+                                            self.finishIntent = RideFinishIntent(rideID: restoredID,
+                                                requestedAt: cutoff, automatic: true)
+                                            self.finishIntent?.save(UserDefaults.standard)
+                                        }
+                                        self.finishAfterRestoration = true
+                                        break
+                                    }
+                                    update(&pause)
+                                }
+                                repaired.pauseState = pause
+                            }
                         }
+                        self.restorationPauseUpdates.removeAll()
                         self.points = records.compactMap(\.point)
                         self.gaps = gpsGaps(in: records, ride: repaired)
                         self.lastLocationAt = self.points.last?.timestamp
@@ -636,6 +681,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                         }
                         self.active = repaired
                     case .failure(let failure):
+                        self.restorationPauseUpdates.removeAll()
                         self.error = "Не удалось восстановить все точки поездки: \(failure.localizedDescription)"
                     }
                     if self.finishAfterRestoration {
@@ -646,6 +692,8 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                         self.stop(completion: completion)
                         return
                     }
+                    self.evaluateAutomaticPause()
+                    guard !self.finishRequested, !self.finishingRide else { return }
                     self.append([RideRecord(kind: "gap", timestamp: Date(), detail: "Процесс перезапущен; маршрут возобновляется новым сегментом")])
                     self.resume()
                 }
@@ -724,6 +772,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
             status = "Запись данных мотоцикла продолжается без маршрута"; return
         }
         markGPSGap("Запись геопозиции возобновлена")
+        gpsRecovery.reset()
         previous = nil
         distanceAnchor = nil
         segment += 1
@@ -732,17 +781,22 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         status = "Запись маршрута · GPS iPhone"
     }
 
-    func stop(completion: ((RideSummary) -> Void)? = nil) {
+    func stop(endingAt: Date? = nil, automatic: Bool = false,
+              completion: ((RideSummary) -> Void)? = nil) {
         // A delayed GPS permission reply cannot resurrect a manually finished
         // ride, including a permission request predating automatic BLE capture.
         pendingManualStart = false
         guard let requestedRide = active else { return }
         if finishIntent?.rideID != requestedRide.id {
-            finishIntent = RideFinishIntent(rideID: requestedRide.id, requestedAt: Date())
+            finishIntent = RideFinishIntent(rideID: requestedRide.id,
+                requestedAt: endingAt ?? requestedRide.pauseState?.pausedAt ?? Date(), automatic: automatic)
             finishIntent?.save(UserDefaults.standard)
-            automation.userRequestedFinish(transportConnected: bluetoothConnected)
-            persistAutomationFinishMarker()
+            if !automatic {
+                automation.userRequestedFinish(transportConnected: bluetoothConnected)
+                persistAutomationFinishMarker()
+            }
         }
+        if finishIntent?.automatic == true { setAfterParkingNeedsStream(true) }
         if restoringRoute {
             finishAfterRestoration = true
             finishRequested = true
@@ -821,19 +875,64 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func bluetoothChanged(_ connected: Bool) {
+        evaluateAutomaticPause()
         let changed = bluetoothConnected != connected
         bluetoothConnected = connected
         if !connected { active?.streamCoverage?.endSegment() }
         if connected {
             if active != nil { resume() }
         } else {
-            // Radio loss cannot distinguish an engine stop from interference.
-            // Keep this same locally saved ride until the rider finishes it.
             automation.transportDisconnected()
+            if changed {
+                let date = Date()
+                updatePauseState(at: date) { $0.transportDisconnected(at: date) }
+            }
         }
         if changed, active != nil {
             append([RideRecord(kind: "bluetooth", timestamp: Date(), detail: connected ? "connected" : "disconnected")])
         }
+    }
+
+    func evaluateAutomaticPause(at date: Date = Date()) {
+        guard let ride = active, !finishRequested, !finishingRide,
+              let cutoff = ride.pauseState?.expiredStop(at: date) else { return }
+        // Persist the old stop time, never the later time at which iOS wakes
+        // this process. No fifteen-minute stationary tail needs to be deleted.
+        stop(endingAt: cutoff, automatic: true)
+    }
+
+    private func updatePauseState(at date: Date, _ update: @escaping (inout RidePausePolicy) -> Void) {
+        guard var summary = active, !finishRequested else { return }
+        if restoringRoute { restorationPauseUpdates.append((date, update)) }
+        let previousState = summary.pauseState ?? RidePausePolicy()
+        var next = previousState
+        update(&next)
+        guard next != previousState else { return }
+        summary.pauseState = next
+        active = summary
+        let wasPaused = previousState.pausedAt != nil
+        let paused = next.pausedAt != nil
+        let newInterval = next.excluded != previousState.excluded
+        guard wasPaused != paused || newInterval else { return }
+        if wasPaused != paused {
+            previous = nil
+            distanceAnchor = nil
+            speedMS = nil
+            if paused {
+                status = "Пауза · ждём байк до 15 минут"
+                active?.streamCoverage?.endSegment()
+            } else {
+                pendingGPSGapReason = "Перерыв в поездке"
+                status = "Поездка продолжается"
+            }
+        }
+        guard var saved = active else { return }
+        saved.lastSavedAt = Date()
+        active = saved
+        let kind = wasPaused != paused ? (paused ? "pause" : "pause_resumed") : "data_gap"
+        let record = RideRecord(kind: kind, timestamp: date,
+            detail: paused ? "Стоянка: время и маршрут приостановлены; предел 15 минут" : "Шкала записи продолжена без пустого интервала")
+        archive?.append([record], summary: saved, forceCheckpoint: true)
     }
 
     /// Called synchronously after all notification channels are confirmed,
@@ -865,39 +964,62 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         if finishIntent?.rideID == rideID { finishIntent = nil }
     }
 
+    private func setAfterParkingNeedsStream(_ value: Bool) {
+        guard afterParkingNeedsStream != value else { return }
+        afterParkingNeedsStream = value
+        UserDefaults.standard.set(value, forKey: Self.afterParkingStreamKey)
+    }
+
     func recordMeasurements(_ measurements: [MotoProtocol.Measurement]) {
-        guard let summary = active, !finishRequested, !measurements.isEmpty else { return }
+        guard let summary = active, !finishRequested, !recordingPaused, !measurements.isEmpty else { return }
+        for sample in measurements where sample.id == "wheel_speed" && sample.unit == "км/ч"
+            && sample.timestamp >= summary.startedAt {
+            updatePauseState(at: sample.timestamp) { $0.observeBikeSpeed(sample.value / 3.6, at: sample.timestamp) }
+        }
         let sampled = measurements.filter { sample in
             sample.timestamp >= summary.startedAt && measurementSampling.accepts(id: sample.id, at: sample.timestamp)
         }
         guard !sampled.isEmpty else { return }
+        // Slow replies are useful observations too. A missing fast 4A stream
+        // must not compress time that still contains temperature/voltage data.
+        if let latest = sampled.filter({ $0.value.isFinite }).map(\.timestamp).max() {
+            updatePauseState(at: latest) { $0.recordActivity(at: latest) }
+        }
         active?.telemetryCount += sampled.count
         append(sampled.map { RideRecord(kind: "motorcycle", timestamp: $0.timestamp, measurement: $0) })
     }
 
     /// Called only for a structurally valid 4A, independently of decoding fields.
     func recordStreamFrame(at date: Date) {
+        evaluateAutomaticPause(at: date)
+        if afterParkingNeedsStream, bluetoothConnected, !finishRequested, !finishingRide,
+           date.timeIntervalSince1970.isFinite, (0...3).contains(Date().timeIntervalSince(date)) {
+            setAfterParkingNeedsStream(false)
+            evaluateAutoStart()
+        }
         guard let summary = active, !finishRequested, date >= summary.startedAt else { return }
+        updatePauseState(at: date) { $0.streamReturned(at: date) }
         if active?.streamCoverage == nil { active?.streamCoverage = RideTelemetryCoverage() }
         active?.streamCoverage?.receive(at: date)
     }
 
-    /// Raw packets are never sampled or pruned from a ride, including malformed
-    /// notifications which may become interpretable after the first road test.
+    /// Preserve unsampled raw packets during recording, including malformed
+    /// notifications. A confirmed parking pause retains only its boundaries.
     /// Attach the bounded connection context with one summary update and one
     /// disk-queue submission, rather than replaying hundreds of event callbacks at
     /// the exact instant the rider begins capture. Original event times remain
     /// inside each diagnostic, distinct from its import time into this ride.
     func recordDiagnosticPrelude(_ events: [DiagnosticEvent]) {
-        guard active != nil, !finishRequested, !events.isEmpty else { return }
+        guard active != nil, !finishRequested, !recordingPaused, !events.isEmpty else { return }
         active?.rawEventCount = (active?.rawEventCount ?? 0) + events.count
         let importedAt = Date()
         append(events.map { RideRecord(kind: "diagnostic", timestamp: importedAt, diagnostic: $0) })
     }
 
-    /// Every live packet still reaches this path independently of presentation.
+    /// Live packets reach this path independently of presentation; parking
+    /// periods do not repeatedly append radio-state diagnostics to the ride.
     func recordDiagnostic(_ event: DiagnosticEvent) {
-        guard active != nil, !finishRequested else { return }
+        guard active != nil, !finishRequested, !recordingPaused else { return }
         active?.rawEventCount = (active?.rawEventCount ?? 0) + 1
         append([RideRecord(kind: "diagnostic", timestamp: Date(), diagnostic: event)])
     }
@@ -910,7 +1032,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     /// One compact workload summary per minute, at a BLE loss, or at ride end.
     /// Only callback counts/ages/duration are saved, never extra coordinates.
     func recordGPSCallbackSummary(reason: String) {
-        guard active != nil, !finishRequested else { return }
+        guard active != nil, !finishRequested, !recordingPaused else { return }
         let now = Date()
         let uptime = ProcessInfo.processInfo.systemUptime
         if reason == "periodic" {
@@ -1161,12 +1283,16 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         // It must never replace an already active or restored journal.
         guard active == nil else { pendingManualStart = false; resume(); return }
         guard archive != nil else { status = "Хранилище недоступно — запись не начата"; return }
+        // A manual Start is an explicit request to record, including GPS only.
+        setAfterParkingNeedsStream(false)
         pendingManualStart = false
         pendingFinish = nil
         finishRequested = false
         restoringRoute = false
+        restorationPauseUpdates.removeAll()
         points = []; gaps = []; pendingGPSGapReason = nil
         segment = 0; previous = nil; distanceAnchor = nil; speedMS = nil; lastLocationAt = nil
+        gpsRecovery.reset()
         measurementSampling = RideMeasurementSampling()
         gpsCallbackWindowStartedAt = nil
         lastGPSCallbackUptime = nil
@@ -1181,7 +1307,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
         active = RideSummary(id: UUID(), startedAt: Date(), lastSavedAt: Date(), trigger: trigger)
         active?.recordedAppVersion = AppBuild.version
         active?.recordedAppBuild = AppBuild.number
-        active?.gpsSpeedQualityVersion = 1
+        active?.gpsSpeedQualityVersion = GPSSpeedRecovery.version
         active?.acceptedSpeedCount = 0
         active?.streamCoverage = RideTelemetryCoverage()
         beginBatteryMonitoring()
@@ -1200,7 +1326,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     private func evaluateAutoStart() {
-        guard bluetoothConnected, automation.shouldStart(enabled: autoRecord,
+        guard !afterParkingNeedsStream, bluetoothConnected, automation.shouldStart(enabled: autoRecord,
             hasActiveRide: active != nil, finishing: finishRequested || finishingRide) else { return }
         // BLE capture is useful with denied/missing GPS. Permission controls
         // location updates only, never whether motorcycle evidence is saved.
@@ -1208,18 +1334,22 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     private func resumeOnForeground() {
+        evaluateAutomaticPause()
         authorization = location.authorizationStatus
         if active != nil { resume() } else { evaluateAutoStart() }
     }
 
     private func append(_ records: [RideRecord]) {
         guard var summary = active, !finishRequested else { return }
+        let records = summary.pauseState?.pausedAt.map { cutoff in records.filter { $0.timestamp <= cutoff } } ?? records
+        guard !records.isEmpty else { return }
         summary.lastSavedAt = Date(); active = summary
         archive?.append(records, summary: summary)
     }
 
     func gpsStatus(at date: Date) -> String? {
         guard active != nil else { return nil }
+        if recordingPaused { return "Пауза · ждём возвращения байка" }
         guard let lastLocationAt else { return "Нет GPS: ожидаем первую точную точку. Поездка продолжается." }
         guard pendingGPSGapReason != nil || date.timeIntervalSince(lastLocationAt) > GPSContinuity.staleInterval else { return nil }
         return "Нет свежих данных GPS. Последняя точка: \(lastLocationAt.formatted(date: .omitted, time: .standard)). Поездка и запись доступной телеметрии продолжаются."
@@ -1254,22 +1384,43 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        evaluateAutomaticPause()
         guard let startedAt = active?.startedAt, !finishRequested else { return }
         let receivedAt = Date()
         let callbackStartedUptime = ProcessInfo.processInfo.systemUptime
         var records: [RideRecord] = []
         for fix in locations.sorted(by: { $0.timestamp < $1.timestamp }) {
+            let validTimestamp = GPSContinuity.acceptsTimestamp(fix.timestamp, startedAt: startedAt,
+                previous: points.last?.timestamp, now: receivedAt)
+            let validPosition = CLLocationCoordinate2DIsValid(fix.coordinate)
+                && fix.horizontalAccuracy >= 0 && fix.horizontalAccuracy <= 50
+            let speed = validTimestamp && validPosition ? gpsRecovery.accept(speed: fix.speed, speedAccuracy: fix.speedAccuracy,
+                horizontalAccuracy: fix.horizontalAccuracy, courseAccuracy: fix.courseAccuracy, at: fix.timestamp) : nil
+            if !validPosition { gpsRecovery.reset() }
+            if validTimestamp && (0...3).contains(receivedAt.timeIntervalSince(fix.timestamp)) {
+                updatePauseState(at: fix.timestamp) { state in
+                    if let speed { state.observeGPSSpeed(speed, at: fix.timestamp) }
+                    else { state.gpsUnavailable() }
+                }
+            }
+            // GPS may wake us to detect renewed movement, but a parking pause
+            // does not fill the journal with repeated coordinates/observations.
+            if let cutoff = active?.pauseState?.pausedAt, fix.timestamp > cutoff { continue }
             records.append(RideRecord(kind: "gps_observation", timestamp: fix.timestamp,
                 detail: "lat=\(fix.coordinate.latitude); lon=\(fix.coordinate.longitude); horizontalAccuracy=\(fix.horizontalAccuracy); altitude=\(fix.altitude); verticalAccuracy=\(fix.verticalAccuracy); speed=\(fix.speed); speedAccuracy=\(fix.speedAccuracy); course=\(fix.course); courseAccuracy=\(fix.courseAccuracy); fixTimestampUnix=\(fix.timestamp.timeIntervalSince1970); receivedAtUnix=\(receivedAt.timeIntervalSince1970)"))
-            guard GPSContinuity.acceptsTimestamp(fix.timestamp, startedAt: startedAt,
-                previous: points.last?.timestamp, now: Date()) else { continue }
-            guard fix.horizontalAccuracy >= 0, fix.horizontalAccuracy <= 50,
-                  CLLocationCoordinate2DIsValid(fix.coordinate) else {
+            guard validTimestamp else { continue }
+            guard validPosition else {
+                gpsRecovery.reset()
                 markGPSGap("Нет точной геопозиции; ненадёжная точка отклонена")
                 continue
             }
-            let speed = GPSSpeedQuality.accepted(speed: fix.speed, speedAccuracy: fix.speedAccuracy,
-                horizontalAccuracy: fix.horizontalAccuracy, courseAccuracy: fix.courseAccuracy)
+            // Keep the original observation above, but do not accumulate a
+            // coordinate-only zigzag during an unreliable GPS recovery. A new
+            // accepted segment never bridges the rejected interval.
+            guard let speed else {
+                markGPSGap("Ожидаем устойчивый сигнал GPS")
+                continue
+            }
             if let last = points.last {
                 let elapsed = fix.timestamp.timeIntervalSince(last.timestamp)
                 let distance = fix.distance(from: CLLocation(latitude: last.latitude, longitude: last.longitude))
@@ -1284,8 +1435,10 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                         from: last.gpsCoordinate,
                         to: GPSCoordinate(latitude: fix.coordinate.latitude, longitude: fix.coordinate.longitude),
                         reason: pendingGPSGapReason ?? "Нет принятых точек GPS более минуты")
-                    gaps.append(gap)
-                    records.append(RideRecord(kind: "gps_gap", timestamp: fix.timestamp, gap: gap))
+                    if active?.excludesStationaryGap(from: last.timestamp, to: fix.timestamp) != true {
+                        gaps.append(gap)
+                        records.append(RideRecord(kind: "gps_gap", timestamp: fix.timestamp, gap: gap))
+                    }
                     segment += 1
                     distanceAnchor = nil
                 }
@@ -1298,12 +1451,12 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                 records.append(RideRecord(kind: "gps_gap", timestamp: fix.timestamp, gap: gap))
             }
             pendingGPSGapReason = nil
+            updatePauseState(at: fix.timestamp) { $0.recordActivity(at: fix.timestamp) }
             // Advance the distance anchor only after accepting distance. Updating
             // it for every 10 m fix with 20 m accuracy would lose nearly all travel.
             if let anchor = distanceAnchor {
                 let distance = fix.distance(from: anchor)
-                let seconds = max(1, fix.timestamp.timeIntervalSince(anchor.timestamp))
-                let moving = (speed ?? distance / seconds) >= 1.5
+                let moving = speed >= 1.5
                 if moving, distance >= max(5, min(fix.horizontalAccuracy, anchor.horizontalAccuracy)) {
                     active?.distanceMeters += distance
                     distanceAnchor = fix
@@ -1314,12 +1467,10 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
                 accuracy: fix.horizontalAccuracy, speed: speed, segment: segment)
             points.append(point)
             active?.pointCount += 1
-            if let speed {
-                onAcceptedGPSSpeed?(speed, fix.timestamp, receivedAt)
-                let maximum = max(active?.maxSpeedMS ?? 0, speed)
-                active?.maxSpeedMS = maximum
-                active?.acceptedSpeedCount = (active?.acceptedSpeedCount ?? 0) + 1
-            }
+            onAcceptedGPSSpeed?(speed, fix.timestamp, receivedAt)
+            let maximum = max(active?.maxSpeedMS ?? 0, speed)
+            active?.maxSpeedMS = maximum
+            active?.acceptedSpeedCount = (active?.acceptedSpeedCount ?? 0) + 1
             records.append(RideRecord(kind: "gps", timestamp: fix.timestamp, point: point,
                                       distanceMeters: active?.distanceMeters))
             previous = fix; speedMS = speed; lastLocationAt = fix.timestamp
@@ -1332,6 +1483,7 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        gpsRecovery.reset()
         markGPSGap("GPS временно недоступен: \(error.localizedDescription)")
         if let error = error as? CLError, error.code == .locationUnknown {
             status = "Ожидаем точный GPS; поездка продолжает записываться"
