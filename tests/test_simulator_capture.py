@@ -582,6 +582,20 @@ class SimulatorCaptureTests(unittest.TestCase):
                       (self.output / "debug-attempt1" / "simulator-home.png").read_bytes())
         self.assertEqual(json.loads((self.output / "debug-attempt1" / "failure.json").read_text())["status"], "failed")
 
+    def test_retry_receives_full_bounded_budget_after_slow_first_attempt(self):
+        clock = [100.0]
+        budgets = []
+        def slow_failure(app, output, device_type, runtime, bundle, attempt, deadline, seed=None):
+            budgets.append(deadline - clock[0])
+            clock[0] += CAPTURE.CAPTURE_ATTEMPT_SECONDS - 50
+            raise CAPTURE.CaptureError("deliberate slow simulator failure")
+        with patch.object(CAPTURE.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(CAPTURE, "capture_attempt", side_effect=slow_failure):
+            with self.assertRaisesRegex(CAPTURE.CaptureError, "deliberate slow simulator failure"):
+                self.execute()
+        self.assertEqual(budgets, [CAPTURE.CAPTURE_ATTEMPT_SECONDS] * 2)
+        self.assertLess(clock[0] - 100, CAPTURE.CAPTURE_TOTAL_SECONDS)
+
     def test_successful_command_without_launch_pid_is_not_success(self):
         self.launch_result = ""
         with self.assertRaisesRegex(CAPTURE.CaptureError, "process ID"):

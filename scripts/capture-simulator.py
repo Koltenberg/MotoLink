@@ -71,6 +71,12 @@ RIDE_AUDIT_REQUIRED = frozenset((
 ))
 READY_NAMES = tuple(Path(name).with_suffix(".ready.json").name for name in SCREENSHOT_NAMES)
 SIMCTL_DISPLAY_TIMEOUT = 90  # Hosted iOS 26 snapshots and app shutdown can exceed 30s.
+MAX_CAPTURE_ATTEMPTS = 2
+CAPTURE_ATTEMPT_SECONDS = 900
+# A fresh simulator retry must have enough time for all 32 views plus the real
+# recorder audit. Sharing one 900s deadline truncated a healthy second attempt
+# to 3s on its final launch. Keep both attempts bounded, with setup headroom.
+CAPTURE_TOTAL_SECONDS = MAX_CAPTURE_ATTEMPTS * CAPTURE_ATTEMPT_SECONDS + 120
 
 
 class CaptureError(RuntimeError):
@@ -777,11 +783,11 @@ def capture(app, output):
         (output / name).unlink(missing_ok=True)
     # Clear only files owned by this capture script, never a directory tree.
     # A rerun must not mistake an old failed attempt for the current evidence.
-    for attempt in range(1, 3):
+    for attempt in range(1, MAX_CAPTURE_ATTEMPTS + 1):
         debug = output / f"debug-attempt{attempt}"
         for name in (*SCREENSHOT_NAMES, *READY_NAMES, ORIENTATION_EVIDENCE, REFRESH_EVIDENCE, RIDE_AUDIT_EVIDENCE, "failure.json"):
             (debug / name).unlink(missing_ok=True)
-    deadline = time.monotonic() + 900
+    deadline = time.monotonic() + CAPTURE_TOTAL_SECONDS
     runtimes = json.loads(run("list", "runtimes", "-j", deadline=deadline))["runtimes"]
     types = json.loads(run("list", "devicetypes", "-j", deadline=deadline))["devicetypes"]
     device_type = select_device_type(types)
@@ -792,14 +798,16 @@ def capture(app, output):
         seed = select_runner_seed(devices, runtime, device_type)
         print("Hosted simulator seed: " + (seed or "none available; create a fresh device"), flush=True)
     failures = []
-    for attempt in range(1, 3):
-        print(f"Simulator capture attempt {attempt}/2", flush=True)
+    for attempt in range(1, MAX_CAPTURE_ATTEMPTS + 1):
+        attempt_deadline = min(deadline, time.monotonic() + CAPTURE_ATTEMPT_SECONDS)
+        print(f"Simulator capture attempt {attempt}/{MAX_CAPTURE_ATTEMPTS} "
+              f"(budget {max(0, attempt_deadline - time.monotonic()):.0f}s)", flush=True)
         # Only complete captures reach the top level; failures retain raw
         # evidence in explicitly failed diagnostic directories.
         with tempfile.TemporaryDirectory(prefix="motolink-visual-") as temporary:
             try:
                 images = capture_attempt(app, Path(temporary), device_type["identifier"], runtime,
-                                         bundle_id, attempt, deadline, seed=seed)
+                                         bundle_id, attempt, attempt_deadline, seed=seed)
             except (CaptureError, subprocess.TimeoutExpired, OSError) as error:
                 failures.append(f"attempt {attempt}: {error}")
                 print(f"Capture failed: {failures[-1]}", flush=True)
