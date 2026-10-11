@@ -73,6 +73,12 @@ final class MotoLinkController: ObservableObject {
             // @Published emits before the Bluetooth property changes.
             DispatchQueue.main.async { [weak self] in self?.refreshLockScreenCard(force: true) }
         }.store(in: &subscriptions)
+        bluetooth.$connecting.combineLatest(bluetooth.$connectionStateResolved)
+            .receive(on: DispatchQueue.main).sink { [weak self] _ in
+                // Snapshot after @Published and the delegate's reconciliation,
+                // including a restored pending connection with no open ride.
+                self?.refreshLockScreenCard(force: true)
+            }.store(in: &subscriptions)
         rides.$activeRideID.removeDuplicates().receive(on: DispatchQueue.main).sink { [weak self] id in
             guard let self, self.rides.active?.id == id else { return }
             // Restored rides resume passive observation without consuming next-ride inputs.
@@ -118,7 +124,7 @@ final class MotoLinkController: ObservableObject {
     }
 
     func refreshLockScreenCard(force: Bool = false) {
-        liveActivity.refresh(force: force) { [self] in
+        liveActivity.refresh(force: force, connectionStateResolved: bluetooth.connectionStateResolved) { [self] in
             let now = Date()
             let ride = rides.finishRequested ? nil : rides.active
             let speed = bluetooth.measurements.first { $0.id == "wheel_speed" && $0.unit == "км/ч" }
@@ -127,7 +133,7 @@ final class MotoLinkController: ObservableObject {
                 recording: ride != nil, paused: rides.recordingPaused,
                 elapsed: ride?.recordingSeconds(at: now) ?? 0,
                 distance: ride?.distanceMeters ?? 0, speed: speed?.value,
-                speedAt: speed?.timestamp, now: now)
+                speedAt: speed?.timestamp, now: now, connecting: bluetooth.connecting)
         }
     }
 }

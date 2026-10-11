@@ -3,7 +3,7 @@ import Foundation
 /// The lock-screen card is a read-only snapshot. It never drives Bluetooth,
 /// recording, GPS, or reconnection and it contains no route coordinates.
 struct RideLiveActivityState: Codable, Hashable {
-    enum Connection: String, Codable, Hashable { case live, waiting, disconnected, paused }
+    enum Connection: String, Codable, Hashable { case live, waiting, reconnecting, disconnected, paused }
     let motorcycleName: String
     let connection: Connection
     let recording: Bool
@@ -18,7 +18,8 @@ struct RideLiveActivityState: Codable, Hashable {
 
     static func snapshot(name: String, connected: Bool, lastStreamAt: Date?,
                          recording: Bool, paused: Bool, elapsed: TimeInterval,
-                         distance: Double, speed: Double?, speedAt: Date?, now: Date) -> Self {
+                         distance: Double, speed: Double?, speedAt: Date?, now: Date,
+                         connecting: Bool = false) -> Self {
         let streamFresh = connected && isFresh(lastStreamAt, at: now)
         let speedFresh = streamFresh && isFresh(speedAt, at: now)
         let cleanSpeed = speedFresh ? speed.flatMap { value -> Int? in
@@ -30,15 +31,21 @@ struct RideLiveActivityState: Codable, Hashable {
         if streamFresh, let lastStreamAt { expires = min(expires, lastStreamAt.addingTimeInterval(freshness)) }
         if cleanSpeed != nil, let speedAt { expires = min(expires, speedAt.addingTimeInterval(freshness)) }
         return Self(motorcycleName: title.isEmpty ? "Мой мотоцикл" : String(title.prefix(60)),
-            connection: paused && recording ? .paused : !connected ? .disconnected : streamFresh ? .live : .waiting,
+            connection: paused && recording ? .paused : connected ? (streamFresh ? .live : .waiting)
+                : connecting ? .reconnecting : .disconnected,
             recording: recording, elapsedSeconds: elapsed.isFinite ? Int(min(604_800, max(0, elapsed))) : 0,
             distanceMeters: distance.isFinite ? min(100_000_000, max(0, distance)) : 0,
             speedKmh: paused ? nil : cleanSpeed, updatedAt: now, staleDate: expires)
     }
 
+    static func shouldApply(enabled: Bool, connectionStateResolved: Bool) -> Bool {
+        !enabled || connectionStateResolved
+    }
+
     static func shouldDisplay(enabled: Bool, connected: Bool, recording: Bool,
-                              hasActivity: Bool, dismissed: Bool) -> Bool {
-        enabled && !dismissed && (connected || (hasActivity && recording))
+                              hasActivity: Bool, dismissed: Bool,
+                              connectionPending: Bool = false) -> Bool {
+        enabled && !dismissed && (connected || (hasActivity && (recording || connectionPending)))
     }
 
     static func isFresh(_ date: Date?, at now: Date) -> Bool {
@@ -52,7 +59,8 @@ struct RideLiveActivityState: Codable, Hashable {
         switch connection {
         case .live: return recording ? "Запись идёт · байк на связи" : "Байк на связи"
         case .waiting: return "Подключён · ждём данные"
-        case .disconnected: return "Ждём связь · запись продолжается"
+        case .reconnecting: return recording ? "Восстанавливаем связь · запись идёт" : "Восстанавливаем связь"
+        case .disconnected: return recording ? "Ждём связь · запись продолжается" : "Байк не подключён"
         case .paused: return "Пауза · ждём байк"
         }
     }

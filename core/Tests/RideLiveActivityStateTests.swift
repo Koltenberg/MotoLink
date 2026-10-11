@@ -72,4 +72,43 @@ final class RideLiveActivityStateTests: XCTestCase {
         XCTAssertEqual(value.distanceMeters, 0)
         XCTAssertNil(value.speedKmh)
     }
+
+    func testUnknownBluetoothStateDefersCardChangesButExplicitOffIsImmediate() {
+        XCTAssertFalse(RideLiveActivityState.shouldApply(enabled: true, connectionStateResolved: false))
+        XCTAssertTrue(RideLiveActivityState.shouldApply(enabled: false, connectionStateResolved: false))
+        XCTAssertTrue(RideLiveActivityState.shouldApply(enabled: true, connectionStateResolved: true))
+        XCTAssertTrue(RideLiveActivityState.shouldApply(enabled: false, connectionStateResolved: true))
+    }
+
+    func testPendingRecoveryKeepsExistingLiveOnlyCardButCannotCreateNewOne() {
+        XCTAssertTrue(RideLiveActivityState.shouldDisplay(enabled: true, connected: false, recording: false,
+            hasActivity: true, dismissed: false, connectionPending: true))
+        XCTAssertFalse(RideLiveActivityState.shouldDisplay(enabled: true, connected: false, recording: false,
+            hasActivity: false, dismissed: false, connectionPending: true))
+        XCTAssertFalse(RideLiveActivityState.shouldDisplay(enabled: true, connected: false, recording: true,
+            hasActivity: false, dismissed: false, connectionPending: true))
+        XCTAssertFalse(RideLiveActivityState.shouldDisplay(enabled: false, connected: false, recording: false,
+            hasActivity: true, dismissed: false, connectionPending: true))
+        XCTAssertFalse(RideLiveActivityState.shouldDisplay(enabled: true, connected: false, recording: false,
+            hasActivity: true, dismissed: true, connectionPending: true))
+    }
+
+    func testPendingLiveOnlyCardDoesNotClaimRecordingOrKeepOldSpeed() throws {
+        let value = RideLiveActivityState.snapshot(name: "Takihiro", connected: false, lastStreamAt: now,
+            recording: false, paused: false, elapsed: 0, distance: 0, speed: 42,
+            speedAt: now, now: now, connecting: true)
+        XCTAssertEqual(value.connection, .reconnecting)
+        XCTAssertEqual(value.statusText(stale: false), "Восстанавливаем связь")
+        XCTAssertFalse(value.recording)
+        XCTAssertNil(value.speedKmh)
+        XCTAssertEqual(try JSONDecoder().decode(RideLiveActivityState.self, from: JSONEncoder().encode(value)), value)
+    }
+
+    func testDefiniteDisconnectionWithoutRecordingDoesNotClaimAContinuingJournal() {
+        let value = RideLiveActivityState.snapshot(name: "Takihiro", connected: false, lastStreamAt: now,
+            recording: false, paused: false, elapsed: 0, distance: 0, speed: nil, speedAt: nil, now: now)
+        XCTAssertEqual(value.statusText(stale: false), "Байк не подключён")
+        XCTAssertFalse(RideLiveActivityState.shouldDisplay(enabled: true, connected: false, recording: false,
+            hasActivity: true, dismissed: false, connectionPending: false))
+    }
 }

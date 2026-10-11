@@ -8,8 +8,10 @@ final class RideLiveActivityManager {
     static let enabledKey = "MotoLink.lockScreenCard"
     private var implementation: Any?
     private var lastRefreshUptime: TimeInterval?
+    private var lastEnabledPreference: Bool?
 
-    func refresh(force: Bool = false, snapshot: () -> RideLiveActivityState) {
+    func refresh(force: Bool = false, connectionStateResolved: Bool,
+                 snapshot: () -> RideLiveActivityState) {
         guard #available(iOS 16.2, *) else { return }
         #if targetEnvironment(simulator)
         // Product screenshots/recorder regression fixtures must not start real
@@ -17,13 +19,21 @@ final class RideLiveActivityManager {
         guard !ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--review-")
             || $0 == "--companion-visual-check" || $0 == "--ride-audit" }) else { return }
         #endif
+        let enabled = UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool ?? true
+        let preferenceChanged = lastEnabledPreference != enabled
+        lastEnabledPreference = enabled
+        // An existing system card may be the only UI during background
+        // restoration. Do not end it from the initial disconnected defaults;
+        // explicit OFF still takes effect before Bluetooth finishes restoring.
+        guard RideLiveActivityState.shouldApply(enabled: enabled,
+            connectionStateResolved: connectionStateResolved) else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        if !force, let lastRefreshUptime, now - lastRefreshUptime < RideLiveActivityState.updateInterval { return }
+        if !force, !preferenceChanged, let lastRefreshUptime,
+           now - lastRefreshUptime < RideLiveActivityState.updateInterval { return }
         lastRefreshUptime = now
         let driver: RideLiveActivityDriver
         if let existing = implementation as? RideLiveActivityDriver { driver = existing }
         else { driver = RideLiveActivityDriver(); implementation = driver }
-        let enabled = UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool ?? true
         driver.refresh(snapshot(), enabled: enabled)
     }
 }
@@ -83,7 +93,8 @@ private final class RideLiveActivityDriver {
             activity = nil
         }
         let display = RideLiveActivityState.shouldDisplay(enabled: enabled, connected: connected,
-            recording: state.recording, hasActivity: activity != nil, dismissed: dismissed)
+            recording: state.recording, hasActivity: activity != nil, dismissed: dismissed,
+            connectionPending: state.connection == .reconnecting)
         guard display, ActivityAuthorizationInfo().areActivitiesEnabled else {
             if let existing = activity {
                 activity = nil

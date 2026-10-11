@@ -33,6 +33,9 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
     private var lastEventPublicationUptime: TimeInterval?
     @Published private(set) var status = "Проверка Bluetooth…"
     @Published private(set) var bluetoothPowered = false
+    /// False during launch/reset until the delegate has reconciled any restored
+    /// peripheral. Presentation must not treat an initial false as a real loss.
+    @Published private(set) var connectionStateResolved = false
     @Published private(set) var scanning = false
     @Published private(set) var scanStartedAt: Date?
     @Published private(set) var scanDeadline: Date?
@@ -1161,6 +1164,16 @@ final class MotorcycleBluetooth: NSObject, ObservableObject {
 // These are ordinary Swift forwarding targets, not another delegate surface.
 extension MotorcycleBluetooth {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        connectionStateResolved = false
+        defer {
+            // Publish only after restoring/preparing the current connection or
+            // clearing a definite unavailable state. No transport wait is added.
+            switch central.state {
+            case .poweredOn, .poweredOff, .unauthorized, .unsupported:
+                connectionStateResolved = true
+            default: break
+            }
+        }
         bluetoothPowered = central.state == .poweredOn
         guard bluetoothPowered else {
             cancelResume.reset()
