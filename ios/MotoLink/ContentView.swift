@@ -15,6 +15,7 @@ struct ContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("MotoLink.appearance") private var appearance = "system"
     @AppStorage("MotoLink.keepScreenOn") private var keepScreenOn = false
+    @AppStorage("MotoLink.lockScreenCard") private var lockScreenCard = true
     @State private var selectedTab = 0
     @State private var focusedMetric: FocusedRideMetric?
     @State private var showSettings = false
@@ -671,6 +672,12 @@ struct ContentView: View {
                         .init(value: "dark", label: "Тёмная")
                     ])
                     Toggle("Не гасить экран в поездке", isOn: $keepScreenOn)
+                    if #available(iOS 16.2, *) {
+                        Toggle("Карточка на экране блокировки", isOn: $lockScreenCard)
+                            .onChange(of: lockScreenCard) { _ in
+                                MotoLinkController.shared.refreshLockScreenCard(force: true)
+                            }
+                    }
                     NavigationLink("Цвета показателей") { MetricVisualSettingsView() }
                     Text("Светлая тема — для солнца. Удержание экрана работает, пока приложение открыто.")
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)

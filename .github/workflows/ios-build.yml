@@ -2,7 +2,7 @@ name: Build unsigned iPhone IPA
 
 on:
   push:
-    branches: [main, codex/release-0.5.2, codex/release-0.5.3, codex/release-0.5.4]
+    branches: [main, codex/release-0.5.2, codex/release-0.5.3, codex/release-0.5.4, codex/release-0.5.5]
   workflow_dispatch:
 
 permissions:

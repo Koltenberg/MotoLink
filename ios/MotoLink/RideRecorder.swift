@@ -396,8 +396,7 @@ final class RideArchive {
                     "kind": "capture_manifest", "schema": "motolink.capture/1", "appVersion": AppBuild.version, "appBuild": AppBuild.number,
                     "exportedAt": ISO8601DateFormatter().string(from: Date()),
                     "ride": try JSONSerialization.jsonObject(with: summaryData),
-                    "rawEventsIncluded": summary.rawEventCount ?? 0,
-                    "engineStopDetection": "unavailable; capture requires manual finish"
+                    "rawEventsIncluded": summary.rawEventCount ?? 0
                 ])
                 let estimateURL = url(summary.id, "route-estimates")
                 let estimates = FileManager.default.fileExists(atPath: estimateURL.path)
@@ -451,6 +450,19 @@ final class RideArchive {
                     files.append(estimates)
                 }
                 DispatchQueue.main.async { completion(.success(files)) }
+            } catch { DispatchQueue.main.async { completion(.failure(error)) } }
+        }
+    }
+
+    func exportCompleted(_ ids: [UUID], activeID: UUID?, completion: @escaping (Result<[URL], Error>) -> Void) {
+        queue.async { [self] in
+            do {
+                let sources = try RideArchiveFiles(directory: directory).exportSources(ids, activeID: activeID)
+                // Compression must not hold up recording an unrelated active trip.
+                DispatchQueue.global(qos: .utility).async {
+                    let result = Result { [try RideBatchExport.write(sources, version: AppBuild.version, build: AppBuild.number)] }
+                    DispatchQueue.main.async { completion(result) }
+                }
             } catch { DispatchQueue.main.async { completion(.failure(error)) } }
         }
     }
@@ -1256,24 +1268,49 @@ final class RideRecorder: NSObject, ObservableObject, CLLocationManagerDelegate 
 
     func export(_ summary: RideSummary) {
         guard !exporting, !changingHistory, !finishRequested, !restoringRoute, let archive else { return }
+        historyError = nil
         exporting = true
         archive.export(summary) { [weak self] result in
             self?.exporting = false
             switch result {
             case .success(let urls): self?.exportedFiles = SharedFiles(urls: urls)
-            case .failure(let error): self?.error = error.localizedDescription
+            case .failure(let error):
+                self?.error = error.localizedDescription
+                self?.historyError = "Не удалось подготовить файл: " + error.localizedDescription
+            }
+        }
+    }
+
+    func exportCompletedRides(_ ids: [UUID]) {
+        guard !exporting, !changingHistory, !finishRequested, !restoringRoute, let archive,
+              !ids.isEmpty else { return }
+        let available = Set(history.map(\.id))
+        guard Set(ids).isSubset(of: available) else {
+            historyError = "Список поездок изменился. Выберите поездки ещё раз."
+            return
+        }
+        historyError = nil
+        exporting = true
+        archive.exportCompleted(ids, activeID: active?.id) { [weak self] result in
+            self?.exporting = false
+            switch result {
+            case .success(let urls): self?.exportedFiles = SharedFiles(urls: urls)
+            case .failure(let error): self?.historyError = "Не удалось собрать архив: " + error.localizedDescription
             }
         }
     }
 
     func exportGPX(_ summary: RideSummary) {
         guard !exporting, !changingHistory, !finishRequested, !restoringRoute, let archive else { return }
+        historyError = nil
         exporting = true
         archive.exportGPXDetails(summary) { [weak self] result in
             self?.exporting = false
             switch result {
             case .success(let urls): self?.exportedFiles = SharedFiles(urls: urls)
-            case .failure(let error): self?.error = error.localizedDescription
+            case .failure(let error):
+                self?.error = error.localizedDescription
+                self?.historyError = "Не удалось подготовить маршрут: " + error.localizedDescription
             }
         }
     }

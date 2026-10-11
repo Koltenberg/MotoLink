@@ -13,22 +13,7 @@ final class BLENativeReconnectPolicyTests: XCTestCase {
         return policy
     }
 
-    func testTurningOffFutureAutoConnectKeepsRestoredLiveLink() {
-        XCTAssertTrue(BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
-            isSaved: true, paused: false, autoReconnect: false, isConnected: true, isConnecting: false))
-        XCTAssertTrue(BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
-            isSaved: true, paused: false, autoReconnect: false, isConnected: false, isConnecting: true))
-        XCTAssertFalse(BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
-            isSaved: true, paused: true, autoReconnect: true, isConnected: true, isConnecting: false))
-        XCTAssertFalse(BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
-            isSaved: true, paused: true, autoReconnect: false, isConnected: false, isConnecting: true))
-        XCTAssertFalse(BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
-            isSaved: false, paused: false, autoReconnect: true, isConnected: true, isConnecting: false))
-        XCTAssertFalse(BLENativeReconnectPolicy.shouldAdoptRestoredPeripheral(
-            isSaved: true, paused: false, autoReconnect: false, isConnected: false, isConnecting: false))
-    }
-
-    func testFutureAutoConnectPreferenceDoesNotCancelIOSNativeReconnectOfExistingLink() {
+    func testCallerPermittedRecoveryPreservesIOSNativeReconnectOfExistingLink() {
         let preserve = BLENativeReconnectPolicy.shouldPreserveNativeConnection(
             wanted: true, powered: true, paused: false,
             pairingFailure: false, transportRestartPending: false)

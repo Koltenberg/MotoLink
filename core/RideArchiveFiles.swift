@@ -71,6 +71,22 @@ struct RideArchiveFiles {
         return data
     }
 
+    /// Validate every selection before starting the background copy. Completed
+    /// journals are immutable; the caller prevents history edits until export ends.
+    func exportSources(_ ids: [UUID], activeID: UUID? = nil) throws -> [RideExportSource] {
+        guard !ids.isEmpty else { throw RideArchiveFileError.invalidManifest }
+        var seen = Set<UUID>()
+        return try ids.filter { seen.insert($0).inserted }.map { id in
+            let manifest = try completedManifest(id, activeID: activeID)
+            guard let journal = try existingFile(id, extension: "jsonl") else {
+                throw RideArchiveFileError.invalidManifest
+            }
+            let estimates = try existingFile(id, extension: "route-estimates", optional: true)
+            return RideExportSource(id: id, manifest: manifest, journal: journal,
+                                    estimates: estimates)
+        }
+    }
+
     /// Only the small manifest changes; raw packets and GPS are byte-for-byte intact.
     @discardableResult
     func updateMetadata(_ id: UUID, title: String, note: String, activeID: UUID? = nil,
@@ -114,5 +130,62 @@ struct RideArchiveFiles {
             guard let checked = try existingFile(id, extension: path.pathExtension) else { continue }
             try FileManager.default.removeItem(at: checked)
         }
+    }
+}
+
+struct RideExportSource {
+    let id: UUID
+    let manifest: Data
+    let journal: URL
+    let estimates: URL?
+}
+
+enum RideBatchExport {
+    /// Stream each journal into a self-contained capture; Foundation creates the
+    /// ZIP locally. Never run this on the BLE, recorder, or main queue.
+    static func write(_ sources: [RideExportSource], version: String, build: String,
+                      temporaryDirectory: URL = FileManager.default.temporaryDirectory) throws -> URL {
+        guard !sources.isEmpty, Set(sources.map(\.id)).count == sources.count else {
+            throw RideArchiveFileError.invalidManifest
+        }
+        let manager = FileManager.default
+        let root = temporaryDirectory.appendingPathComponent("MotoLink-export-\(UUID().uuidString)", isDirectory: true)
+        let staging = root.appendingPathComponent("MotoLink-rides", isDirectory: true)
+        try manager.createDirectory(at: staging, withIntermediateDirectories: true)
+        var succeeded = false
+        defer {
+            // Both paths are newly created private staging paths, never user input.
+            try? manager.removeItem(at: succeeded ? staging : root)
+        }
+        let exportedAt = ISO8601DateFormatter().string(from: Date())
+        for source in sources {
+            let summary = try JSONSerialization.jsonObject(with: source.manifest)
+            let header = try JSONSerialization.data(withJSONObject: [
+                "kind": "capture_manifest", "schema": "motolink.capture/1",
+                "appVersion": version, "appBuild": build, "exportedAt": exportedAt,
+                "ride": summary,
+                "rawEventsIncluded": (summary as? [String: Any])?["rawEventCount"] ?? 0
+            ])
+            let estimates = try source.estimates.map { try Data(contentsOf: $0) } ?? Data("[]".utf8)
+            let footer = try JSONSerialization.data(withJSONObject: [
+                "kind": "capture_end", "roadEstimatesNotGPS": try JSONSerialization.jsonObject(with: estimates)
+            ])
+            try CaptureJournalExport.write(to: staging.appendingPathComponent("MotoLink-\(source.id.uuidString).jsonl"),
+                                           header: header, source: source.journal, footer: footer)
+        }
+        let output = root.appendingPathComponent("MotoLink-rides.zip")
+        var coordinationError: NSError?
+        var copyError: Error?
+        // .forUploading provides a ZIP snapshot for a directory. It neither
+        // contacts a server nor uploads data. Copy before the accessor returns.
+        NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: staging, options: .forUploading,
+                                       error: &coordinationError) { snapshot in
+            do { try manager.copyItem(at: snapshot, to: output) }
+            catch { copyError = error }
+        }
+        if let error = copyError ?? coordinationError { throw error }
+        guard manager.fileExists(atPath: output.path) else { throw CocoaError(.fileWriteUnknown) }
+        succeeded = true
+        return output
     }
 }

@@ -12,6 +12,7 @@
     <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSRequiresIPhoneOS</key><true/>
+    <key>NSSupportsLiveActivities</key><true/>
     <key>NSBluetoothAlwaysUsageDescription</key><string>MotoLink подключается к вашему мотоциклу, чтобы проверить доступные данные и сохранить диагностический журнал.</string>
     <key>NSLocationWhenInUseUsageDescription</key><string>MotoLink записывает маршрут, расстояние и скорость поездки с GPS вашего iPhone. Данные хранятся на устройстве.</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key><string>Геопозиция в фоне помогает считать пробег при подключённом мотоцикле и записывать выбранное путешествие с заблокированным экраном. Компактный счётчик не сохраняет координаты.</string>

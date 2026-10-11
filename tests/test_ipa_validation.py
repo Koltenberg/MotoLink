@@ -20,12 +20,14 @@ class IPAPackagingTests(unittest.TestCase):
         self.path = Path(self.temp.name) / "test.ipa"
 
     def package(self, *, plist_platform="iPhoneOS", binary_platform=2,
-                cpu=0x0100000C, executable=True, privacy=True, extras=None):
+                cpu=0x0100000C, executable=True, privacy=True, extras=None, live=False):
         info = {
             "CFBundleExecutable": "MotoLink", "CFBundlePackageType": "APPL",
             "CFBundleIdentifier": "org.example.MotoLink", "CFBundleSupportedPlatforms": [plist_platform],
             "NSBluetoothAlwaysUsageDescription": "Connect to the selected motorcycle",
             "UIBackgroundModes": ["bluetooth-central"], "MinimumOSVersion": "16.0",
+            "CFBundleShortVersionString": "0.5.5", "CFBundleVersion": "39",
+            "NSSupportsLiveActivities": live,
         }
         binary = struct.pack("<8I", 0xFEEDFACF, cpu, 0, 2, 1, 24, 0, 0)
         binary += struct.pack("<6I", 0x32, 24, binary_platform, 0x00100000, 0x001A0000, 0)
@@ -80,6 +82,40 @@ class IPAPackagingTests(unittest.TestCase):
     def test_rejects_unsafe_zip_paths(self):
         self.package(extras={"Payload/../outside": b"unexpected"})
         with self.assertRaisesRegex(ValueError, "unsafe path"):
+            VALIDATOR.validate(self.path)
+
+    def widget(self, *, version="0.5.5", platform=2, identifier="org.example.MotoLink.LiveActivity"):
+        root = "Payload/MotoLink.app/PlugIns/MotoLinkLiveActivity.appex/"
+        info = {"CFBundleExecutable": "MotoLinkLiveActivity", "CFBundlePackageType": "XPC!",
+                "CFBundleIdentifier": identifier, "CFBundleSupportedPlatforms": ["iPhoneOS"],
+                "CFBundleShortVersionString": version, "CFBundleVersion": "39",
+                "NSExtension": {"NSExtensionPointIdentifier": "com.apple.widgetkit-extension"}}
+        binary = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 1, 24, 0, 0)
+        binary += struct.pack("<6I", 0x32, 24, platform, 0x00100200, 0x001A0000, 0)
+        return {root + "Info.plist": plistlib.dumps(info), root + "MotoLinkLiveActivity": binary}
+
+    def test_validates_embedded_live_activity(self):
+        self.package(extras=self.widget(), live=True)
+        self.assertEqual(len(VALIDATOR.validate(self.path)["extensions"]), 1)
+
+    def test_requires_live_activity_embedding(self):
+        self.package(live=True)
+        with self.assertRaisesRegex(ValueError, "not embedded"):
+            VALIDATOR.validate(self.path)
+
+    def test_rejects_mismatched_extension_version(self):
+        self.package(extras=self.widget(version="0.5.4"), live=True)
+        with self.assertRaisesRegex(ValueError, "version/build"):
+            VALIDATOR.validate(self.path)
+
+    def test_rejects_simulator_extension(self):
+        self.package(extras=self.widget(platform=7), live=True)
+        with self.assertRaisesRegex(ValueError, "platform iOS"):
+            VALIDATOR.validate(self.path)
+
+    def test_rejects_unrelated_extension_identifier(self):
+        self.package(extras=self.widget(identifier="org.other.Widget"), live=True)
+        with self.assertRaisesRegex(ValueError, "identifier"):
             VALIDATOR.validate(self.path)
 
 

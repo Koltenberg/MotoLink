@@ -41,7 +41,9 @@ struct MotoLinkApp: App {
     }
     @ViewBuilder private var appContent: some View {
         #if targetEnvironment(simulator)
-        if ProcessInfo.processInfo.arguments.contains("--review-route-fullscreen") {
+        if ProcessInfo.processInfo.arguments.contains("--review-lock-screen-card") {
+            RideLockScreenVisualCheck()
+        } else if ProcessInfo.processInfo.arguments.contains("--review-route-fullscreen") {
             RouteVisualCheckView(rides: delegate.controller.rides)
         } else if ProcessInfo.processInfo.arguments.contains("--review-scale-settings")
             || ProcessInfo.processInfo.arguments.contains("--review-scale-editor") {

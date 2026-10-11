@@ -119,21 +119,24 @@ final class RideAutomationPolicyTests: XCTestCase {
     }
 
     func testAutoOnThenOffCannotDemoteManualConnectQueuedBehindCancelAcknowledgement() {
-        var manual = AutomaticConnectionPreferencePolicy.queuedRequestIsManual(
-            existingManualRequest: false, newRequestIsManual: false)
-        XCTAssertFalse(manual) // Automatic resume only.
-        manual = AutomaticConnectionPreferencePolicy.queuedRequestIsManual(
-            existingManualRequest: manual, newRequestIsManual: true)
-        XCTAssertTrue(manual) // Rider explicitly Connects before cancel ACK.
-        manual = AutomaticConnectionPreferencePolicy.queuedRequestIsManual(
-            existingManualRequest: manual, newRequestIsManual: false)
-        XCTAssertTrue(manual) // Turning automation ON does not replace that intent.
+        let defaults = testDefaults()
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        var manual = BLEManualSessionIntent(defaults: defaults)
+        var cancellation = BLECancelResumePolicy()
+        cancellation.requestedCancellation(for: bikeA)
+        XCTAssertFalse(manual.permitsRecovery(for: bikeA))
+        manual.request(bikeA, defaults: defaults)
+        XCTAssertTrue(cancellation.requestedResume(for: bikeA))
+        // Toggling the future preference must not demote the separate Connect.
+        defaults.set(true, forKey: AutomaticRideSettings.autoReconnectKey)
+        defaults.set(false, forKey: AutomaticRideSettings.autoReconnectKey)
         XCTAssertFalse(AutomaticConnectionPreferencePolicy.shouldCancelPendingOnDisable(
-            isConnected: false, manuallyRequested: manual))
-        // A fulfilled or explicitly paused request is no longer pending/manual.
-        manual = false
+            isConnected: false, manuallyRequested: manual.permitsRecovery(for: bikeA)))
+        XCTAssertTrue(cancellation.completedCancellation(for: bikeA, canResume: true))
+        XCTAssertTrue(manual.permitsRecovery(for: bikeA))
+        manual.cancel(defaults: defaults)
         XCTAssertTrue(AutomaticConnectionPreferencePolicy.shouldCancelPendingOnDisable(
-            isConnected: false, manuallyRequested: manual))
+            isConnected: false, manuallyRequested: manual.permitsRecovery(for: bikeA)))
     }
 
     func testSavedOffRejectsRestoredPendingRequestButPreservesExistingLink() {
@@ -149,27 +152,138 @@ final class RideAutomationPolicyTests: XCTestCase {
             enabled: true, isSaved: false, paused: false, isConnected: true))
     }
 
-    func testSavedOffPreventsNativeRecoveryAfterManualLinkDrops() {
+    func testSavedOffPermitsRecoveryOfManualSessionButNotAnUnrequestedFutureSession() {
         XCTAssertFalse(AutomaticConnectionPreferencePolicy.mayPreserveNativeReconnect(
             enabled: false, isConnected: false))
+        XCTAssertTrue(AutomaticConnectionPreferencePolicy.mayPreserveNativeReconnect(
+            enabled: false, isConnected: false, manualSession: true))
         XCTAssertTrue(AutomaticConnectionPreferencePolicy.mayPreserveNativeReconnect(
             enabled: false, isConnected: true))
         XCTAssertTrue(AutomaticConnectionPreferencePolicy.mayPreserveNativeReconnect(
             enabled: true, isConnected: false))
-        // The current iOS request may have been created with auto-reconnect ON
-        // before the rider turns it OFF. Its future native retry must cancel.
+        // A manual Connect uses native recovery even with the saved toggle OFF.
         var native = BLENativeReconnectPolicy()
-        XCTAssertTrue(native.connectionRequested(for: bikeA, supported: true, enabled: true))
+        let allowed = AutomaticConnectionPreferencePolicy.permitsRecovery(
+            enabled: false, manualSession: true, paused: false)
+        XCTAssertTrue(native.connectionRequested(for: bikeA, supported: true, enabled: allowed))
         XCTAssertTrue(native.connected(bikeA))
         let mayResume = AutomaticConnectionPreferencePolicy.mayPreserveNativeReconnect(
-            enabled: false, isConnected: false)
+            enabled: false, isConnected: false, manualSession: true)
         XCTAssertEqual(native.disconnected(bikeA, timestamp: 100, reconnecting: true,
-            peripheralIsConnected: false, mayResume: mayResume), .cancelConnection)
+            peripheralIsConnected: false, mayResume: mayResume), .waitForSystem)
+        // An OS-owned wait needs no second connection request. If iOS gives up,
+        // the same intent also permits application fallback without changing OFF.
+        XCTAssertEqual(native.disconnected(bikeA, timestamp: 101, reconnecting: false,
+            peripheralIsConnected: false, mayResume: mayResume), .applicationFallback)
+        var retry = BLEReconnectPolicy()
+        XCTAssertEqual(retry.nextDelay(allowed: allowed), 0)
         // A manual link still starts its normal data profile with both
         // preferences off; recording a trip is a separate decision.
         XCTAssertTrue(BLECaptureStartupPolicy.shouldRequest(ready: true,
             startedInSession: false, awaitingLateStream: false))
         XCTAssertFalse(readyPolicy().shouldStart(enabled: false, hasActiveRide: false, finishing: false))
+    }
+
+    private let defaultsSuite = "MotoLink-ManualBLE-\(UUID().uuidString)"
+
+    private func testDefaults() -> UserDefaults {
+        let defaults = UserDefaults(suiteName: defaultsSuite)!
+        defaults.removePersistentDomain(forName: defaultsSuite)
+        return defaults
+    }
+
+    func testManualSessionMarkerCannotStartConnectionOnCleanLaunchWithSavedOff() {
+        let defaults = testDefaults()
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        defaults.set(false, forKey: AutomaticRideSettings.autoReconnectKey)
+        var previous = BLEManualSessionIntent(defaults: defaults)
+        previous.request(bikeA, defaults: defaults)
+        var launched = BLEManualSessionIntent(defaults: defaults)
+        XCTAssertTrue(launched.mayRestore(bikeA))
+        XCTAssertFalse(launched.permitsRecovery(for: bikeA))
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.permitsRecovery(
+            enabled: AutomaticRideSettings.autoReconnect(defaults),
+            manualSession: launched.permitsRecovery(for: bikeA), paused: false))
+        launched.finishRestoration(defaults: defaults)
+        XCTAssertFalse(launched.mayRestore(bikeA))
+        XCTAssertNil(defaults.object(forKey: BLEManualSessionIntent.restorationKey))
+        XCTAssertFalse(AutomaticRideSettings.autoReconnect(defaults))
+    }
+
+    func testIOSRestorationCanContinueOnlyTheSavedManualPeripheralWhileAutoIsOff() {
+        let defaults = testDefaults()
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        defaults.set(false, forKey: AutomaticRideSettings.autoReconnectKey)
+        var previous = BLEManualSessionIntent(defaults: defaults)
+        previous.request(bikeA, defaults: defaults)
+        var restored = BLEManualSessionIntent(defaults: defaults)
+        XCTAssertFalse(restored.restore(bikeB))
+        XCTAssertFalse(restored.permitsRecovery(for: bikeB))
+        XCTAssertTrue(AutomaticConnectionPreferencePolicy.shouldAdoptRestoredPeripheral(
+            enabled: false, isSaved: true, paused: false, isConnected: false,
+            manualSession: restored.mayRestore(bikeA)))
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.shouldAdoptRestoredPeripheral(
+            enabled: false, isSaved: false, paused: false, isConnected: false,
+            manualSession: restored.mayRestore(bikeA)))
+        XCTAssertTrue(restored.restore(bikeA))
+        restored.finishRestoration(defaults: defaults)
+        XCTAssertTrue(restored.permitsRecovery(for: bikeA))
+        XCTAssertFalse(AutomaticRideSettings.autoReconnect(defaults))
+        XCTAssertEqual(defaults.string(forKey: BLEManualSessionIntent.restorationKey), bikeA.uuidString)
+    }
+
+    func testExplicitStopRevokesManualRecoveryAndRestorationWhilePreservingSavedPreferences() {
+        let defaults = testDefaults()
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        defaults.set(false, forKey: AutomaticRideSettings.autoReconnectKey)
+        var manual = BLEManualSessionIntent(defaults: defaults)
+        manual.request(bikeA, defaults: defaults)
+        var native = BLENativeReconnectPolicy()
+        XCTAssertTrue(native.connectionRequested(for: bikeA, supported: true, enabled: true))
+        XCTAssertTrue(native.connected(bikeA))
+        manual.cancel(defaults: defaults)
+        let allowed = AutomaticConnectionPreferencePolicy.permitsRecovery(
+            enabled: false, manualSession: manual.permitsRecovery(for: bikeA), paused: true)
+        XCTAssertFalse(allowed)
+        XCTAssertEqual(native.disconnected(bikeA, timestamp: 100, reconnecting: true,
+            peripheralIsConnected: false, mayResume: allowed), .cancelConnection)
+        native.cancellationRequested()
+        XCTAssertFalse(native.connected(bikeA))
+        XCTAssertFalse(BLEManualSessionIntent(defaults: defaults).mayRestore(bikeA))
+        XCTAssertFalse(AutomaticRideSettings.autoReconnect(defaults))
+    }
+
+    func testManualIntentSurvivesRadioOwnershipResetButCannotBypassExplicitPause() {
+        let defaults = testDefaults()
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        var manual = BLEManualSessionIntent(defaults: defaults)
+        manual.request(bikeA, defaults: defaults)
+        var native = BLENativeReconnectPolicy()
+        XCTAssertTrue(native.connectionRequested(for: bikeA, supported: true, enabled: true))
+        native.clearConnection()
+        XCTAssertTrue(manual.permitsRecovery(for: bikeA))
+        XCTAssertTrue(AutomaticConnectionPreferencePolicy.permitsRecovery(
+            enabled: false, manualSession: manual.permitsRecovery(for: bikeA), paused: false))
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.permitsRecovery(
+            enabled: true, manualSession: manual.permitsRecovery(for: bikeA), paused: true))
+        XCTAssertFalse(AutomaticConnectionPreferencePolicy.shouldAdoptRestoredPeripheral(
+            enabled: false, isSaved: true, paused: true, isConnected: true,
+            manualSession: true))
+    }
+
+    func testReplacingOrMalformedManualMarkerCannotAuthorizeAnotherBike() {
+        let defaults = testDefaults()
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        defaults.set("not-a-uuid", forKey: BLEManualSessionIntent.restorationKey)
+        var manual = BLEManualSessionIntent(defaults: defaults)
+        XCTAssertFalse(manual.mayRestore(bikeA))
+        XCTAssertFalse(manual.permitsRecovery(for: nil))
+        manual.request(bikeA, defaults: defaults)
+        manual.request(bikeB, defaults: defaults)
+        XCTAssertFalse(manual.permitsRecovery(for: bikeA))
+        XCTAssertTrue(manual.permitsRecovery(for: bikeB))
+        XCTAssertFalse(BLEManualSessionIntent(defaults: defaults).mayRestore(bikeA))
+        XCTAssertTrue(BLEManualSessionIntent(defaults: defaults).mayRestore(bikeB))
     }
 
     func testAutomaticProductModeStillRequiresAnIdentifiedReadyMotorcycle() {

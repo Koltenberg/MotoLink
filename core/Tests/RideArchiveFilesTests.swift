@@ -42,6 +42,71 @@ final class RideArchiveFilesTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: path(id, "jsonl")), raw)
     }
 
+    func testBatchExportValidatesAllSelectionsAndDeduplicates() throws {
+        let first = try fixture(), second = try fixture(), active = try fixture(ended: false)
+        let store = try RideArchiveFiles(directory: directory)
+        let selected = try store.exportSources([second, first, second])
+        XCTAssertEqual(selected.map(\.id), [second, first])
+        XCTAssertThrowsError(try store.exportSources([first, active]))
+        XCTAssertThrowsError(try store.exportSources([first, second], activeID: second))
+        XCTAssertThrowsError(try store.exportSources([]))
+        XCTAssertThrowsError(try store.exportSources([first, UUID()]))
+    }
+
+    func testBatchExportRejectsSymlinkJournal() throws {
+        let id = try fixture(), external = root.appendingPathComponent("external.jsonl")
+        try Data("external".utf8).write(to: external)
+        try manager.removeItem(at: path(id, "jsonl"))
+        try manager.createSymbolicLink(at: path(id, "jsonl"), withDestinationURL: external)
+        XCTAssertThrowsError(try RideArchiveFiles(directory: directory).exportSources([id]))
+        XCTAssertEqual(try Data(contentsOf: external), Data("external".utf8))
+    }
+
+    #if os(macOS)
+    func testBatchZipRoundTripPreservesEveryRawByteAndMetadata() throws {
+        let ids = [try fixture(), try fixture()]
+        let store = try RideArchiveFiles(directory: directory)
+        _ = try store.updateMetadata(ids[0], title: "Дорога домой", note: "С остановкой")
+        let raw = try Data(contentsOf: path(ids[0], "jsonl"))
+        let snapshots = try store.exportSources(ids)
+        let archive = try RideBatchExport.write(snapshots, version: "test", build: "1", temporaryDirectory: root)
+        XCTAssertEqual(archive.pathExtension, "zip")
+        let extracted = root.appendingPathComponent("unzipped", isDirectory: true)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-x", "-k", archive.path, extracted.path]
+        try process.run(); process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let files = try XCTUnwrap(manager.enumerator(at: extracted, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "jsonl" }
+        XCTAssertEqual(Set(files.map(\.lastPathComponent)), Set(ids.map { "MotoLink-\($0.uuidString).jsonl" }))
+        for source in snapshots {
+            let file = try XCTUnwrap(files.first { $0.lastPathComponent.contains(source.id.uuidString) })
+            let data = try Data(contentsOf: file)
+            let newline = try XCTUnwrap(data.firstIndex(of: 10))
+            let header = try XCTUnwrap(JSONSerialization.jsonObject(with: data[..<newline]) as? [String: Any])
+            XCTAssertEqual((header["ride"] as? [String: Any])?["id"] as? String, source.id.uuidString)
+            XCTAssertEqual(header["schema"] as? String, "motolink.capture/1")
+            let expectedRaw = try Data(contentsOf: source.journal)
+            XCTAssertEqual(Data(data.dropFirst(newline + 1).prefix(expectedRaw.count)), expectedRaw)
+            XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("capture_end"))
+        }
+        XCTAssertEqual(try Data(contentsOf: path(ids[0], "jsonl")), raw)
+        XCTAssertEqual(try manager.contentsOfDirectory(atPath: archive.deletingLastPathComponent().path), ["MotoLink-rides.zip"])
+    }
+    #endif
+
+    func testFailedBatchLeavesNoPartialExportOrChangedOriginal() throws {
+        let id = try fixture()
+        let source = try XCTUnwrap(RideArchiveFiles(directory: directory).exportSources([id]).first)
+        let raw = try Data(contentsOf: source.journal)
+        let invalid = RideExportSource(id: id, manifest: source.manifest,
+            journal: root.appendingPathComponent("missing.jsonl"), estimates: nil)
+        XCTAssertThrowsError(try RideBatchExport.write([invalid], version: "test", build: "1", temporaryDirectory: root))
+        XCTAssertFalse(try manager.contentsOfDirectory(atPath: root.path).contains { $0.hasPrefix("MotoLink-export-") })
+        XCTAssertEqual(try Data(contentsOf: source.journal), raw)
+    }
+
     func testFavoritePersistsInLegacyManifestAndPreservesEveryOtherRideFile() throws {
         let id = try fixture(), store = try RideArchiveFiles(directory: directory)
         _ = try store.updateMetadata(id, title: "Любимый маршрут", note: "Заметка")

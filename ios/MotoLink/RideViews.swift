@@ -125,6 +125,8 @@ struct RideHistoryView: View {
     @State private var showingDelete = false
     @State private var showingClear = false
     @State private var clearIDs: [UUID] = []
+    @State private var selecting = false
+    @State private var selectedIDs: Set<UUID> = []
     #if targetEnvironment(simulator)
     @State private var previewHistory: [RideSummary]?
     #endif
@@ -156,6 +158,16 @@ struct RideHistoryView: View {
                     Text("Расстояние записано телефоном")
                         .font(MotoTheme.font(.caption)).foregroundStyle(MotoTheme.secondary)
                 }
+                if selecting {
+                    HStack {
+                        Text("Выбрано: \(selectedIDs.count)")
+                        Spacer()
+                        Button(selectedIDs.count == history.count ? "Снять выбор" : "Выбрать все") {
+                            selectedIDs = selectedIDs.count == history.count ? [] : Set(history.map(\.id))
+                        }.disabled(busy)
+                    }.font(MotoTheme.font(.subheadline))
+                }
+                if rides.exporting { ProgressView("Собираем архив…") }
                 if rides.changingHistory { ProgressView("Обновляем историю…") }
                 if let failure = rides.historyError { Text(failure).font(MotoTheme.font(.caption)).foregroundStyle(.orange) }
                 else if let status = rides.historyRefreshStatus {
@@ -206,18 +218,35 @@ struct RideHistoryView: View {
             #if targetEnvironment(simulator)
             if ProcessInfo.processInfo.arguments.contains("--review-history"), previewHistory == nil {
                 previewHistory = RideHistoryVisualData.summaries()
+                if ProcessInfo.processInfo.arguments.contains("--review-history-selection") {
+                    selecting = true
+                    selectedIDs = Set((previewHistory ?? []).prefix(2).map(\.id))
+                }
             }
             #endif
         }
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Button {
-                    clearIDs = history.map(\.id); showingClear = true
-                } label: { Image(systemName: "trash") }
-                    .disabled(history.isEmpty || busy)
-                    .accessibilityLabel("Удалить завершённые поездки")
+                    if selecting {
+                        rides.exportCompletedRides(history.filter { selectedIDs.contains($0.id) }.map(\.id))
+                    } else { selecting = true }
+                } label: { Image(systemName: "square.and.arrow.up") }
+                    .disabled(history.isEmpty || busy || (selecting && selectedIDs.isEmpty))
+                    .accessibilityLabel(selecting ? "Поделиться выбранными поездками в ZIP" : "Выбрать поездки для отправки")
+                if selecting {
+                    Button("Готово") { selecting = false; selectedIDs = [] }
+                        .font(MotoTheme.font(.body)).disabled(busy)
+                } else {
+                    Button {
+                        clearIDs = history.map(\.id); showingClear = true
+                    } label: { Image(systemName: "trash") }
+                        .disabled(history.isEmpty || busy)
+                        .accessibilityLabel("Удалить завершённые поездки")
+                }
             }
         }
+        .onChange(of: history.map(\.id)) { ids in selectedIDs.formIntersection(ids) }
         .pixelConfirmationDialog("Удалить поездку?", isPresented: $showingDelete, titleVisibility: .visible) {
             Button("Удалить поездку", role: .destructive) {
                 if let ride = pendingDelete { delete([ride.id]) }
@@ -252,7 +281,35 @@ struct RideHistoryView: View {
     }
 
     private func historyRow(_ ride: RideSummary) -> some View {
-        NavigationLink { RideDetailView(rides: rides, ride: ride) } label: {
+        Group {
+            if selecting {
+                Button {
+                    if !selectedIDs.insert(ride.id).inserted { selectedIDs.remove(ride.id) }
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: selectedIDs.contains(ride.id) ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(MotoTheme.accent).font(.title2)
+                        historyLabel(ride)
+                        Spacer(minLength: 0)
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain).disabled(busy)
+                    .accessibilityAddTraits(selectedIDs.contains(ride.id) ? .isSelected : [])
+            } else {
+                NavigationLink { RideDetailView(rides: rides, ride: ride) } label: { historyLabel(ride) }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button(role: .destructive) { pendingDelete = ride; showingDelete = true }
+                            label: { Label("Удалить", systemImage: "trash") }.disabled(busy)
+                    }
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                        Button { toggleFavorite(ride) }
+                            label: { Label(ride.isFavorite ? "Убрать" : "Закрепить", systemImage: ride.isFavorite ? "star.slash" : "star.fill") }
+                            .tint(.orange).disabled(busy)
+                    }
+            }
+        }.listRowBackground(MotoTheme.panel)
+    }
+
+    private func historyLabel(_ ride: RideSummary) -> some View {
             HStack(alignment: .top, spacing: 9) {
                 if ride.isFavorite { Image(systemName: "star.fill").foregroundStyle(.orange).accessibilityLabel("Избранная поездка") }
                 VStack(alignment: .leading, spacing: 6) {
@@ -263,17 +320,6 @@ struct RideHistoryView: View {
                         .font(MotoTheme.font(.subheadline)).foregroundStyle(MotoTheme.secondary)
                 }
             }.padding(.vertical, 5)
-        }
-        .listRowBackground(MotoTheme.panel)
-        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-            Button(role: .destructive) { pendingDelete = ride; showingDelete = true }
-                label: { Label("Удалить", systemImage: "trash") }.disabled(busy)
-        }
-        .swipeActions(edge: .leading, allowsFullSwipe: true) {
-            Button { toggleFavorite(ride) }
-                label: { Label(ride.isFavorite ? "Убрать" : "Закрепить", systemImage: ride.isFavorite ? "star.slash" : "star.fill") }
-                .tint(.orange).disabled(busy)
-        }
     }
 
     private func toggleFavorite(_ ride: RideSummary) {
@@ -464,7 +510,10 @@ struct RideDetailView: View {
         .background(MotoTheme.backdrop)
         .navigationTitle("Поездка")
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Button { rides.export(ride) } label: { Image(systemName: "square.and.arrow.up") }
+                    .disabled(rides.changingHistory || rides.exporting || rides.finishingRide)
+                    .accessibilityLabel("Поделиться поездкой")
                 Button("Изменить") { showingEditor = true }.font(MotoTheme.font(.body))
                     .disabled(rides.changingHistory || rides.exporting || rides.active?.id == ride.id)
             }

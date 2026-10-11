@@ -439,6 +439,7 @@ final class SimulatorRideLifecycleAudit {
             // between those events. Neither the old Finish nor the new trip may
             // be lost, and neither may inherit the other's recording identity.
             let recoverySeed = try await seedUnfinishedRide()
+            try await verifyBatchExport([firstSaved, secondSaved], active: recoverySeed)
             let recovering = RideRecorder()
             retainedRecorders.append(recovering)
             try require(recovering.restoringRoute && recovering.active?.id == recoverySeed.id,
@@ -934,6 +935,86 @@ final class SimulatorRideLifecycleAudit {
             && kinds["capture_end"] == 1 && kinds["finished"] == 1
             && kinds["motorcycle"] == summary.telemetryCount,
                     "actual_capture_export_matches_completed_journal")
+    }
+
+    private func verifyBatchExport(_ completedRides: [RideSummary], active: RideSummary) async throws {
+        let archive = try RideArchive()
+        let directory = try rideDirectory()
+        let allIDs = completedRides.map(\.id) + [active.id]
+        let originals = try allIDs.map { id in
+            try Data(contentsOf: directory.appendingPathComponent(id.uuidString + ".jsonl"))
+        }
+        let files: [URL] = try await withCheckedThrowingContinuation { continuation in
+            archive.exportCompleted(completedRides.map(\.id), activeID: active.id) {
+                continuation.resume(with: $0)
+            }
+        }
+        guard let file = files.first else { throw AuditFailure(message: "batch export returned no ZIP") }
+        let data = try Data(contentsOf: file)
+        let names = try zipEntryNames(data)
+        let expected = Set(completedRides.map { "MotoLink-\($0.id.uuidString).jsonl" })
+        let captures = names.filter { $0.hasSuffix(".jsonl") }.map { URL(fileURLWithPath: $0).lastPathComponent }
+        try require(files.count == 1 && file.pathExtension == "zip"
+            && data.starts(with: [0x50, 0x4B, 0x03, 0x04])
+            && captures.count == 2 && Set(captures) == expected
+            && !names.contains { $0.contains(active.id.uuidString) },
+                    "actual_batch_archive_contains_only_selected_completed_rides")
+
+        let rejected: Result<[URL], Error> = await withCheckedContinuation { continuation in
+            archive.exportCompleted(allIDs, activeID: active.id) { continuation.resume(returning: $0) }
+        }
+        let activeWasRejected: Bool
+        switch rejected {
+        case .failure(let error):
+            if case .activeRide? = error as? RideArchiveFileError { activeWasRejected = true }
+            else { activeWasRejected = false }
+        case .success(let unexpected):
+            MotoLinkExportCleanup.removeCompletedExports(unexpected)
+            activeWasRejected = false
+        }
+        let unchanged = try allIDs.enumerated().allSatisfy { index, id in
+            try Data(contentsOf: directory.appendingPathComponent(id.uuidString + ".jsonl")) == originals[index]
+        }
+        try require(activeWasRejected && unchanged,
+                    "actual_batch_archive_rejects_active_ride_without_mutation")
+        MotoLinkExportCleanup.removeCompletedExports(files)
+        try require(!FileManager.default.fileExists(atPath: file.path)
+            && allIDs.allSatisfy { FileManager.default.fileExists(atPath:
+                directory.appendingPathComponent($0.uuidString + ".jsonl").path) },
+                    "actual_batch_archive_share_cleanup_removes_copy_only")
+    }
+
+    /// Read only ZIP's central directory. The core test separately decompresses
+    /// and validates bytes/CRC; this proves real iOS archive callbacks select
+    /// exactly the requested rides without adding a compression dependency.
+    private func zipEntryNames(_ data: Data) throws -> [String] {
+        func uint(_ offset: Int, _ count: Int) throws -> Int {
+            guard offset >= 0, offset + count <= data.count else {
+                throw AuditFailure(message: "truncated batch ZIP")
+            }
+            return (0..<count).reduce(0) { $0 | Int(data[offset + $1]) << ($1 * 8) }
+        }
+        guard data.count >= 22,
+              let end = stride(from: data.count - 22, through: max(0, data.count - 65_557), by: -1)
+                .first(where: { data[$0..<$0 + 4].elementsEqual([0x50, 0x4B, 0x05, 0x06]) }) else {
+            throw AuditFailure(message: "batch ZIP lacks end directory")
+        }
+        let count = try uint(end + 10, 2)
+        var cursor = try uint(end + 16, 4)
+        var names: [String] = []
+        for _ in 0..<count {
+            guard try uint(cursor, 4) == 0x02014B50 else { throw AuditFailure(message: "invalid ZIP entry") }
+            let length = try uint(cursor + 28, 2)
+            let extra = try uint(cursor + 30, 2)
+            let comment = try uint(cursor + 32, 2)
+            let start = cursor + 46
+            guard start + length + extra + comment <= data.count else {
+                throw AuditFailure(message: "truncated ZIP entry name")
+            }
+            names.append(String(decoding: data[start..<start + length], as: UTF8.self))
+            cursor = start + length + extra + comment
+        }
+        return names
     }
 
     private func waitUntil(_ predicate: () -> Bool) async throws {

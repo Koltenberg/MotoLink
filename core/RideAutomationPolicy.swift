@@ -39,13 +39,57 @@ enum AutomaticRideSettings {
     }
 }
 
-/// Turning off future reconnection must not tear down live telemetry or revoke
-/// a separate, explicit Connect action which is still waiting for the bike.
+/// A manual Connect owns a session until explicit cancellation. The saved
+/// marker may adopt only an actual CoreBluetooth restoration; loading it alone
+/// must never start a connection when automatic connection is turned off.
+struct BLEManualSessionIntent {
+    static let restorationKey = "MotoLink.manualBLESessionPeripheral"
+    private(set) var peripheralID: UUID?
+    private var restorationCandidate: UUID?
+
+    init(defaults: UserDefaults) {
+        restorationCandidate = defaults.string(forKey: Self.restorationKey).flatMap(UUID.init(uuidString:))
+    }
+
+    func permitsRecovery(for identifier: UUID?) -> Bool {
+        guard let identifier else { return false }
+        return peripheralID == identifier
+    }
+
+    func mayRestore(_ identifier: UUID) -> Bool { restorationCandidate == identifier }
+
+    mutating func request(_ identifier: UUID, defaults: UserDefaults) {
+        peripheralID = identifier
+        restorationCandidate = identifier
+        defaults.set(identifier.uuidString, forKey: Self.restorationKey)
+    }
+
+    @discardableResult
+    mutating func restore(_ identifier: UUID) -> Bool {
+        guard mayRestore(identifier) else { return false }
+        peripheralID = identifier
+        return true
+    }
+
+    /// willRestoreState precedes the powered-on reconciliation. Without a
+    /// restored request, discard the old marker rather than inventing a session.
+    mutating func finishRestoration(defaults: UserDefaults) {
+        restorationCandidate = nil
+        if peripheralID == nil { defaults.removeObject(forKey: Self.restorationKey) }
+    }
+
+    mutating func cancel(defaults: UserDefaults) {
+        peripheralID = nil
+        restorationCandidate = nil
+        defaults.removeObject(forKey: Self.restorationKey)
+    }
+}
+
+/// Automatic connection starts future sessions. An explicit manual session
+/// independently permits repairing its interrupted link until the rider stops it.
 enum AutomaticConnectionPreferencePolicy {
-    static func queuedRequestIsManual(existingManualRequest: Bool, newRequestIsManual: Bool) -> Bool {
-        // Enabling automation while an explicit Connect waits for a cancel ACK
-        // cannot demote that separate user intent into an automatic attempt.
-        existingManualRequest || newRequestIsManual
+    static func permitsRecovery(enabled: Bool, manualSession: Bool, paused: Bool) -> Bool {
+        !paused && (enabled || manualSession)
     }
 
     static func shouldCancelPendingOnDisable(isConnected: Bool, manuallyRequested: Bool) -> Bool {
@@ -53,14 +97,17 @@ enum AutomaticConnectionPreferencePolicy {
     }
 
     static func shouldAdoptRestoredPeripheral(enabled: Bool, isSaved: Bool,
-                                              paused: Bool, isConnected: Bool) -> Bool {
-        isSaved && !paused && (enabled || isConnected)
+                                              paused: Bool, isConnected: Bool,
+                                              manualSession: Bool = false) -> Bool {
+        isSaved && !paused && (enabled || manualSession || isConnected)
     }
 
-    static func mayPreserveNativeReconnect(enabled: Bool, isConnected: Bool) -> Bool {
+    static func mayPreserveNativeReconnect(enabled: Bool, isConnected: Bool,
+                                           manualSession: Bool = false) -> Bool {
         // A delayed disconnect may observe a link which is already connected.
-        // Preserve that real link; OFF forbids an outstanding future attempt.
-        enabled || isConnected
+        // Preserve that real link. OFF forbids future automatic sessions, not
+        // continuation of a session explicitly requested by the rider.
+        enabled || manualSession || isConnected
     }
 }
 

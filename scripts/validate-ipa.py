@@ -85,11 +85,38 @@ def validate(path):
         require(not any("/_CodeSignature/" in n for n in names),
                 "Unsigned build unexpectedly contains a signing resource manifest")
         result = ios_arm64_executable(archive.read(root + executable))
+        extensions = []
+        extension_roots = {n[:n.index(".appex/") + len(".appex/")] for n in names
+                           if n.startswith(root + "PlugIns/") and ".appex/" in n}
+        for extension_root in sorted(extension_roots):
+            require(extension_root + "Info.plist" in names, "Extension Info.plist is missing")
+            extension = plistlib.loads(archive.read(extension_root + "Info.plist"))
+            require(extension.get("CFBundlePackageType") == "XPC!", "Invalid extension package type")
+            identifier = extension.get("CFBundleIdentifier", "")
+            require(isinstance(identifier, str) and identifier.startswith(info["CFBundleIdentifier"] + "."),
+                    "Extension identifier must belong to the app")
+            require(extension.get("CFBundleShortVersionString") == info.get("CFBundleShortVersionString")
+                    and extension.get("CFBundleVersion") == info.get("CFBundleVersion"),
+                    "Extension version/build must match the app")
+            require(extension.get("CFBundleSupportedPlatforms") == ["iPhoneOS"], "Extension is not physical iPhoneOS")
+            name = extension.get("CFBundleExecutable", "")
+            require(isinstance(name, str) and bool(name) and "/" not in name and "\\" not in name
+                    and name not in (".", "..") and extension_root + name in names,
+                    "Extension executable is missing or invalid")
+            ios_arm64_executable(archive.read(extension_root + name))
+            point = extension.get("NSExtension", {}).get("NSExtensionPointIdentifier")
+            require(point == "com.apple.widgetkit-extension", "Unsupported extension point")
+            extensions.append({"bundleIdentifier": identifier, "extensionPoint": point,
+                               "version": extension.get("CFBundleShortVersionString"),
+                               "build": extension.get("CFBundleVersion")})
+        if info.get("NSSupportsLiveActivities"):
+            require(len(extensions) == 1, "Live Activity widget extension was not embedded")
         result.update({
             "format": "motolink-unsigned-ipa-validation-v1", "ipa": path.name,
             "bundleIdentifier": info["CFBundleIdentifier"], "executable": executable,
             "version": info.get("CFBundleShortVersionString"), "build": info.get("CFBundleVersion"),
             "minimumOS": info.get("MinimumOSVersion"), "backgroundModes": modes,
+            "extensions": extensions,
             "runtimeTested": False, "bluetoothTested": False,
             "note": "Package structure validated; personal signing and physical-device tests remain required."
         })

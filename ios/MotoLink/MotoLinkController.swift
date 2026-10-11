@@ -9,6 +9,7 @@ final class MotoLinkController: ObservableObject {
     let bluetooth = MotorcycleBluetooth()
     let companion = CompanionStore()
     let mileage = MileageTracker()
+    private let liveActivity = RideLiveActivityManager()
     private lazy var connectionContext = ConnectionContextMonitor { [weak self] in self?.rides.recordConnectionContext($0) }
     private lazy var networkContext = NetworkPathContextMonitor { [weak self] in self?.rides.recordConnectionContext($0) }
     private var lastMonitoredRideID: UUID?
@@ -39,6 +40,7 @@ final class MotoLinkController: ObservableObject {
         bluetooth.onMeasurements = { [weak self] values in
             self?.mileage.recordMeasurements(values)
             self?.rides.recordMeasurements(values)
+            self?.refreshLockScreenCard()
         }
         rides.onAcceptedGPSSpeed = { [weak self] speed, date, receivedAt in
             self?.mileage.recordGPSSpeed(speed, at: date, receivedAt: receivedAt)
@@ -68,6 +70,8 @@ final class MotoLinkController: ObservableObject {
             self?.rides.bluetoothChanged(connected)
             self?.connectionContext.snapshot(reason: connected ? "bike_connected" : "bike_disconnected")
             if !connected { self?.rides.recordGPSCallbackSummary(reason: "bike_disconnected") }
+            // @Published emits before the Bluetooth property changes.
+            DispatchQueue.main.async { [weak self] in self?.refreshLockScreenCard(force: true) }
         }.store(in: &subscriptions)
         rides.$activeRideID.removeDuplicates().receive(on: DispatchQueue.main).sink { [weak self] id in
             guard let self, self.rides.active?.id == id else { return }
@@ -89,10 +93,18 @@ final class MotoLinkController: ObservableObject {
                 let selected = self.rides.active != nil && !self.rides.finishRequested
                 self.mileage.detailedRecordingChanged(selected,
                     suppliesGPS: selected && !self.rides.restoringRoute)
+                self.refreshLockScreenCard(force: true)
+            }.store(in: &subscriptions)
+        NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.refreshLockScreenCard(force: true) }.store(in: &subscriptions)
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: DispatchQueue.main).sink { [weak self] _ in
+                self?.refreshLockScreenCard()
             }.store(in: &subscriptions)
         Timer.publish(every: 15, on: .main, in: .common).autoconnect().sink { [weak self] _ in
             guard let self else { return }
             self.rides.evaluateAutomaticPause()
+            self.refreshLockScreenCard()
             let recording = self.rides.active != nil
             guard recording || self.bluetooth.connected || self.bluetooth.connecting || self.bluetooth.ready else { return }
             // BLE observation and the single known stream rearm also work when
@@ -103,6 +115,20 @@ final class MotoLinkController: ObservableObject {
             self.rides.recordPhoneHealth()
             self.bluetooth.refreshSlowMeasurements()
         }.store(in: &subscriptions)
+    }
+
+    func refreshLockScreenCard(force: Bool = false) {
+        liveActivity.refresh(force: force) { [self] in
+            let now = Date()
+            let ride = rides.finishRequested ? nil : rides.active
+            let speed = bluetooth.measurements.first { $0.id == "wheel_speed" && $0.unit == "км/ч" }
+            return RideLiveActivityState.snapshot(name: companion.data.bikeName,
+                connected: bluetooth.connected, lastStreamAt: bluetooth.lastStreamAt,
+                recording: ride != nil, paused: rides.recordingPaused,
+                elapsed: ride?.recordingSeconds(at: now) ?? 0,
+                distance: ride?.distanceMeters ?? 0, speed: speed?.value,
+                speedAt: speed?.timestamp, now: now)
+        }
     }
 }
 

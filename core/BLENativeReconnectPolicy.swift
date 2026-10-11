@@ -7,15 +7,6 @@ struct BLENativeReconnectPolicy {
         case ignore, waitForSystem, cancelConnection, prepareConnected, applicationFallback
     }
 
-    /// Auto-connect controls future application requests, not a link iOS has
-    /// already established. Losing that link while the bike is moving may be
-    /// irreversible until the ignition is restarted.
-    static func shouldAdoptRestoredPeripheral(isSaved: Bool, paused: Bool,
-                                              autoReconnect: Bool, isConnected: Bool,
-                                              isConnecting: Bool) -> Bool {
-        isSaved && !paused && (autoReconnect || isConnected || isConnecting)
-    }
-
     static func shouldPreserveNativeConnection(wanted: Bool, powered: Bool,
                                                paused: Bool, pairingFailure: Bool,
                                                transportRestartPending: Bool) -> Bool {
